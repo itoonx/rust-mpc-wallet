@@ -17,8 +17,6 @@ key refresh — so the codebase is no longer blocked on fundamental correctness 
 |------|-------|--------|-------------|----------------|------------|--------|
 | T-01 | R1 | `agent/r1-zeroize` | ✓ | pending | pending | ✗ |
 | T-02 | R1 | `agent/r1-zeroize` | ✓ | pending | pending | ✗ |
-| T-03 | R1 | `agent/r1-zeroize` | ✓ | pending | pending | ✗ |
-| T-04 | R1 | `agent/r1-zeroize` | ✓ | blocked (needs T-05) | pending | ✗ |
 | T-05 | R0 | `agent/r0-interface` | ✓ | pending | pending | ✗ |
 | T-06 | R3d | `agent/r3d-sui-followup` | ✓ | pending | pending | ✗ |
 | T-07 | R3c | `agent/r3c-sol` | ✓ | pending | pending | ✗ |
@@ -27,185 +25,152 @@ key refresh — so the codebase is no longer blocked on fundamental correctness 
 
 ## Task Specs
 
-### Task Spec: T-01 — Replace GG20 simulation with real distributed ECDSA
+### Task Spec: T-01
 - **Agent:** R1
 - **Branch:** `agent/r1-zeroize`
 - **Epic:** Epic J (Production Hardening)
+- **Title:** Gate GG20 simulation behind `gg20-simulation` feature flag
 - **Files owned (agent may only touch these):**
   - `crates/mpc-wallet-core/src/protocol/gg20.rs`
-  - `crates/mpc-wallet-core/tests/protocol_integration.rs`
+  - `crates/mpc-wallet-core/Cargo.toml`
 - **Acceptance Criteria:**
-  - [ ] `gg20.rs::sign()` does NOT call `lagrange_interpolate` or any equivalent full-secret reconstruction
-  - [ ] Integration test: 2-of-3 signing protocol produces a signature that verifies against the group public key using `k256::ecdsa::VerifyingKey::verify`
-  - [ ] Old simulation gated behind `#[cfg(feature = "gg20-simulation")]`
-  - [ ] `cargo test -p mpc-wallet-core` passes
-- **Dependencies:** None (can start immediately)
-- **Complexity:** XL
+  - [ ] `Cargo.toml` declares `[features] gg20-simulation = []` and the feature is **off by default**
+  - [ ] All code in `gg20.rs` that calls `lagrange_interpolate` (line 232) is wrapped in `#[cfg(feature = "gg20-simulation")]`
+  - [ ] A `compile_error!` or prominent doc comment at the top of the `gg20-simulation`-gated block warns: `"SECURITY: SIMULATION ONLY — reconstructs full private key — NOT FOR PRODUCTION"`
+  - [ ] When the feature is **disabled** (default), `cargo test -p mpc-wallet-core` still passes (the simulation code is absent; tests that test Shamir/Lagrange must also be gated or updated to be feature-gated)
+  - [ ] When the feature is **enabled** (`cargo test -p mpc-wallet-core --features gg20-simulation`), all existing tests still pass
+  - [ ] `cargo check -p mpc-wallet-core` passes without the feature (default)
+- **Dependencies:** None — can start immediately
+- **Complexity:** S
 
 #### Security Checklist for R6
-- [ ] Private key scalar is NEVER reconstructed during signing on any party — inspect every code path in `sign()`
-- [ ] No call to `lagrange_interpolate` or equivalent secret-aggregation in production (non-simulation) path
-- [ ] Any ephemeral nonce/scalar (`k_i`, `s_i`) is wrapped in `Zeroizing<T>` or explicitly zeroized before drop
-- [ ] `#[cfg(feature = "gg20-simulation")]` gate is present and the simulation path cannot be activated in production builds
-- [ ] No new `todo!()` macros in the signing or keygen critical path
-- [ ] `cargo audit` clean — no new advisories introduced by this branch
-- [ ] R6 code inspection confirms no reconstruction path exists (SEC-001 resolved)
+- [ ] Feature flag is **off by default** — verify in `Cargo.toml` that `gg20-simulation` is NOT listed under `default = [...]`
+- [ ] The `lagrange_interpolate` function and its call site in `sign()` are entirely absent from the non-simulation build — confirm via `cargo check -p mpc-wallet-core` (no feature) that `lagrange_interpolate` does not appear
+- [ ] The `#[cfg(feature = "gg20-simulation")]` gate wraps the entire reconstruction path — no partial gating that leaves the scalar accessible
+- [ ] The simulation warning comment is prominent (top of gated block) and accurately describes the risk (full key reconstruction)
+- [ ] `cargo audit` clean — no new advisories; no new dependencies added
 
 ---
 
-### Task Spec: T-02 — Complete zeroize coverage for all protocol impls
-- **Agent:** R1
-- **Branch:** `agent/r1-zeroize`
-- **Epic:** Epic J (Production Hardening)
-- **Files owned (agent may only touch these):**
-  - `crates/mpc-wallet-core/src/protocol/gg20.rs`
-  - `crates/mpc-wallet-core/src/protocol/frost_ed25519.rs`
-  - `crates/mpc-wallet-core/src/protocol/frost_secp256k1.rs`
-- **Acceptance Criteria:**
-  - [ ] `Gg20ShareData.y` uses `zeroize::Zeroizing<Vec<u8>>`
-  - [ ] FROST Ed25519 and secp256k1 share structs use `ZeroizeOnDrop` on all secret fields
-  - [ ] Any ephemeral nonce / scalar created during `sign()` is wrapped in `Zeroizing`
-  - [ ] `cargo test -p mpc-wallet-core` passes
-- **Dependencies:** Can overlap with T-01
-- **Complexity:** M
-
-#### Security Checklist for R6
-- [ ] `Gg20ShareData` — all fields containing secret material wrapped in `Zeroizing<T>` or `#[zeroize(drop)]`
-- [ ] `FrostEd25519ShareData` — same check
-- [ ] `FrostSecp256k1ShareData` — same check
-- [ ] No `impl Clone` on share structs that would copy secret material into unprotected memory
-- [ ] Ephemeral signing scalars (nonces, partial `s` values) do not outlive their use
-- [ ] `cargo audit` clean — no new advisories
-- [ ] Addresses SEC-008 (GG20 secret scalar not zeroized after use)
-
----
-
-### Task Spec: T-03 — Proactive key refresh implementation
+### Task Spec: T-02
 - **Agent:** R1
 - **Branch:** `agent/r1-zeroize`
 - **Epic:** Epic H (Key Lifecycle)
-- **Files owned (agent may only touch these):**
-  - `crates/mpc-wallet-core/src/protocol/gg20.rs`
-  - `crates/mpc-wallet-core/src/protocol/frost_ed25519.rs`
-  - `crates/mpc-wallet-core/src/protocol/frost_secp256k1.rs`
-  - `crates/mpc-wallet-core/tests/protocol_integration.rs`
-- **Acceptance Criteria:**
-  - [ ] `MpcProtocol::refresh(key_share, transport) -> Result<KeyShare>` defined (or standalone module function if trait change delayed)
-  - [ ] After refresh, all new shares reconstruct the same group public key
-  - [ ] Old shares + new shares cannot be mixed to reconstruct the key
-  - [ ] Integration test with 2-of-3 parties passes
-  - [ ] `cargo test -p mpc-wallet-core` passes
-- **Dependencies:** T-05 ideally (R0 must add `refresh` to `MpcProtocol` trait); R1 may start as standalone function if R0 is delayed
-- **Complexity:** L
-
-#### Security Checklist for R6
-- [ ] Resharing polynomial constant term is zero (additive randomization, not re-keying)
-- [ ] Group public key is unchanged after refresh — verified by test
-- [ ] Old + new shares cannot be combined — verified by test (reconstruct should fail or produce wrong result)
-- [ ] All ephemeral re-sharing scalars are zeroized after use
-- [ ] No logging of intermediate share values
-- [ ] `cargo audit` clean
-
----
-
-### Task Spec: T-04 — Add `freeze` / `unfreeze` implementation to `EncryptedFileStore`
-- **Agent:** R1
-- **Branch:** `agent/r1-zeroize`
-- **Epic:** Epic H (Key Lifecycle)
+- **Title:** Add `EncryptedFileStore::touch(group_id)` for key refresh metadata tracking
 - **Files owned (agent may only touch these):**
   - `crates/mpc-wallet-core/src/key_store/encrypted.rs`
 - **Acceptance Criteria:**
-  - [ ] `EncryptedFileStore::freeze(group_id)` writes `frozen: true` to the metadata JSON
-  - [ ] `EncryptedFileStore::load(group_id, ...)` returns `CoreError::KeyFrozen` if frozen
-  - [ ] `EncryptedFileStore::unfreeze(group_id)` clears the flag
+  - [ ] `EncryptedFileStore` has a new concrete method `pub async fn touch(&self, group_id: &KeyGroupId) -> Result<(), CoreError>`
+  - [ ] `touch()` reads the existing `metadata.json` for the group, updates a `last_refreshed` field (unix timestamp as `u64`, obtained via `std::time::SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()`), and writes it back atomically (overwrite)
+  - [ ] `KeyMetadata` in `key_store/types.rs` gains a new field `last_refreshed: Option<u64>` with `#[serde(default)]` so existing JSON files (without the field) continue to deserialize correctly — **NOTE: `types.rs` is owned by R0; R1 must NOT modify it. Instead R1 should write the `last_refreshed` value as a standalone JSON key alongside the `KeyMetadata` JSON, by reading the raw JSON as `serde_json::Value`, inserting the key, and writing back. This avoids touching R0-owned types.**
+  - [ ] Alternative (preferred since it avoids R0 files): `touch()` writes a separate file `touch.json` containing `{"last_refreshed": <unix_u64>}` in the group directory — keeps all R0 types untouched
+  - [ ] A unit test `test_touch_updates_timestamp` verifies: create a group (via `save()`), call `touch()`, read `touch.json`, verify `last_refreshed` is a non-zero u64 and is >= the `created_at` timestamp
+  - [ ] No key material is read or decrypted during `touch()` — only metadata files are accessed
   - [ ] `cargo test -p mpc-wallet-core` passes
-- **Dependencies:** T-05 (R0 must add `freeze`/`unfreeze` to `KeyStore` trait — **BLOCKING**)
+- **Dependencies:** None — `encrypted.rs` is R1's file; no trait change required
 - **Complexity:** S
 
 #### Security Checklist for R6
-- [ ] `frozen` flag stored durably (on disk) — not only in-memory
-- [ ] `load()` checks frozen flag BEFORE decrypting key material
-- [ ] No timing side-channel between frozen and non-frozen branches in `load()`
-- [ ] `unfreeze()` requires the same authentication as other `KeyStore` operations
-- [ ] `cargo audit` clean
+- [ ] `touch()` does **not** call `decrypt()` or access the `.enc` share file — verified by code inspection
+- [ ] No key material (share bytes, password, derived key) is present in any variable created during `touch()`
+- [ ] The timestamp written is obtained from `std::time::SystemTime` (not user-supplied input) — no injection risk
+- [ ] `touch.json` does not contain any sensitive fields — only the `last_refreshed` timestamp
+- [ ] `cargo audit` clean — no new dependencies added
 
 ---
 
-### Task Spec: T-05 — Add `freeze` / `unfreeze` to `KeyStore` trait
+### Task Spec: T-05
 - **Agent:** R0
 - **Branch:** `agent/r0-interface`
-- **Epic:** Epic H (Key Lifecycle) / Story 0-1
+- **Epic:** Epic H (Key Lifecycle)
+- **Title:** Add `freeze` / `unfreeze` to `KeyStore` trait + `CoreError::KeyFrozen`
 - **Files owned (agent may only touch these):**
   - `crates/mpc-wallet-core/src/key_store/mod.rs`
   - `crates/mpc-wallet-core/src/error.rs`
-  - `Cargo.toml` (workspace — only if bcs/solana-program approval needed)
+  - `crates/mpc-wallet-core/src/key_store/encrypted.rs`
 - **Acceptance Criteria:**
-  - [ ] `KeyStore` trait has `async fn freeze(&self, group_id: &KeyGroupId) -> Result<(), CoreError>`
-  - [ ] `KeyStore` trait has `async fn unfreeze(&self, group_id: &KeyGroupId) -> Result<(), CoreError>`
-  - [ ] `CoreError::KeyFrozen` variant exists in `error.rs`
-  - [ ] `cargo check --workspace` passes
-- **Dependencies:** None (highest-priority interface change — start Day 1)
+  - [ ] `KeyStore` trait in `key_store/mod.rs` has two new async methods:
+    ```rust
+    async fn freeze(&self, group_id: &KeyGroupId) -> Result<(), CoreError>;
+    async fn unfreeze(&self, group_id: &KeyGroupId) -> Result<(), CoreError>;
+    ```
+  - [ ] `CoreError::KeyFrozen(String)` variant added to `error.rs` with `#[error("key frozen: {0}")]`
+  - [ ] `EncryptedFileStore` in `key_store/encrypted.rs` gets stub implementations: both `freeze` and `unfreeze` return `Ok(())` (no-op stubs; full implementation is deferred to a later sprint)
+  - [ ] `cargo check --workspace` passes — all crates compile
+  - [ ] `cargo test -p mpc-wallet-core` passes — no existing tests broken
+- **Dependencies:** None — highest-priority interface change, must complete Day 1–2 to unblock dependent tasks
 - **Complexity:** S
 
 #### Security Checklist for R6
-- [ ] Trait method signatures use `&self` (not `&mut self`) — consistent with existing trait API
-- [ ] `CoreError::KeyFrozen` is non-exhaustive-safe (no breaking match patterns)
-- [ ] No implementation logic in the trait definition (only signatures + default impl if needed)
-- [ ] `cargo audit` clean
+- [ ] Trait method signatures use `&self` (not `&mut self`) — consistent with the existing `KeyStore` API (`save`, `load`, `list`, `delete` all use `&self`)
+- [ ] `CoreError::KeyFrozen(String)` error message does NOT include key share bytes, derived keys, or password material — only the `group_id` string or a safe descriptive message
+- [ ] No implementation logic beyond `Ok(())` stubs in the trait-level default impls (if any) — logic belongs in `EncryptedFileStore`, not in trait defaults
+- [ ] The `KeyFrozen` variant is additive — no existing `CoreError` variants are renamed, removed, or reordered (non-breaking change)
+- [ ] `cargo audit` clean — no new dependencies added
 
 ---
 
-### Task Spec: T-06 — Full BCS transaction serialization for Sui
+### Task Spec: T-06
 - **Agent:** R3d
 - **Branch:** `agent/r3d-sui-followup`
-- **Epic:** Epic J (Production Hardening) / Story J2
+- **Epic:** Epic J (Production Hardening)
+- **Title:** Sui — add `build_transaction_with_sender` helper and sender address validation
 - **Files owned (agent may only touch these):**
   - `crates/mpc-wallet-chains/src/sui/tx.rs`
   - `crates/mpc-wallet-chains/src/sui/mod.rs`
-  - `crates/mpc-wallet-chains/tests/` (Sui test files)
 - **Acceptance Criteria:**
-  - [ ] `build_sui_transaction` produces BCS-encoded `TransactionData` bytes (not JSON)
-  - [ ] `finalize_sui_transaction` produces a 97-byte Sui signature: `[0x00] || sig(64) || pubkey(32)`
-  - [ ] Sign payload is `Blake2b-256(SUI_INTENT_PREFIX || bcs_tx_bytes)` — hashing unchanged, only input format changes
-  - [ ] Unit test: build → sign → verify using `ed25519-dalek` verifier on the sign_payload hash
-  - [ ] Zero-byte public key bug (`[0u8; 32]`) fixed — actual Ed25519 pubkey from `GroupPublicKey` used
+  - [ ] `SuiProvider` gains a new `pub fn build_transaction_with_sender<'a>(&'a self, params: TransactionParams, sender: &str) -> impl Future<Output = Result<UnsignedTransaction, CoreError>> + 'a` method in `mod.rs` that takes the sender address explicitly (bypassing `extra["sender"]` lookup)
+  - [ ] The `sender` parameter is validated: must start with `"0x"` and the hex portion (after `0x`) must decode to exactly 32 bytes (64 hex chars). Return `CoreError::InvalidInput` if validation fails.
+  - [ ] The existing `build_transaction` (which reads `extra["sender"]`) continues to work unchanged — no regression
+  - [ ] A unit test `test_build_transaction_with_sender_valid` verifies a valid 0x-prefixed 32-byte hex sender succeeds and the resulting `sign_payload` is 32 bytes (Blake2b-256)
+  - [ ] A unit test `test_build_transaction_with_sender_rejects_invalid` verifies that a sender missing `"0x"` prefix returns `Err(CoreError::InvalidInput(...))`
+  - [ ] A unit test `test_build_transaction_with_sender_rejects_wrong_length` verifies that a sender with `"0x"` prefix but incorrect hex length (not 64 hex chars) returns `Err(CoreError::InvalidInput(...))`
   - [ ] `cargo test -p mpc-wallet-chains` passes
-- **Dependencies:** R0 must approve adding `bcs = "0.1"` to `[workspace.dependencies]` (R7 pre-approves)
-- **Complexity:** L
+- **Dependencies:** None — `sui/tx.rs` and `sui/mod.rs` are R3d's files; no R0-owned files touched
+- **Complexity:** S
 
 #### Security Checklist for R6
-- [ ] BCS struct field order matches the on-chain `TransactionData` spec exactly — verify against Sui docs
-- [ ] Intent prefix bytes are correct for the Sui transaction intent (`[0, 0, 0]` for transaction)
-- [ ] `finalize_sui_transaction` uses the actual `GroupPublicKey` Ed25519 bytes — no `[0u8; 32]` placeholder (fixes SEC-011)
-- [ ] Blake2b-256 hash input is `intent_prefix || bcs_tx_bytes` in that exact order
-- [ ] No secret material logged or returned in error messages
-- [ ] `cargo audit` clean — `bcs` crate has no known advisories
+- [ ] Sender address validation rejects: missing `0x` prefix, hex decode failure, decoded length ≠ 32 bytes — all three cases tested
+- [ ] Validation occurs **before** any transaction data is constructed — fail-fast, no partial state built with invalid sender
+- [ ] The `extra["sender"]` path in the existing `build_transaction` is unchanged — no regression in the existing API
+- [ ] No secret material (private key, share bytes) present in error messages or returned values
+- [ ] `cargo audit` clean — no new dependencies added
 
 ---
 
-### Task Spec: T-07 — Validate / harden Solana wire-format transaction
+### Task Spec: T-07
 - **Agent:** R3c
 - **Branch:** `agent/r3c-sol`
-- **Epic:** Epic J (Production Hardening) / Story J3
+- **Epic:** Epic J (Production Hardening)
+- **Title:** Solana — binary message round-trip validation test + fix `tx_hash` to full base58 signature
 - **Files owned (agent may only touch these):**
+  - `crates/mpc-wallet-chains/tests/chain_integration.rs`
   - `crates/mpc-wallet-chains/src/solana/tx.rs`
-  - `crates/mpc-wallet-chains/src/solana/mod.rs`
-  - `crates/mpc-wallet-chains/tests/` (Solana test files)
+- **Source change (tx.rs — one line fix):**
+  - [ ] Line 183: replace `let tx_hash = hex::encode(&signature[..8]);` with `let tx_hash = bs58::encode(signature).into_string();` — fixes SEC-010 (truncated tx hash)
+- **New tests to add in `chain_integration.rs`:**
+  - [ ] `test_solana_message_structure_num_required_sigs`: build a transaction, assert `sign_payload[0] == 1` (num_required_sigs header byte)
+  - [ ] `test_solana_message_structure_account_keys_offset`: build a transaction, assert that bytes at offset 4 (after header 3 bytes + compact-u16(3)=1 byte) match the `from` public key bytes (32 bytes starting at index 4)
+  - [ ] `test_solana_message_structure_three_accounts_present`: build a transaction, assert sign_payload length >= 3 (header) + 1 (compact-u16) + 96 (3×32 account keys) + 32 (blockhash) = 132 bytes minimum
+  - [ ] `test_solana_encode_compact_u16_boundary_values`: test the compact-u16 encoding for values 0, 1, 127, 128, 16383 — assert correct byte sequences (`[0]`, `[1]`, `[0x7f]`, `[0x80, 0x01]`, `[0xff, 0x7f]`)
+  - [ ] `test_solana_tx_hash_is_base58_full_signature`: build+finalize a transaction with a known 64-byte signature, assert `tx_hash` decodes from base58 to exactly 64 bytes matching the signature
+  - [ ] `test_solana_zero_lamports_transaction`: build a transaction with `value: "0"`, assert it succeeds (zero lamports is valid)
+  - [ ] `test_solana_same_from_to_address`: build a transaction where from == to (same 32-byte address), assert it succeeds (network-level restriction, not SDK-level)
 - **Acceptance Criteria:**
-  - [ ] Test that builds a Solana transfer transaction using the manual serializer, then deserializes using `solana-program`'s `Message::deserialize` and verifies field values match
-  - [ ] `encode_compact_u16` tested with values: 0, 1, 127, 128, 16383
-  - [ ] `finalize_solana_transaction` tested: output is 1 (compact-u16) + 64 (sig) + N (msg) bytes
-  - [ ] Transaction ID / `tx_hash` is base58-encoded signature (not first 8 bytes) — fixes SEC-010
+  - [ ] All 7 new tests pass
+  - [ ] `finalize_solana_transaction` `tx_hash` is now `bs58::encode(signature).into_string()` (full 64-byte signature base58-encoded)
+  - [ ] All pre-existing Solana tests in `chain_integration.rs` still pass
   - [ ] `cargo test -p mpc-wallet-chains` passes
-- **Dependencies:** R0 must approve adding `solana-program` as dev-dependency (R7 pre-approves as dev-only)
-- **Complexity:** M
+- **Dependencies:** None — `chain_integration.rs` and `solana/tx.rs` are in R3c's scope
+- **Complexity:** S
 
 #### Security Checklist for R6
-- [ ] `tx_hash` field in `SignedTransaction` is the base58-encoded full 64-byte signature (not truncated 8-byte hex) — resolves SEC-010
-- [ ] `from` address validated against signing public key before transaction construction — check for SEC-017 fix
-- [ ] Compact-u16 encoding is correct for all boundary values (0, 127, 128, 16383) — test coverage
-- [ ] No secret material (signing key bytes) present in `SignedTransaction` output struct
-- [ ] `cargo audit` clean — `solana-program` dev-dep has no new advisories affecting production builds
+- [ ] `tx_hash` in `SignedTransaction` is the **full** base58-encoded 64-byte signature — NOT the previous truncated 8-byte hex. Verify the fix resolves SEC-010: `hex::encode(&signature[..8])` must no longer appear anywhere in `tx.rs`
+- [ ] `encode_compact_u16` boundary test covers value 128 (two-byte encoding threshold) — verifies no off-by-one that could corrupt message structure
+- [ ] Zero-lamports test: verify no integer underflow or panic on `u64` value of 0
+- [ ] Same from/to test: verify no panic or assertion failure when sender == recipient (array aliasing non-issue in Rust, but must confirm no validation incorrectly rejects it)
+- [ ] No secret material present in `SignedTransaction` output — `tx_hash` is the public signature, `raw_tx` is the serialized transaction; no private key bytes
+- [ ] `cargo audit` clean — no new dependencies added (bs58 is already in workspace)
 
 ---
 
@@ -213,8 +178,7 @@ key refresh — so the codebase is no longer blocked on fundamental correctness 
 
 | Task | Blocker | Owner | Resolution |
 |------|---------|-------|------------|
-| T-04 | Needs `KeyStore::freeze` / `unfreeze` trait methods (T-05) | R0 | R0 must complete T-05 first. Target: Day 1–2 of sprint. |
-| T-03 | Ideally needs `MpcProtocol::refresh` in trait | R0 | R0 to add in parallel with T-05. R1 can start as standalone function if R0 is delayed. |
+| (none) | — | — | All 5 tasks are independent and can start in parallel. T-05 (R0) should be prioritized to unblock any future freeze/unfreeze implementation work. |
 
 ---
 
@@ -236,15 +200,29 @@ They are tracked here for completeness. **No R6 gate re-audit required** (merged
 
 ## Sprint Notes
 
-- **Priority order for R1:** T-01 (real GG20) > T-02 (zeroize) > T-03 (refresh) > T-04 (freeze impl).
-  T-01 is the most critical correctness fix in the entire codebase.
-- **R3d and R3c** can work in parallel — no shared files.
-- **R0** should complete T-05 in the first two days to unblock T-04.
+- **T-01 and T-02 both assigned to R1** on the same branch `agent/r1-zeroize`. R1 should do T-01 first (feature flag), then T-02 (touch method), then commit each separately per checkpoint protocol.
+- **T-05 (R0) has no blockers** and should be completed first — it unblocks any future freeze/unfreeze work and is the smallest task in the sprint.
+- **T-06 (R3d) and T-07 (R3c)** can work in parallel — no shared files.
 - **R6 gate:** R6 must issue APPROVED verdict for each task branch before it can merge to main.
-  T-01 R6 review is the highest-priority audit — must confirm SEC-001 is resolved.
-- **bcs crate addition:** R7 pre-approves. R0 to add to `Cargo.toml` as part of T-05 batch or
-  T-06 unblocking.
-- **No branch merges without R6 APPROVED** — this is enforced per the Sprint Gate Model in AGENTS.md.
+- **No branch merges without R6 APPROVED** — enforced per the Sprint Gate Model in AGENTS.md.
+- **No new crate dependencies** are required for any Sprint 1 task. `bs58` is already in the workspace (used in `solana/tx.rs`).
+
+---
+
+## Execution Order
+
+All 5 tasks are independent and can run in parallel. Recommended priority:
+
+```
+Day 1:  R0 → T-05 (small, unblocks future work)
+Day 1:  R1 → T-01 (feature flag — preparatory for Sprint 2 real GG20)
+Day 1:  R3d → T-06 (Sui sender validation helper)
+Day 1:  R3c → T-07 (Solana round-trip test + tx_hash fix)
+
+Day 2:  R1 → T-02 (touch method, after T-01 lands on same branch)
+
+Day 3+: R6 audits each branch as agents report complete
+```
 
 ---
 
