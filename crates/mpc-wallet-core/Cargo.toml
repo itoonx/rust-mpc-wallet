@@ -27,6 +27,7 @@ serde_json = { workspace = true }
 # Async
 tokio = { workspace = true }
 async-trait = { workspace = true }
+async-nats = { workspace = true }
 
 # Utilities
 hex = { workspace = true }
