@@ -247,6 +247,75 @@ async fn test_sui_rejects_wrong_key_type_in_build() {
     );
 }
 
+// ============================================================================
+// Solana transaction building / finalization tests (R3c fix verification)
+// ============================================================================
+
+#[tokio::test]
+async fn test_solana_sign_payload_is_binary_not_json() {
+    let provider = mpc_wallet_chains::solana::SolanaProvider::new();
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(), // system program as "to"
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({"from": "11111111111111111111111111111112"})),
+    };
+    let unsigned = provider.build_transaction(params).await.unwrap();
+    // sign_payload must NOT be valid UTF-8 JSON (it's binary message bytes)
+    // It must be at least 100 bytes (a minimal Solana message is ~100 bytes)
+    assert!(
+        unsigned.sign_payload.len() >= 100,
+        "sign_payload should be binary message bytes, got {} bytes",
+        unsigned.sign_payload.len()
+    );
+    // Must not start with '{' (would indicate it's still JSON)
+    assert_ne!(
+        unsigned.sign_payload[0],
+        b'{',
+        "sign_payload must be binary, not JSON"
+    );
+}
+
+#[tokio::test]
+async fn test_solana_finalize_produces_correct_size() {
+    let provider = mpc_wallet_chains::solana::SolanaProvider::new();
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(),
+        value: "500".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({"from": "11111111111111111111111111111112"})),
+    };
+    let unsigned = provider.build_transaction(params).await.unwrap();
+    let fake_sig = MpcSignature::EdDsa {
+        signature: [0u8; 64],
+    };
+    let signed = provider
+        .finalize_transaction(&unsigned, &fake_sig)
+        .unwrap();
+    // A signed Solana tx = 1 (compact-u16 for num_sigs) + 64 (sig) + message_len
+    // message_len for 3 accounts + 1 instruction = at least 100 bytes
+    // total should be at least 165 bytes
+    assert!(
+        signed.raw_tx.len() >= 165,
+        "signed tx too small: {} bytes",
+        signed.raw_tx.len()
+    );
+    // First byte must be 0x01 (compact-u16 encoding of 1 signature)
+    assert_eq!(
+        signed.raw_tx[0],
+        0x01,
+        "first byte must be 0x01 (1 signature)"
+    );
+    // Bytes 1..65 must be the signature
+    assert_eq!(
+        &signed.raw_tx[1..65],
+        &[0u8; 64],
+        "bytes 1..65 must be the signature"
+    );
+}
+
 /// Test 4: finalize_transaction rejects a non-EdDSA signature type.
 #[tokio::test]
 async fn test_sui_rejects_wrong_signature_type_in_finalize() {
