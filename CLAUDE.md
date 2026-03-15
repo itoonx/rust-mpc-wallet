@@ -25,6 +25,7 @@ docs/
   PRD.md              ← Product requirements
   EPICS.md            ← Epic A–J breakdown
   DECISIONS.md        ← DEC-001..N decision log
+LESSONS.md            ← Bugs found, root causes, fixes, key insights (READ BEFORE CODING)
 ```
 
 ---
@@ -142,10 +143,11 @@ Full decision log → `docs/DECISIONS.md`
 
 ```
 1. Read this file (CLAUDE.md) ✓ — you're doing it now
-2. Read docs/AGENTS.md        → find your role, owned files, instruction template
-3. Read docs/SPRINT.md        → find your assigned task + Security Checklist
-4. Read docs/SECURITY_FINDINGS.md → know what's open and what to avoid
-5. Do your task in YOUR worktree (see table above)
-6. Checkpoint commit after every cargo test pass
-7. Report complete → R6 will audit before merge
+2. Read LESSONS.md            → know what bugs/mistakes have already happened
+3. Read docs/AGENTS.md        → find your role, owned files, instruction template
+4. Read docs/SPRINT.md        → find your assigned task + Security Checklist
+5. Read docs/SECURITY_FINDINGS.md → know what's open and what to avoid
+6. Do your task in YOUR worktree (see table above)
+7. Checkpoint commit after every cargo test pass
+8. Report complete → R6 will audit before merge
 ```
