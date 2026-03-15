@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "MPC wallet core: protocols, key storage, and transport"
 
+[features]
+default = []
+gg20-simulation = []
+
 [dependencies]
 # MPC protocols
 frost-core = { workspace = true }
@@ -39,3 +43,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+tempfile = "3"

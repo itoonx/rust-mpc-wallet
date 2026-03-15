@@ -1,27 +1,61 @@
-use async_trait::async_trait;
-use k256::elliptic_curve::sec1::ToEncodedPoint;
-use k256::elliptic_curve::{Field, PrimeField};
-use k256::{ProjectivePoint, Scalar, SecretKey};
-use serde::{Deserialize, Serialize};
-use zeroize::ZeroizeOnDrop;
+//! # ⚠️  SECURITY WARNING — SIMULATION ONLY
+//!
+//! This GG20 implementation is a **trusted-dealer simulation**.
+//! During signing, every party reconstructs the full private key via Lagrange
+//! interpolation. This completely negates the MPC security guarantee.
+//!
+//! This code is gated behind the `gg20-simulation` feature flag and MUST NOT
+//! be enabled in production. It exists only to keep existing tests passing
+//! while Sprint 2 implements real multi-party ECDSA (SEC-001).
+//!
+//! Status: SEC-001 CRITICAL — scheduled for replacement in Sprint 2 (T-S2-01).
 
 use crate::error::CoreError;
-use crate::protocol::{GroupPublicKey, KeyShare, MpcProtocol, MpcSignature};
-use crate::transport::{ProtocolMessage, Transport};
+use crate::protocol::{KeyShare, MpcProtocol, MpcSignature};
 use crate::types::{CryptoScheme, PartyId, ThresholdConfig};
+use crate::transport::Transport;
+
+#[cfg(feature = "gg20-simulation")]
+use crate::protocol::GroupPublicKey;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIMULATION build (feature = "gg20-simulation")
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "gg20-simulation")]
+use async_trait::async_trait;
+#[cfg(feature = "gg20-simulation")]
+use k256::elliptic_curve::sec1::ToEncodedPoint;
+#[cfg(feature = "gg20-simulation")]
+use k256::elliptic_curve::{Field, PrimeField};
+#[cfg(feature = "gg20-simulation")]
+use k256::{ProjectivePoint, Scalar, SecretKey};
+#[cfg(feature = "gg20-simulation")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "gg20-simulation")]
+use zeroize::ZeroizeOnDrop;
+#[cfg(feature = "gg20-simulation")]
+use crate::transport::ProtocolMessage;
 
 /// Simulated GG20 threshold ECDSA protocol.
 ///
 /// Uses Shamir's secret sharing for keygen and Lagrange interpolation + k256 ECDSA
 /// for signing. Produces real, verifiable ECDSA signatures.
+///
+/// # ⚠️  SECURITY: SIMULATION ONLY — reconstructs full private key — NOT FOR PRODUCTION
+///
+/// Gated behind `gg20-simulation` feature. See module-level doc for details (SEC-001).
+#[cfg(feature = "gg20-simulation")]
 pub struct Gg20Protocol;
 
+#[cfg(feature = "gg20-simulation")]
 impl Gg20Protocol {
     pub fn new() -> Self {
         Self
     }
 }
 
+#[cfg(feature = "gg20-simulation")]
 impl Default for Gg20Protocol {
     fn default() -> Self {
         Self::new()
@@ -29,6 +63,7 @@ impl Default for Gg20Protocol {
 }
 
 /// Data stored per-party in KeyShare.share_data
+#[cfg(feature = "gg20-simulation")]
 #[derive(Serialize, Deserialize, ZeroizeOnDrop)]
 struct Gg20ShareData {
     /// This party's x-coordinate (1-indexed party number)
@@ -38,6 +73,7 @@ struct Gg20ShareData {
 }
 
 /// Evaluate polynomial at a point: f(x) = coefficients[0] + coefficients[1]*x + ...
+#[cfg(feature = "gg20-simulation")]
 fn poly_eval(coefficients: &[Scalar], x: &Scalar) -> Scalar {
     let mut result = Scalar::ZERO;
     let mut x_pow = Scalar::ONE;
@@ -49,6 +85,7 @@ fn poly_eval(coefficients: &[Scalar], x: &Scalar) -> Scalar {
 }
 
 /// Shamir secret sharing: split a secret into n shares with threshold t.
+#[cfg(feature = "gg20-simulation")]
 fn shamir_split(
     secret: &Scalar,
     threshold: u16,
@@ -70,6 +107,7 @@ fn shamir_split(
 }
 
 /// Lagrange interpolation at x=0 to reconstruct the secret.
+#[cfg(feature = "gg20-simulation")]
 fn lagrange_interpolate(shares: &[(u16, Scalar)]) -> Scalar {
     let mut result = Scalar::ZERO;
     for (i, &(x_i, ref y_i)) in shares.iter().enumerate() {
@@ -92,6 +130,7 @@ fn lagrange_interpolate(shares: &[(u16, Scalar)]) -> Scalar {
     result
 }
 
+#[cfg(feature = "gg20-simulation")]
 #[async_trait]
 impl MpcProtocol for Gg20Protocol {
     fn scheme(&self) -> CryptoScheme {
@@ -229,6 +268,7 @@ impl MpcProtocol for Gg20Protocol {
         }
 
         // Reconstruct the secret via Lagrange interpolation
+        // ⚠️  SECURITY: SIMULATION ONLY — this reconstructs the full private key
         let secret = lagrange_interpolate(&collected_shares);
 
         // Sign with k256 ECDSA
@@ -266,7 +306,65 @@ impl MpcProtocol for Gg20Protocol {
     }
 }
 
-#[cfg(test)]
+// ─────────────────────────────────────────────────────────────────────────────
+// PRODUCTION stub (feature = "gg20-simulation" is OFF — the default)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(not(feature = "gg20-simulation"))]
+/// Placeholder — real GG20/CGGMP21 implementation coming in Sprint 2 (T-S2-01).
+/// See SEC-001 in docs/SECURITY_FINDINGS.md.
+pub struct Gg20Protocol;
+
+#[cfg(not(feature = "gg20-simulation"))]
+impl Gg20Protocol {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(not(feature = "gg20-simulation"))]
+impl Default for Gg20Protocol {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(not(feature = "gg20-simulation"))]
+#[async_trait::async_trait]
+impl MpcProtocol for Gg20Protocol {
+    fn scheme(&self) -> CryptoScheme {
+        CryptoScheme::Gg20Ecdsa
+    }
+
+    async fn keygen(
+        &self,
+        _config: ThresholdConfig,
+        _party_id: PartyId,
+        _transport: &dyn Transport,
+    ) -> Result<KeyShare, CoreError> {
+        Err(CoreError::Protocol(
+            "GG20 real implementation not yet available — see Sprint 2 T-S2-01".to_string(),
+        ))
+    }
+
+    async fn sign(
+        &self,
+        _key_share: &KeyShare,
+        _signers: &[PartyId],
+        _message: &[u8],
+        _transport: &dyn Transport,
+    ) -> Result<MpcSignature, CoreError> {
+        Err(CoreError::Protocol(
+            "GG20 real implementation not yet available — see Sprint 2 T-S2-01".to_string(),
+        ))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests — only compiled when the simulation feature is enabled
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(all(test, feature = "gg20-simulation"))]
 mod tests {
     use super::*;
 
