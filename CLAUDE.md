@@ -84,24 +84,31 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 1 complete)
+## Current State (as of Sprint 2 complete)
 
 ### Tests on `main`
 ```
-42 tests pass  (cargo test --workspace)
+52 tests pass  (cargo test --workspace)
 cargo check    clean
+.github/workflows/ci.yml  ← CI pipeline active
 ```
 
 ### Sprint Status
 - **Sprint 1:** COMPLETE — all 5 tasks merged (T-01, T-02, T-05, T-06, T-07)
-- **Sprint 2:** PENDING — hard goal = real Zengo GG20/CGGMP21 (resolves SEC-001 CRITICAL)
+- **Sprint 2:** COMPLETE — all 5 tasks merged (T-S2-00 through T-S2-05)
+- **Sprint 3:** PENDING — NATS transport (SEC-003), Key Lifecycle real impl, Policy Engine
 
 ### Open CRITICAL Security Findings (block production)
 | ID | Summary | Owner | Sprint |
 |----|---------|-------|--------|
-| SEC-001 | GG20 simulation reconstructs full private key | R1 | Sprint 2 T-S2-01 |
-| SEC-002 | Hardcoded "demo-password" fallback in CLI | R4 | Sprint 2 |
-| SEC-003 | NatsTransport = all `todo!()` stubs | R2 | Epic E |
+| SEC-003 | NatsTransport = all `todo!()` stubs | R2 | Sprint 3 Epic E |
+
+### Resolved CRITICAL Findings
+| ID | Summary | Resolved |
+|----|---------|---------|
+| SEC-001 | GG20 reconstructed full private key | Sprint 2 T-S2-01 — distributed additive-share signing |
+| SEC-002 | Hardcoded "demo-password" in CLI | Sprint 2 T-S2-03 — rpassword interactive prompt |
+| SEC-011 | Sui tx was JSON stub | Sprint 2 T-S2-04 — real BCS encoding |
 
 ### Open HIGH Findings (block merge)
 | ID | Summary | Owner |
@@ -119,10 +126,10 @@ Full findings log → `docs/SECURITY_FINDINGS.md`
 
 | DEC | Decision |
 |-----|----------|
-| DEC-001 | Sprint 1: custom k256 2-round ECDSA bridge; Sprint 2: migrate to Zengo GG20/CGGMP21 |
-| DEC-002 | Solana: manual binary serialization + `solana-program` as dev-dep for test validation |
-| DEC-003 | Sui: `bcs` crate for full BCS (Sprint 2) |
-| DEC-004 | Sprint 2 GG20 = hard commitment, not optional |
+| DEC-001 | Sprint 2 delivered distributed ECDSA (additive-share signing, no key reconstruction) |
+| DEC-002 | Solana: manual binary serialization + round-trip tests validate structure |
+| DEC-003 | Sui: `bcs` crate for BCS encoding — DONE Sprint 2 |
+| DEC-004 | Sprint 2 GG20 hard commitment — DELIVERED |
 
 Full decision log → `docs/DECISIONS.md`
 

@@ -523,3 +523,67 @@ shared interface prep**. Agents only touch their own impl files.
 > Parallel agent work is safe only when file ownership is truly non-overlapping.
 > Any file that multiple agents "need" must be prepared by the orchestrator before spawning.
 > The orchestrator is R0's proxy for interface-level changes between sprints.
+
+---
+
+### LESSON-016: Additive Shares — The Key to Distributed Signing Without Reconstruction
+- **Date:** 2026-03-16
+- **Category:** Architecture
+- **Severity:** Insight
+- **Found by:** R1 during T-S2-01 implementation
+
+**What happened:**
+The core challenge of SEC-001 was: how do you compute an ECDSA signature across N parties where
+no single party holds the full private key, but the signature must mathematically verify?
+
+The naive fix would be to just not log the reconstructed key — but that leaves the full key
+sitting in memory on one machine, still vulnerable.
+
+**Root cause of the original bug:**
+The GG20 simulation used Lagrange interpolation on the **key shares** to reconstruct `x`:
+`x = sum(λ_i * x_i)` — this is the textbook way to recover a Shamir secret. The mistake was
+applying this during signing instead of during a setup phase (or not at all).
+
+**Fix / Resolution:**
+Use additive shares. The insight is:
+- Instead of computing `x` and then `s = k^{-1}(hash + x*r)`, compute it as:
+- `s = hash*k_inv + sum(x_i_add * r * k_inv)` where `x_i_add = λ_i * x_i`
+- Each party computes `s_i = x_i_add * r * k_inv` (only their part)
+- The coordinator sums: `s = hash*k_inv + sum(s_i)`
+- `x = sum(x_i_add)` by construction, but this sum is **never computed** — only its contribution to `s` is assembled, distributed across parties
+
+**Takeaway:**
+> The key to distributed signing is: apply the signing formula AFTER distributing the work,
+> not before. The Lagrange weighting (λ_i) should be applied to the **partial signatures**,
+> not to the **key shares**. This way the full key never needs to be assembled.
+> Formula: `s = hash/k + sum(λ_i * x_i * r/k)` — distribute the last term, not the first.
+
+---
+
+### LESSON-017: Wave-based Dependency Management for Parallel Agents
+- **Date:** 2026-03-16
+- **Category:** Workflow
+- **Severity:** Insight
+- **Found by:** Orchestrator during Sprint 2 planning
+
+**What happened:**
+Sprint 2 had a dependency: T-S2-00 (R0 adds `bcs` and `rpassword` to `Cargo.toml`) must
+complete before T-S2-01 (R1 uses them), T-S2-03 (R4 uses `rpassword`), and T-S2-04 (R3d
+uses `bcs`). Spawning all agents at once would have caused them to fail on missing dependencies.
+
+**Root cause:**
+Cargo workspace dependencies are defined in a shared file (`Cargo.toml`) owned by R0.
+Any agent that needs a new crate cannot add it themselves (boundary violation) and cannot
+proceed without it (compile error).
+
+**Fix / Resolution:**
+Structured sprint into waves:
+- **Wave 1:** R0 (dep prep) + R5 (CI, no new deps) — parallel, fast
+- Orchestrator merges Wave 1 to main before Wave 2 starts
+- **Wave 2:** R1 + R4 + R3d — parallel, all rebased onto main with deps available
+
+**Takeaway:**
+> When planning parallel sprints, identify "prep tasks" (Cargo.toml changes, interface
+> additions, shared file modifications) and run them as Wave 1. Only start Wave 2 after
+> Wave 1 is merged. Wave 2 tasks can then run fully parallel with no dep issues.
+> Rule: **Wave 1 = orchestrator/R0 prep. Wave 2 = implementation agents.**
