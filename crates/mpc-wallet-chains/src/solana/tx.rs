@@ -179,8 +179,9 @@ pub fn finalize_solana_transaction(
     raw_tx.extend_from_slice(signature);
     raw_tx.extend_from_slice(&message_bytes);
 
-    // tx_hash = hex of first 8 bytes of signature (short identifier)
-    let tx_hash = hex::encode(&signature[..8]);
+    // tx_hash = full base58-encoded signature (matches Solana's convention
+    // where the transaction ID is the base58 encoding of the first signature)
+    let tx_hash = bs58::encode(signature).into_string();
 
     Ok(SignedTransaction {
         chain: Chain::Solana,
