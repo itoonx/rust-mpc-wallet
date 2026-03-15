@@ -5,6 +5,42 @@
 
 ---
 
+## DEC-004: Sprint 2 GG20 as Hard Commitment
+
+- **Date:** 2026-03-15
+- **Context:** SEC-001 (CRITICAL) — the current GG20 simulation reconstructs the full private key
+  on every signing party. DEC-001 selected a Sprint 1 bridge (custom k256 two-round distributed
+  ECDSA) that eliminates the reconstruction flaw under a semi-honest adversary model. However,
+  enterprise custody wallets require malicious-secure threshold signing, meaning the protocol must
+  remain secure even when some parties actively deviate from the protocol. The Sprint 1 custom
+  approach does not provide this guarantee. SEC-001 therefore remains a production blocker until
+  full GG20/CGGMP21 is integrated.
+- **Options considered:**
+  1. **Keep Sprint 1 custom k256 protocol indefinitely** — eliminates reconstruction but only
+     semi-honest-secure. Would require a prominent "not production-safe" disclaimer for enterprise
+     deployments. Low effort, high ongoing risk.
+  2. **Sprint 2: Evaluate multi-party-ecdsa and decide** — leaves the decision open until after
+     Sprint 1 completes and dependency conflicts are assessed. Lower commitment, but delays the
+     production blocker fix by at least one more sprint beyond Sprint 2.
+  3. **Sprint 2: Hard commitment to real Zengo GG20/CGGMP21** — treat Sprint 2 as a locked goal,
+     not an evaluation. Assign T-S2-00 (R0 dep addition) and T-S2-01 (R1 impl) as committed sprint
+     tasks now, so agents can prepare and no time is lost on re-planning.
+- **Decision:** **Option 3 — Sprint 2 goal is the real Zengo GG20/CGGMP21 integration. Hard
+  commitment, not "evaluate and decide."**
+- **Rationale:** The custom k256 2-round ECDSA (DEC-001 Option 5) is a bridge, not a destination.
+  Semi-honest security is insufficient for a product marketing itself as MPC custody infrastructure.
+  Institutional customers require the malicious-secure guarantees that GG20's Paillier + ZK proof
+  machinery provides. Locking Sprint 2 now forces R0 to assess dependency conflicts in Sprint 1
+  (during T-S2-00) so T-S2-01 is not blocked on discovery at sprint start.
+- **Security review:** R6 consulted — SEC-001 finding explicitly states the custom k256 path is
+  a bridge. R6 endorses Sprint 2 hard commitment as the correct resolution path.
+- **Affected agents:** R1 (implements T-S2-01), R0 (adds dep T-S2-00), R6 (gates both tasks)
+- **Follow-up tasks:**
+  - T-S2-00 (R0): Add `multi-party-ecdsa` / `cggmp21` to `[workspace.dependencies]`
+  - T-S2-01 (R1): Integrate full GG20/CGGMP21 in `gg20.rs`
+
+---
+
 ## DEC-001: Real GG20 vs. Alternative ECDSA TSS Library
 
 - **Date:** 2026-03-15
