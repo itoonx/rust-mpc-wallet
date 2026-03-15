@@ -27,7 +27,7 @@
 |----|----------|---------|
 | SEC-008 | MEDIUM | GG20 reconstructed `Scalar` not explicitly zeroized before drop |
 | SEC-009 | MEDIUM | Bitcoin Taproot sighash uses empty `prev_out.script_pubkey` — produces invalid transactions |
-| SEC-010 | MEDIUM | Solana `tx_hash` is only first 8 bytes of signature — not a real Solana tx ID |
+| SEC-010 | MEDIUM | ~~Solana `tx_hash` is only first 8 bytes of signature — not a real Solana tx ID~~ **RESOLVED** by T-07 (R3c) |
 | SEC-011 | MEDIUM | Sui transaction serialization uses JSON instead of BCS — rejected by Sui nodes |
 | SEC-012 | MEDIUM | EVM finalization does not enforce low-S ECDSA normalization |
 | SEC-013 | MEDIUM | FROST protocols trust self-reported `from` field for party ID mapping |
@@ -40,6 +40,7 @@
 | SEC-020 | INFO | FROST protocols correctly avoid full key reconstruction (positive finding) |
 | SEC-021 | INFO | AES-256-GCM uses fresh random salt + nonce per write — no reuse risk (positive finding) |
 | SEC-022 | INFO | Git history scan found no committed secrets (positive finding) |
+| SEC-023 | LOW | T-06 (R3d): invalid-hex test case missing — no dedicated test for `0x` + 64 non-hex chars path |
 
 ---
 
@@ -259,7 +260,7 @@
 
 - **ID:** SEC-010
 - **Date:** 2026-03-15
-- **Task:** pre-sprint
+- **Task:** pre-sprint → **Resolved by T-07 (branch: agent/r3c-sol)**
 - **Agent:** R3c (Chain Agent — Solana)
 - **File:** `crates/mpc-wallet-chains/src/solana/tx.rs:183`
 - **Description:** `tx_hash = hex::encode(&signature[..8])` — the "transaction hash" returned
@@ -273,7 +274,8 @@
 - **Recommendation:** Compute the real Solana transaction ID: base58-encode the 64-byte
   signature (the first and only signature for a single-signer transaction, which matches
   how Solana nodes identify transactions).
-- **Status:** Open
+- **Status:** Resolved
+- **Resolved in commit:** agent/r3c-sol — `tx_hash = bs58::encode(signature).into_string()` (full 64-byte signature, base58-encoded)
 
 ---
 
@@ -652,3 +654,134 @@ SEC-011 (JSON vs BCS serialization) is a pre-existing known issue documented in 
 AGENTS.md and code comments, tracked for R3d in Sprint 1. The `broadcast_stub` returning an
 error (rather than silently doing nothing) is the correct safe behavior for an unimplemented
 RPC call. Retrospectively APPROVED.
+
+---
+
+## [LOW] SEC-023: T-06 Missing Test for Invalid Hex Characters in Sui Address Validation
+
+- **ID:** SEC-023
+- **Date:** 2026-03-15
+- **Task:** T-06
+- **Agent:** R3d (Chain Agent — Sui)
+- **File:** `crates/mpc-wallet-chains/tests/chain_integration.rs`
+- **Description:** `validate_sui_address` correctly handles all three invalid-address cases in
+  its implementation: (1) missing `0x` prefix, (2) wrong hex-part length, and (3) invalid hex
+  characters. Tests cover cases 1 and 2 explicitly. Case 3 is exercised only indirectly via
+  `"not-a-valid-address"` (which fails at case 1 before reaching the hex decode path). There
+  is no test of the form `"0x" + 64 chars of non-hex` (e.g., `"zz...zz"`) that specifically
+  exercises the `hex::decode` error branch.
+- **Impact:** Low — the implementation is correct and the `hex::decode` error branch is not
+  reachable without passing the length check; coverage gap is test-only. Does not affect
+  security posture.
+- **Recommendation:** Add one test: `"0x" + "zz" * 32` (64 non-hex chars) → assert `is_err()`.
+  One line change to the test file.
+- **Status:** Open
+- **Owner:** R3d
+
+---
+
+## Sprint 1 Gate Verdicts (2026-03-15)
+
+---
+
+### VERDICT: [R0] T-05 — freeze/unfreeze KeyStore interface
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VERDICT: APPROVED
+Branch:  agent/r0-interface
+Task:    T-05
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Security gate passed. No CRITICAL or HIGH findings.
+Checklist: all items passed ✓
+Open non-blocking: none
+```
+
+Checklist results:
+- [x] `KeyFrozen(String)` message template is `"key group frozen: {0}"` — carries only the group ID string, no key bytes, password, or derived key material.
+- [x] `freeze` and `unfreeze` use `&self` — consistent with the existing `KeyStore` async trait API.
+- [x] Stub impls in `EncryptedFileStore` are `Ok(())` with `let _ = group_id;` — no logic, no side effects, cannot produce errors or incorrect state.
+- [x] Additive change only — no existing `CoreError` variants removed or renamed; no existing `KeyStore` methods modified.
+
+No new dependencies. No Cargo.lock changes. Change is a clean interface extension that unblocks T-04 (R1).
+
+---
+
+### VERDICT: [R1] T-01/T-02 — GG20 feature gate + touch() timestamp
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VERDICT: APPROVED
+Branch:  agent/r1-zeroize
+Task:    T-01 / T-02
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Security gate passed. No CRITICAL or HIGH findings.
+Checklist: all items passed ✓
+Open non-blocking: SEC-001 (CRITICAL — pre-existing, correctly documented as open, scheduled Sprint 2)
+```
+
+**T-01 Checklist results:**
+- [x] `gg20-simulation` is NOT in `default = []`. `[features]` section is `default = []` / `gg20-simulation = []`.
+- [x] Lagrange interpolation and all secret reconstruction logic (`lagrange_interpolate`, `shamir_split`, `Scalar`/`SecretKey` key material) is entirely absent from the non-feature build. Every use of the reconstruction path carries `#[cfg(feature = "gg20-simulation")]`.
+- [x] The `#[cfg]` gate wraps ALL items in the simulation path — structs, `use` imports, `impl` blocks, helper functions, and tests are all individually gated. The production stub (`#[cfg(not(feature = "gg20-simulation"))]`) contains zero cryptographic logic.
+- [x] The production stub `Gg20Protocol` returns `Err(CoreError::Protocol(...))` for both `keygen` and `sign` — does not silently succeed, does not panic.
+- [x] SEC-001 status: correctly documented as Open in the module-level doc comment with reference to Sprint 2 task T-S2-01. Warning is accurate.
+
+**T-02 Checklist results:**
+- [x] `touch()` never calls `decrypt()` or opens any `.enc` file. It only checks `group_dir.exists()` and writes `touch.json` with a timestamp.
+- [x] No key material in any variable or log during `touch()`. The method reads only the directory path from `&self`.
+- [x] Timestamp is derived from `SystemTime::now()` — not user-supplied input. No injection vector.
+- [x] Returns `Err(CoreError::KeyStore(...))` if the group directory does not exist — does not silently create garbage state.
+
+Only new dependency: `tempfile` added to `[dev-dependencies]` (test scaffolding only, not in production build, no security concerns).
+
+---
+
+### VERDICT: [R3c] T-07 — Solana tx_hash SEC-010 fix
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VERDICT: APPROVED
+Branch:  agent/r3c-sol
+Task:    T-07
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Security gate passed. No CRITICAL or HIGH findings.
+Checklist: all items passed ✓
+Open non-blocking: SEC-017 (LOW — pre-existing, from address not validated against signing pubkey)
+```
+
+SEC-010 status: **RESOLVED** by this branch.
+
+Checklist results:
+- [x] `hex::encode(&signature[..8])` is GONE from `tx.rs`. The old line is replaced entirely.
+- [x] `bs58::encode(signature).into_string()` uses the full `signature` slice (64 bytes, the complete Ed25519 signature) — no truncation.
+- [x] `SignedTransaction` output carries only the chain ID, tx bytes, and tx_hash (base58 of full signature). No secret material. The `sign_payload` (message bytes) is not included in the output struct.
+- [x] Zero-lamports test present: `test_solana_zero_lamports_transaction` — `value: "0"` must not panic or error.
+- [x] Same from/to test present: `test_solana_same_from_to_address` — SDK must accept same-address transfers (network-level restriction, not SDK concern).
+
+No new dependencies introduced (bs58 was already in `[workspace.dependencies]` on main).
+
+---
+
+### VERDICT: [R3d] T-06 — Sui address validation
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VERDICT: APPROVED
+Branch:  agent/r3d-sui-followup
+Task:    T-06
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Security gate passed. No CRITICAL or HIGH findings.
+Checklist: all items passed ✓
+Open non-blocking: SEC-011 (MEDIUM — JSON vs BCS, pre-existing), SEC-023 (LOW — missing invalid-hex test case, new)
+```
+
+Checklist results:
+- [x] Validation rejects missing `0x` prefix → `strip_prefix("0x").ok_or_else(...)` returns `Err(CoreError::InvalidInput(...))`.
+- [x] Validation rejects wrong length (≠ 64 hex chars) → explicit `hex_part.len() != 64` check returns `Err`.
+- [x] Validation rejects invalid hex chars → `hex::decode` returns `Err` which is mapped to `CoreError::InvalidInput`. Implementation correct. **Test coverage gap logged as SEC-023 (LOW)** — no dedicated test for `0x` + 64 non-hex chars; the `"not-a-valid-address"` test exercises case 1 (no prefix), not case 3.
+- [x] Fail-fast: `validate_sui_address(sender)?` is the first statement in `build_transaction_with_sender`, before any transaction state is touched.
+- [x] No secret material in error messages. Error strings include only the input address value and length — no key bytes, no signatures.
+- [x] `try_into().unwrap()` is safe: length was verified as `hex_part.len() == 64` (= 32 decoded bytes) immediately before `hex::decode`, so `bytes.try_into::<[u8; 32]>()` cannot fail.
+
+No new dependencies.
