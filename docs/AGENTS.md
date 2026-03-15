@@ -5,6 +5,58 @@
 
 ---
 
+## Git Worktree Layout
+
+Each agent works in its own isolated worktree on a dedicated branch. No two agents share the same worktree.
+
+```
+Main repo:   /Users/thecoding/git/project/mpc-wallet   (branch: main)
+
+Worktrees:
+  /Users/thecoding/git/worktrees/mpc-r1    (branch: agent/r1-zeroize)       ← R1 Crypto
+  /Users/thecoding/git/worktrees/mpc-r2    (branch: agent/r2-nats)          ← R2 Infra
+  /Users/thecoding/git/worktrees/mpc-r3a   (branch: agent/r3a-evm)          ← R3a Chain EVM
+  /Users/thecoding/git/worktrees/mpc-r3b   (branch: agent/r3b-btc)          ← R3b Chain Bitcoin
+  /Users/thecoding/git/worktrees/mpc-r3c   (branch: agent/r3c-sol)          ← R3c Chain Solana
+  /Users/thecoding/git/worktrees/mpc-r3d   (branch: agent/r3d-sui-followup) ← R3d Chain Sui
+```
+
+Each agent's `workdir` is its own worktree path — agents NEVER run commands in the main repo path
+or in another agent's worktree.
+
+---
+
+## Checkpoint Commit Protocol
+
+**Every agent MUST commit after every `cargo test` pass.** This is non-negotiable.
+
+```bash
+# After cargo test passes in your worktree:
+git add -A
+git commit -m "[R{N}] checkpoint: {one-line description of what changed} — tests pass"
+
+# When the entire task is complete:
+git add -A
+git commit -m "[R{N}] complete: {task summary}"
+```
+
+**Commit message examples:**
+```
+[R1] checkpoint: add ZeroizeOnDrop to Gg20ShareData — tests pass
+[R1] checkpoint: add ZeroizeOnDrop to FrostEd25519ShareData — tests pass
+[R1] complete: zeroize all secret key material in protocol impls
+[R2] checkpoint: NatsTransport struct compiles — cargo check passes
+[R3a] checkpoint: Polygon chain_id added to EvmProvider — tests pass
+```
+
+**Rules:**
+- Commit only when `cargo test -p <your-crate>` passes (not just `cargo check`)
+- Never force-push — branches are shared with the orchestrator
+- Never commit to `main` directly — always commit to your own branch
+- If tests fail after a change, fix before committing (no "WIP" commits)
+
+---
+
 ## Core Principle: Trait Boundaries = Agent Boundaries
 
 The codebase exposes four public traits that act as hard contracts between agents.
