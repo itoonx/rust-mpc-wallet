@@ -158,6 +158,19 @@ impl KeyStore for EncryptedFileStore {
             .map_err(|e| CoreError::KeyStore(format!("failed to delete key group: {e}")))?;
         Ok(())
     }
+
+    async fn freeze(&self, group_id: &KeyGroupId) -> Result<(), CoreError> {
+        // TODO(Sprint 1 T-04): write a `.frozen` marker file in the group directory
+        // and make `load()` return CoreError::KeyFrozen if the marker exists.
+        let _ = group_id;
+        Ok(())
+    }
+
+    async fn unfreeze(&self, group_id: &KeyGroupId) -> Result<(), CoreError> {
+        // TODO(Sprint 1 T-04): remove the `.frozen` marker file.
+        let _ = group_id;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

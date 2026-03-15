@@ -26,6 +26,10 @@ pub enum CoreError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    /// The key group has been frozen and cannot be used for signing.
+    #[error("key group frozen: {0}")]
+    KeyFrozen(String),
+
     #[error("invalid input: {0}")]
     InvalidInput(String),
 

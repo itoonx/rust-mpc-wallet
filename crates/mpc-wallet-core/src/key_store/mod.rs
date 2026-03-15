@@ -33,4 +33,20 @@ pub trait KeyStore: Send + Sync {
 
     /// Delete a key group and all its shares.
     async fn delete(&self, group_id: &KeyGroupId) -> Result<(), CoreError>;
+
+    /// Freeze a key group, preventing it from being loaded for signing.
+    ///
+    /// Once frozen, any attempt to call [`KeyStore::load`] on shares belonging to this
+    /// group MUST return [`CoreError::KeyFrozen`]. The group's metadata remains readable
+    /// via [`KeyStore::list`] so operators can identify and audit frozen groups.
+    ///
+    /// Freezing an already-frozen group is idempotent and MUST succeed without error.
+    async fn freeze(&self, group_id: &KeyGroupId) -> Result<(), CoreError>;
+
+    /// Unfreeze a previously frozen key group, re-enabling signing.
+    ///
+    /// After a successful call, [`KeyStore::load`] MUST once again return the key shares
+    /// for the group. Unfreezing a group that is not currently frozen is idempotent and
+    /// MUST succeed without error.
+    async fn unfreeze(&self, group_id: &KeyGroupId) -> Result<(), CoreError>;
 }
