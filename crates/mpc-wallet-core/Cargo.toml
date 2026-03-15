@@ -1,0 +1,40 @@
+[package]
+name = "mpc-wallet-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MPC wallet core: protocols, key storage, and transport"
+
+[dependencies]
+# MPC protocols
+frost-core = { workspace = true }
+frost-secp256k1-tr = { workspace = true }
+frost-ed25519 = { workspace = true }
+
+# Crypto
+k256 = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+
+# Key storage encryption
+aes-gcm = { workspace = true }
+argon2 = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Utilities
+hex = { workspace = true }
+uuid = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

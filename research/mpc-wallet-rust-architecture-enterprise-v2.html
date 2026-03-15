@@ -1,0 +1,865 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MPC Wallet — Rust Architecture</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Syne:wght@400;600;700;800&display=swap');
+
+  :root {
+    --bg: #0d0e0f;
+    --surface: #141517;
+    --surface2: #1a1c1f;
+    --border: #222428;
+    --border-bright: #2e3238;
+    --text: #c9d1e0;
+    --muted: #4a5568;
+    --rust: #e06b3f;
+    --rust2: #f0956a;
+    --accent1: #e06b3f;   /* rust orange - crates */
+    --accent2: #34d399;   /* green - nodes */
+    --accent3: #f59e0b;   /* amber - crypto */
+    --accent4: #a78bfa;   /* purple - storage */
+    --accent5: #fb7185;   /* red - chains */
+    --accent6: #38bdf8;   /* sky - messaging */
+    --accent7: #818cf8;   /* indigo - workspace */
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+    min-height: 100vh;
+    padding: 40px 24px 60px;
+  }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image:
+      linear-gradient(rgba(224,107,63,0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(224,107,63,0.03) 1px, transparent 1px);
+    background-size: 48px 48px;
+    pointer-events: none;
+  }
+
+  .page { max-width: 1120px; margin: 0 auto; }
+
+  /* ── HEADER ── */
+  header { text-align: center; margin-bottom: 56px; animation: fadeUp 0.5s ease both; }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--rust); border: 1px solid rgba(224,107,63,0.4);
+    padding: 4px 14px; border-radius: 2px; margin-bottom: 18px;
+  }
+  .badge-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--rust); box-shadow: 0 0 8px var(--rust); animation: pulse 2s infinite; }
+
+  h1 {
+    font-size: clamp(30px, 5vw, 52px); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05;
+    background: linear-gradient(120deg, #fff 0%, var(--rust2) 50%, #f59e0b 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+    margin-bottom: 12px;
+  }
+
+  .subtitle { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); letter-spacing: 0.06em; }
+
+  /* ── SECTION LABEL ── */
+  .section-label {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.2em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 14px; margin-top: 36px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .section-label::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+  /* ── WORKSPACE BOX ── */
+  .workspace {
+    border: 1px dashed rgba(129,140,248,0.4); border-radius: 8px; padding: 20px;
+    margin-bottom: 4px; position: relative; animation: fadeUp 0.5s ease 0.1s both;
+  }
+  .workspace-label {
+    position: absolute; top: -11px; left: 16px;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    color: var(--accent7); background: var(--bg); padding: 0 8px; letter-spacing: 0.12em;
+  }
+
+  /* ── LAYER ── */
+  .layer {
+    border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+    animation: fadeUp 0.5s ease both;
+  }
+
+  .layer-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 18px; font-size: 10px;
+    font-family: 'JetBrains Mono', monospace; letter-spacing: 0.14em;
+    text-transform: uppercase; font-weight: 700;
+  }
+
+  .layer-body { padding: 16px 18px 20px; background: rgba(255,255,255,0.012); border-top: 1px solid var(--border); }
+
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .glow { box-shadow: 0 0 8px currentColor; }
+
+  /* ── CARD GRID ── */
+  .cards { display: flex; flex-wrap: wrap; gap: 10px; }
+
+  .card {
+    flex: 1 1 180px; border: 1px solid var(--border-bright); border-radius: 4px;
+    padding: 14px 15px; background: var(--surface2);
+    transition: border-color 0.2s, transform 0.15s;
+  }
+  .card:hover { transform: translateY(-2px); }
+
+  .card-title { font-size: 12.5px; font-weight: 700; color: #fff; margin-bottom: 5px; display: flex; align-items: center; gap: 7px; }
+  .card-sub { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); line-height: 1.65; }
+
+  .crate {
+    display: inline-block; font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; padding: 2px 7px; border-radius: 2px; margin-top: 8px; margin-right: 4px;
+  }
+
+  /* ── ARROW ── */
+  .arrow { display: flex; align-items: center; justify-content: center; height: 30px; position: relative; }
+  .arrow::before {
+    content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px;
+    background: linear-gradient(to bottom, transparent, var(--border-bright), transparent);
+    transform: translateX(-50%);
+  }
+  .arrow-label {
+    font-family: 'JetBrains Mono', monospace; font-size: 9.5px; color: var(--muted);
+    background: var(--bg); padding: 2px 12px; position: relative; z-index: 1;
+    letter-spacing: 0.06em;
+  }
+
+  /* ── NODE CLUSTER ── */
+  .node-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+
+  .node {
+    border: 1px solid rgba(52,211,153,0.25); border-radius: 4px;
+    background: var(--surface2); padding: 14px;
+    transition: border-color 0.2s, transform 0.15s;
+  }
+  .node:hover { border-color: var(--accent2); transform: translateY(-2px); }
+
+  .node-title { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; color: var(--accent2); margin-bottom: 10px; }
+
+  .node-row {
+    display: flex; align-items: center; gap: 7px;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted);
+    margin-bottom: 5px;
+  }
+  .node-row::before { content: '·'; color: var(--accent2); font-size: 18px; line-height: 0.8; flex-shrink: 0; }
+
+  .threshold-info {
+    margin-top: 14px; padding: 10px 14px;
+    background: rgba(52,211,153,0.05); border: 1px solid rgba(52,211,153,0.2);
+    border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--accent2);
+    display: flex; align-items: center; gap: 10px;
+  }
+
+  /* ── CHAIN CHIPS ── */
+  .chain-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    display: flex; align-items: center; gap: 8px; padding: 8px 13px;
+    border: 1px solid var(--border-bright); border-radius: 3px; background: var(--surface2);
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    transition: border-color 0.2s, transform 0.15s;
+  }
+  .chip:hover { transform: translateY(-2px); border-color: var(--accent5); }
+  .chip .algo { font-size: 9px; color: var(--muted); padding: 1px 5px; background: rgba(255,255,255,0.05); border-radius: 2px; }
+
+  /* ── PERF SECTION ── */
+  .perf-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+
+  .perf-card {
+    border: 1px solid var(--border-bright); border-radius: 4px;
+    background: var(--surface2); padding: 14px 15px;
+    transition: border-color 0.2s;
+  }
+  .perf-card:hover { border-color: var(--rust); }
+
+  .perf-title { font-size: 12px; font-weight: 700; color: var(--rust2); margin-bottom: 6px; display: flex; align-items: center; gap: 7px; }
+  .perf-desc { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); line-height: 1.65; }
+
+  /* ── WORKSPACE STRUCTURE ── */
+  .ws-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(155px, 1fr)); gap: 8px; }
+
+  .ws-crate {
+    border: 1px solid rgba(129,140,248,0.2); border-radius: 4px;
+    background: rgba(129,140,248,0.04); padding: 11px 13px;
+    transition: border-color 0.2s, transform 0.15s;
+  }
+  .ws-crate:hover { border-color: var(--accent7); transform: translateY(-2px); }
+
+  .ws-name { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; color: var(--accent7); margin-bottom: 4px; }
+  .ws-desc { font-family: 'JetBrains Mono', monospace; font-size: 9.5px; color: var(--muted); line-height: 1.55; }
+
+  /* ── STACK LAYOUT ── */
+  .stack { display: flex; flex-direction: column; gap: 3px; }
+
+  /* colors */
+  .c1 { color: var(--accent1); } .c2 { color: var(--accent2); } .c3 { color: var(--accent3); }
+  .c4 { color: var(--accent4); } .c5 { color: var(--accent5); } .c6 { color: var(--accent6); }
+  .c7 { color: var(--accent7); }
+
+  .bg1h { background: rgba(224,107,63,0.07); }
+  .bg2h { background: rgba(52,211,153,0.07); }
+  .bg3h { background: rgba(245,158,11,0.07); }
+  .bg4h { background: rgba(167,139,250,0.07); }
+  .bg5h { background: rgba(251,113,133,0.07); }
+  .bg6h { background: rgba(56,189,248,0.07); }
+  .bg7h { background: rgba(129,140,248,0.07); }
+
+  .tag { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 9px; padding: 2px 7px; border-radius: 2px; margin-top: 8px; margin-right: 3px; opacity: 0.9; }
+  .t1 { background: rgba(224,107,63,0.15); color: var(--accent1); }
+  .t2 { background: rgba(52,211,153,0.15); color: var(--accent2); }
+  .t3 { background: rgba(245,158,11,0.15); color: var(--accent3); }
+  .t4 { background: rgba(167,139,250,0.15); color: var(--accent4); }
+  .t5 { background: rgba(251,113,133,0.15); color: var(--accent5); }
+  .t6 { background: rgba(56,189,248,0.15); color: var(--accent6); }
+  .t7 { background: rgba(129,140,248,0.15); color: var(--accent7); }
+
+  /* divider */
+  .divider { height: 1px; background: var(--border); margin: 28px 0; }
+
+  /* legend */
+  .legend {
+    margin-top: 36px; padding: 14px 20px;
+    border: 1px solid var(--border); border-radius: 6px; background: var(--surface2);
+    display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+    animation: fadeUp 0.5s ease 0.8s both;
+  }
+  .leg { display: flex; align-items: center; gap: 7px; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); }
+  .leg-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  @media (max-width: 640px) {
+    .node-grid { grid-template-columns: 1fr; }
+    .cards { flex-direction: column; }
+    .ws-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <div class="badge"><span class="badge-dot"></span>Rust · Tokio · Performance-first</div>
+    <h1>MPC Wallet — Rust Architecture</h1>
+    <p class="subtitle">zero-cost abstractions · fearless concurrency · no GC pauses</p>
+  </header>
+
+  <!-- WORKSPACE STRUCTURE -->
+  <div class="section-label">Cargo Workspace Structure</div>
+  <div class="workspace" style="animation: fadeUp 0.5s ease 0.05s both;">
+    <div class="workspace-label">// Cargo.toml workspace</div>
+    <div class="ws-grid">
+      <div class="ws-crate"><div class="ws-name">mpc-node</div><div class="ws-desc">binary · MPC node daemon · Tokio runtime</div></div>
+      <div class="ws-crate"><div class="ws-name">mpc-client</div><div class="ws-desc">library · SDK สำหรับ app ที่ต้องการใช้ wallet</div></div>
+      <div class="ws-crate"><div class="ws-name">mpc-core</div><div class="ws-desc">crypto engine · tss + eddsa · no_std ได้</div></div>
+      <div class="ws-crate"><div class="ws-name">mpc-transport</div><div class="ws-desc">NATS messaging · TLS · ECDH session</div></div>
+      <div class="ws-crate"><div class="ws-name">mpc-storage</div><div class="ws-desc">RocksDB / sled · encrypted at rest</div></div>
+      <div class="ws-crate"><div class="ws-name">chains/evm</div><div class="ws-desc">Ethereum, BSC, Polygon adapter</div></div>
+      <div class="ws-crate"><div class="ws-name">chains/bitcoin</div><div class="ws-desc">Bitcoin · PSBT · Taproot / Schnorr</div></div>
+      <div class="ws-crate"><div class="ws-name">chains/solana</div><div class="ws-desc">Solana · Ed25519 · Transaction v0</div></div>
+      <div class="ws-crate"><div class="ws-name">chains/cosmos</div><div class="ws-desc">Cosmos SDK chains · IBC ready</div></div>
+      <div class="ws-crate"><div class="ws-name">mpc-cli</div><div class="ws-desc">binary · clap CLI · keygen / sign / bench</div></div>
+    </div>
+  </div>
+
+  <div class="arrow"><div class="arrow-label">▼ runtime flow</div></div>
+
+  <!-- LAYERS -->
+  <div class="stack">
+
+    <!-- CLIENT -->
+    <div class="layer" style="border-color: rgba(224,107,63,0.35); animation-delay:0.12s">
+      <div class="layer-header bg1h">
+        <span class="dot glow" style="background:var(--accent1);color:var(--accent1)"></span>
+        <span class="c1">01 — Client Layer &nbsp;<span style="font-weight:300;opacity:.5">mpc-client crate</span></span>
+        <span style="margin-left:auto;font-size:9px;color:var(--muted)">APPLICATION INTERFACE</span>
+      </div>
+      <div class="layer-body">
+        <div class="cards">
+          <div class="card" style="--hc:var(--accent1)">
+            <div class="card-title">🦀 Rust SDK</div>
+            <div class="card-sub">MPCClient struct · async/await · create_wallet() · sign_tx() · reshare()</div>
+            <span class="tag t1">primary</span>
+          </div>
+          <div class="card">
+            <div class="card-title">⚡ Signer Trait</div>
+            <div class="card-sub">trait Signer: Send + Sync · LocalSigner · AwsKmsSigner · pluggable</div>
+            <span class="crate t1">aws-sdk-kms</span>
+          </div>
+          <div class="card">
+            <div class="card-title">🔒 Authorizer</div>
+            <div class="card-sub">Multi-sig approval layer · Ed25519 / P256 · optional</div>
+            <span class="tag t1">zero-trust</span>
+          </div>
+          <div class="card">
+            <div class="card-title">🌐 gRPC Gateway</div>
+            <div class="card-sub">tonic server · expose wallet ops ให้ non-Rust services</div>
+            <span class="crate t6">tonic</span><span class="crate t6">prost</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow"><div class="arrow-label">authenticated event (Ed25519 signed payload)</div></div>
+
+    <!-- MESSAGING -->
+    <div class="layer" style="border-color: rgba(56,189,248,0.35); animation-delay:0.20s">
+      <div class="layer-header bg6h">
+        <span class="dot glow" style="background:var(--accent6);color:var(--accent6)"></span>
+        <span class="c6">02 — Transport Layer &nbsp;<span style="font-weight:300;opacity:.5">mpc-transport crate</span></span>
+        <span style="margin-left:auto;font-size:9px;color:var(--muted)">ASYNC MESSAGING BUS</span>
+      </div>
+      <div class="layer-body">
+        <div class="cards">
+          <div class="card">
+            <div class="card-title">📡 NATS (async-nats)</div>
+            <div class="card-sub">Tokio-native NATS client · zero-copy publish · JetStream durable · TLS rustls</div>
+            <span class="crate t6">async-nats</span><span class="crate t6">rustls</span>
+          </div>
+          <div class="card">
+            <div class="card-title">🛡 ECDH P2P Encryption</div>
+            <div class="card-sub">Per-session X25519 key exchange · ChaCha20-Poly1305 payload · double layer บน TLS</div>
+            <span class="crate t6">x25519-dalek</span><span class="crate t6">chacha20poly1305</span>
+          </div>
+          <div class="card">
+            <div class="card-title">⚙ Message Codec</div>
+            <div class="card-sub">MessagePack serialization · ไว กว่า JSON 5–10x · zero-copy deserialize</div>
+            <span class="crate t6">rmp-serde</span><span class="crate t6">bytes</span>
+          </div>
+          <div class="card">
+            <div class="card-title">🔍 Service Discovery</div>
+            <div class="card-sub">Consul HTTP client หรือ mDNS สำหรับ local cluster · health check loop</div>
+            <span class="crate t6">reqwest</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow"><div class="arrow-label">broadcast to MPC node cluster</div></div>
+
+    <!-- MPC NODES -->
+    <div class="layer" style="border-color: rgba(52,211,153,0.35); animation-delay:0.28s">
+      <div class="layer-header bg2h">
+        <span class="dot glow" style="background:var(--accent2);color:var(--accent2)"></span>
+        <span class="c2">03 — MPC Node Cluster &nbsp;<span style="font-weight:300;opacity:.5">mpc-node binary</span></span>
+        <span style="margin-left:auto;font-size:9px;color:var(--muted)">DISTRIBUTED KEY HOLDERS</span>
+      </div>
+      <div class="layer-body">
+        <div class="node-grid">
+          <div class="node">
+            <div class="node-title">⬡ Node 0 &nbsp;<span style="color:var(--muted);font-weight:400">(tokio::task)</span></div>
+            <div class="node-row">KeyShare (Arc&lt;RwLock&gt;)</div>
+            <div class="node-row">TSS round handler</div>
+            <div class="node-row">RocksDB encrypted store</div>
+            <div class="node-row">Auto backup (age crypt)</div>
+          </div>
+          <div class="node">
+            <div class="node-title">⬡ Node 1 &nbsp;<span style="color:var(--muted);font-weight:400">(tokio::task)</span></div>
+            <div class="node-row">KeyShare (Arc&lt;RwLock&gt;)</div>
+            <div class="node-row">TSS round handler</div>
+            <div class="node-row">RocksDB encrypted store</div>
+            <div class="node-row">Auto backup (age crypt)</div>
+          </div>
+          <div class="node">
+            <div class="node-title">⬡ Node 2 &nbsp;<span style="color:var(--muted);font-weight:400">(tokio::task)</span></div>
+            <div class="node-row">KeyShare (Arc&lt;RwLock&gt;)</div>
+            <div class="node-row">TSS round handler</div>
+            <div class="node-row">RocksDB encrypted store</div>
+            <div class="node-row">Auto backup (age crypt)</div>
+          </div>
+        </div>
+        <div class="threshold-info">
+          <span>⚡</span>
+          <span>threshold: t ≥ ⌊n/2⌋ + 1 &nbsp;·&nbsp; default 2-of-3 &nbsp;·&nbsp; full private key never reconstructed &nbsp;·&nbsp; tokio::select! concurrent rounds</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow"><div class="arrow-label">partial sigs → aggregate → full signature</div></div>
+
+    <!-- CRYPTO CORE -->
+    <div class="layer" style="border-color: rgba(245,158,11,0.35); animation-delay:0.36s">
+      <div class="layer-header bg3h">
+        <span class="dot glow" style="background:var(--accent3);color:var(--accent3)"></span>
+        <span class="c3">04 — Crypto Core &nbsp;<span style="font-weight:300;opacity:.5">mpc-core crate (no_std capable)</span></span>
+        <span style="margin-left:auto;font-size:9px;color:var(--muted)">CRYPTOGRAPHIC ENGINE</span>
+      </div>
+      <div class="layer-body">
+        <div class="cards">
+          <div class="card">
+            <div class="card-title">🔐 ECDSA TSS</div>
+            <div class="card-sub">multi-party-ecdsa (Zengo) · GG20/CGGMP21 · secp256k1 · Keygen · Sign · Reshare</div>
+            <span class="crate t3">curv-kzen</span><span class="crate t3">sha2</span>
+          </div>
+          <div class="card">
+            <div class="card-title">🧮 EdDSA / FROST</div>
+            <div class="card-sub">frost-core (ZF FROST) · Ed25519 · Schnorr · สำหรับ Solana / Aptos / TON</div>
+            <span class="crate t3">frost-ed25519</span><span class="crate t3">ed25519-dalek</span>
+          </div>
+          <div class="card">
+            <div class="card-title">🌳 HD Key Derivation</div>
+            <div class="card-sub">BIP32-compatible child key derivation · shared chain_code · ไม่ต้อง keygen ใหม่</div>
+            <span class="crate t3">tiny-hderive</span><span class="crate t3">hmac</span>
+          </div>
+          <div class="card">
+            <div class="card-title">🔄 Key Resharing</div>
+            <div class="card-sub">เปลี่ยน node set / threshold โดยไม่เปลี่ยน public key / address · proactive refresh</div>
+            <span class="tag t3">built-in</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow"><div class="arrow-label">raw sig bytes → chain adapter</div></div>
+
+    <!-- CHAIN ADAPTERS -->
+    <div class="layer" style="border-color: rgba(251,113,133,0.35); animation-delay:0.44s">
+      <div class="layer-header bg5h">
+        <span class="dot glow" style="background:var(--accent5);color:var(--accent5)"></span>
+        <span class="c5">05 — Chain Adapters &nbsp;<span style="font-weight:300;opacity:.5">chains/* workspace crates</span></span>
+        <span style="margin-left:auto;font-size:9px;color:var(--muted)">ONE CRATE PER CHAIN</span>
+      </div>
+      <div class="layer-body">
+        <div class="chain-row" style="margin-bottom:12px">
+          <div class="chip">Ξ EVM <span class="algo">ECDSA</span></div>
+          <div class="chip">₿ Bitcoin <span class="algo">ECDSA+Schnorr</span></div>
+          <div class="chip">◎ Solana <span class="algo">EdDSA</span></div>
+          <div class="chip">⚛ Cosmos <span class="algo">ECDSA</span></div>
+          <div class="chip">🔺 Aptos/Sui <span class="algo">EdDSA</span></div>
+          <div class="chip">💎 TON <span class="algo">EdDSA</span></div>
+          <div class="chip">＋ pluggable <span class="algo">trait</span></div>
+        </div>
+        <div style="border: 1px solid var(--border); border-radius:4px; padding:12px 14px; background:var(--surface);">
+          <div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--muted); line-height:1.9;">
+            <span style="color:var(--accent5)">trait</span> ChainAdapter: Send + Sync {<br>
+            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--accent6)">async fn</span> derive_address(&amp;self, pub_key: &amp;[u8]) -&gt; Result&lt;String&gt;;<br>
+            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--accent6)">async fn</span> build_tx(&amp;self, params: TxParams) -&gt; Result&lt;RawTx&gt;;<br>
+            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--accent6)">async fn</span> apply_signature(&amp;self, raw: RawTx, sig: &amp;[u8]) -&gt; Result&lt;SignedTx&gt;;<br>
+            &nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--accent6)">async fn</span> broadcast(&amp;self, tx: SignedTx) -&gt; Result&lt;TxHash&gt;;<br>
+            }
+          </div>
+        </div>
+        <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+          <span class="crate t5">ethers-rs</span>
+          <span class="crate t5">bitcoin (rust-bitcoin)</span>
+          <span class="crate t5">solana-sdk</span>
+          <span class="crate t5">cosmos-sdk-proto</span>
+          <span class="crate t5">reqwest (broadcast)</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow"><div class="arrow-label">encrypted read / write</div></div>
+
+    <!-- STORAGE -->
+    <div class="layer" style="border-color: rgba(167,139,250,0.35); animation-delay:0.52s">
+      <div class="layer-header bg4h">
+        <span class="dot glow" style="background:var(--accent4);color:var(--accent4)"></span>
+        <span class="c4">06 — Storage Layer &nbsp;<span style="font-weight:300;opacity:.5">mpc-storage crate</span></span>
+        <span style="margin-left:auto;font-size:9px;color:var(--muted)">PER-NODE ENCRYPTED STORE</span>
+      </div>
+      <div class="layer-body">
+        <div class="cards">
+          <div class="card">
+            <div class="card-title">🪨 RocksDB</div>
+            <div class="card-sub">rocksdb crate · column families · AES-256 encryption at rest · ไว กว่า BadgerDB ใน write-heavy workload</div>
+            <span class="crate t4">rocksdb</span>
+          </div>
+          <div class="card">
+            <div class="card-title">🔑 Key Zeroize</div>
+            <div class="card-sub">zeroize crate · wipe secrets จาก memory ทันทีหลังใช้ · Rust Drop trait integration</div>
+            <span class="crate t4">zeroize</span><span class="crate t4">secrecy</span>
+          </div>
+          <div class="card">
+            <div class="card-title">💾 Encrypted Backup</div>
+            <div class="card-sub">age encryption · tokio::time interval · backup to local / S3 / GCS</div>
+            <span class="crate t4">age</span><span class="crate t4">object_store</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- end stack -->
+
+  <!-- PERFORMANCE SECTION -->
+  <div class="section-label" style="margin-top:44px">Rust Performance Advantages</div>
+  <div class="perf-grid" style="animation: fadeUp 0.5s ease 0.6s both;">
+    <div class="perf-card">
+      <div class="perf-title">⚡ Zero-cost Abstraction</div>
+      <div class="perf-desc">trait ChainAdapter compile ลงเป็น static dispatch ไม่มี vtable overhead · monomorphization ทุก generic</div>
+    </div>
+    <div class="perf-card">
+      <div class="perf-title">🧵 Fearless Concurrency</div>
+      <div class="perf-desc">Arc&lt;RwLock&lt;KeyShare&gt;&gt; · tokio::select! parallel TSS rounds · ไม่มี data race by design</div>
+    </div>
+    <div class="perf-card">
+      <div class="perf-title">🚫 No GC Pauses</div>
+      <div class="perf-desc">signing latency deterministic · ไม่มี stop-the-world GC · critical สำหรับ real-time threshold</div>
+    </div>
+    <div class="perf-card">
+      <div class="perf-title">📦 MessagePack</div>
+      <div class="perf-desc">rmp-serde แทน JSON · 5–10x ไวกว่าใน serialization · zero-copy Bytes สำหรับ NATS payload</div>
+    </div>
+    <div class="perf-card">
+      <div class="perf-title">🔒 Memory Safety</div>
+      <div class="perf-desc">zeroize secrets · secrecy::Secret&lt;T&gt; · borrow checker ป้องกัน use-after-free · no undefined behavior</div>
+    </div>
+    <div class="perf-card">
+      <div class="perf-title">🌐 WASM Ready</div>
+      <div class="perf-desc">mpc-core แยกเป็น no_std · compile to WASM สำหรับ browser wallet ในอนาคต</div>
+    </div>
+  </div>
+
+  <!-- LEGEND -->
+  <div class="legend">
+    <div class="leg"><span class="leg-dot" style="background:var(--accent1)"></span>Client / SDK</div>
+    <div class="leg"><span class="leg-dot" style="background:var(--accent6)"></span>Transport / NATS</div>
+    <div class="leg"><span class="leg-dot" style="background:var(--accent2)"></span>MPC Nodes</div>
+    <div class="leg"><span class="leg-dot" style="background:var(--accent3)"></span>Crypto Core</div>
+    <div class="leg"><span class="leg-dot" style="background:var(--accent5)"></span>Chain Adapters</div>
+    <div class="leg"><span class="leg-dot" style="background:var(--accent4)"></span>Storage</div>
+    <div style="margin-left:auto; font-family:'JetBrains Mono',monospace; font-size:9px; color:var(--muted);">
+      Rust 2021 edition · Tokio 1.x · Cargo workspace
+    </div>
+  </div>
+
+  <!-- ===================================================== -->
+  <!-- ENTERPRISE V2 ADD-ONS: Threat Model + Repo Layout + Jira Spec -->
+  <!-- ===================================================== -->
+
+  <div class="divider"></div>
+
+  <div class="section-label">Enterprise v2 — Threat Model (STRIDE) &amp; Trust Boundaries</div>
+  <div class="layer" style="border-color: rgba(251,113,133,0.35);">
+    <div class="layer-header bg5h">
+      <span class="dot glow" style="background:var(--accent5);color:var(--accent5)"></span>
+      <span class="c5">Security Model &nbsp;<span style="font-weight:300;opacity:.5">enterprise custody / treasury / exchange</span></span>
+      <span style="margin-left:auto;font-size:9px;color:var(--muted)">STRIDE · EVIDENCE · INCIDENT</span>
+    </div>
+    <div class="layer-body">
+
+      <div class="cards">
+        <div class="card">
+          <div class="card-title">🧱 Assets to Protect</div>
+          <div class="card-sub">
+            • Key shares (per-node) · never reconstruct<br>
+            • Signing authorization (policy + approvals)<br>
+            • Transaction integrity (no tampering / no downgrade)<br>
+            • Audit evidence (immutable, verifiable chain)<br>
+            • Node identities + mTLS keys<br>
+            • Allowlist / limits / policy versions
+          </div>
+          <span class="tag t5">core</span>
+        </div>
+
+        <div class="card">
+          <div class="card-title">🔭 Trust Boundaries</div>
+          <div class="card-sub">
+            1) Client ↔ API Gateway (OIDC, mTLS optional)<br>
+            2) Control Plane ↔ Data Plane (NATS mTLS + signed envelopes)<br>
+            3) MPC Nodes ↔ Storage (envelope encryption, KMS-wrapped KEK)<br>
+            4) Broadcast ↔ Chain RPC (rate limit, provider failover)<br>
+            5) Audit Ledger (append-only + hash chain + signatures)
+          </div>
+          <span class="tag t5">boundary</span>
+        </div>
+
+        <div class="card">
+          <div class="card-title">🧨 Break-glass / Freeze</div>
+          <div class="card-sub">
+            • Freeze wallet: deny new sessions, abort pending<br>
+            • Break-glass: extra approvals + step-up MFA + extra evidence<br>
+            • Incident mode: stricter policy, longer holds, manual broadcast
+          </div>
+          <span class="tag t5">ops</span>
+        </div>
+      </div>
+
+      <div style="margin-top:12px; border:1px solid var(--border); border-radius:6px; overflow:hidden;">
+        <div style="padding:10px 14px; background:rgba(255,255,255,0.02); border-bottom:1px solid var(--border); font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:.12em; text-transform:uppercase;">
+          STRIDE Threat Matrix (High-level)
+        </div>
+        <div style="padding:12px 14px; background:var(--surface); font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--text); line-height:1.85;">
+          <span style="color:var(--accent2)">S</span>poofing — fake node / fake approver → mTLS + node identity (Ed25519), OIDC + phishing-resistant MFA, cert pinning<br>
+          <span style="color:var(--accent2)">T</span>ampering — modify tx / policy / messages → tx_fingerprint immutability, signed envelopes, policy bundle signed releases, hash-chained audit ledger<br>
+          <span style="color:var(--accent2)">R</span>epudiation — “I didn't approve” → approver signature over approval payload, immutable ledger, evidence pack export<br>
+          <span style="color:var(--accent2)">I</span>nformation disclosure — leak keyshares/transcripts → transcript hash-only, envelope encryption at rest, strict logs scrub, memory zeroize<br>
+          <span style="color:var(--accent2)">D</span>enial of service — flood rounds/bus → rate limit, JetStream backpressure, per-session seq_no + TTL, circuit breakers, quorum continue policy<br>
+          <span style="color:var(--accent2)">E</span>levation of privilege — bypass policy → “no policy, no sign” gating, SoD (maker/checker/approver), admin actions require higher quorum
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap:10px;">
+        <div class="perf-card">
+          <div class="perf-title">🧩 Key Risks (Top 10)</div>
+          <div class="perf-desc">
+            1) Approval bypass / policy bug<br>
+            2) Tx tampering between build → sign<br>
+            3) Replay on message bus<br>
+            4) Nonce misuse / bias<br>
+            5) Node co-location blast radius<br>
+            6) Secrets in logs / core dumps<br>
+            7) KMS/IAM compromise<br>
+            8) RPC manipulation / MEV attacks (EVM)<br>
+            9) Insider abuse (SoD failure)<br>
+            10) Audit evidence gaps
+          </div>
+        </div>
+
+        <div class="perf-card">
+          <div class="perf-title">🛡 Mitigations (Must Implement)</div>
+          <div class="perf-desc">
+            • Policy-as-code + signed releases<br>
+            • tx_fingerprint canonical hash locked pre-sign<br>
+            • seq_no monotonic + expiring envelopes<br>
+            • nonce hardening (commit + deterministic fallback)<br>
+            • 3-of-5 across multi-cloud + on-prem<br>
+            • zeroize + secrecy + crash/ptrace hardening<br>
+            • envelope encryption (DEK + KMS-wrapped KEK)<br>
+            • tx simulation + contract method allowlists<br>
+            • maker/checker/approver enforced<br>
+            • append-only ledger + evidence pack
+          </div>
+        </div>
+
+        <div class="perf-card">
+          <div class="perf-title">🧪 Security Testing Plan</div>
+          <div class="perf-desc">
+            • Unit: state machine, policy edges, replay reject<br>
+            • Integration: full sign flow w/ mocked nodes<br>
+            • Chaos: kill node mid-round, partition NATS<br>
+            • Red-team: approval spoof, tx tampering attempt<br>
+            • Secrets: log scanning + core dump prevention<br>
+            • Supply chain: crate audit + SBOM
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="section-label">Enterprise v2 — Repo Layout &amp; CI/CD (Dev-ready)</div>
+
+  <div class="layer" style="border-color: rgba(56,189,248,0.35);">
+    <div class="layer-header bg6h">
+      <span class="dot glow" style="background:var(--accent6);color:var(--accent6)"></span>
+      <span class="c6">Monorepo Layout &nbsp;<span style="font-weight:300;opacity:.5">Rust workspace + deploy manifests</span></span>
+      <span style="margin-left:auto;font-size:9px;color:var(--muted)">AXUM · SQLX · NATS · OTel</span>
+    </div>
+    <div class="layer-body">
+
+      <div style="border: 1px solid var(--border); border-radius:6px; padding:12px 14px; background:var(--surface);">
+        <div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--muted); line-height:1.75;">
+          /<br>
+          &nbsp;&nbsp;Cargo.toml (workspace)<br>
+          &nbsp;&nbsp;README.md<br>
+          &nbsp;&nbsp;docs/<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;SPEC.md (this spec, generated)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;THREAT_MODEL.md<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;RUNBOOKS.md<br>
+          &nbsp;&nbsp;infra/<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;k8s/ (helm/kustomize)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;terraform/ (multi-cloud + on-prem stubs)<br>
+          &nbsp;&nbsp;crates/<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;mpc-core/ (crypto engine: ECDSA TSS + FROST)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;mpc-transport/ (NATS, mTLS, envelopes, replay protect)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;mpc-storage/ (envelope encryption, zeroize, backups)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;chains/ (evm, bitcoin, solana, cosmos...)<br>
+          &nbsp;&nbsp;services/<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;api-gateway/ (Axum: auth + routing + rate limit)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;policy-engine/ (policy eval + signed releases)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;approval-orchestrator/ (SoD workflow + quorum)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;tx-builder/ (canonical tx build + fingerprint)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;tx-simulator/ (EVM simulate, BTC/SOL validators)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;session-manager/ (state machine, retries, idempotency)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;broadcaster/ (broadcast + confirm + provider failover)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;audit-ledger/ (append-only hash chain + evidence pack)<br>
+          &nbsp;&nbsp;bins/<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;mpc-node/ (daemon, per-cloud deployment)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;mpc-cli/ (keygen/sign/reshare/bench/admin helpers)<br>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="cards">
+        <div class="card">
+          <div class="card-title">✅ CI Pipeline (Required)</div>
+          <div class="card-sub">
+            • fmt + clippy (deny warnings)<br>
+            • unit tests + integration tests<br>
+            • cargo audit + supply-chain checks<br>
+            • SBOM generation (CycloneDX)<br>
+            • secret scanning (no keys in repo)<br>
+            • container build + signature (cosign)<br>
+            • deploy to staging + smoke tests
+          </div>
+          <span class="tag t6">ci</span>
+        </div>
+
+        <div class="card">
+          <div class="card-title">🔐 Security Gates</div>
+          <div class="card-sub">
+            • Policy bundle signed releases enforced<br>
+            • No policy → no sign (compile-time + runtime guard)<br>
+            • Replay protection tests must pass<br>
+            • Evidence pack export required for production<br>
+            • Log scrub + PII/secret redaction tests
+          </div>
+          <span class="tag t6">gates</span>
+        </div>
+
+        <div class="card">
+          <div class="card-title">📈 Observability Standard</div>
+          <div class="card-sub">
+            • tracing + OpenTelemetry traces<br>
+            • Prometheus metrics: p95 sign latency, quorum risk<br>
+            • Structured JSON logs with correlation id<br>
+            • Alerts: node quorum, replay attempts, policy denies spike
+          </div>
+          <span class="tag t6">otel</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="section-label">Enterprise v2 — Jira Breakdown (Epics → Stories)</div>
+
+  <div class="layer" style="border-color: rgba(224,107,63,0.35);">
+    <div class="layer-header bg1h">
+      <span class="dot glow" style="background:var(--accent1);color:var(--accent1)"></span>
+      <span class="c1">Delivery Plan &nbsp;<span style="font-weight:300;opacity:.5">dev-ready tickets</span></span>
+      <span style="margin-left:auto;font-size:9px;color:var(--muted)">MVP → HARDEN → DEAL-CLOSER</span>
+    </div>
+    <div class="layer-body">
+
+      <div class="perf-grid">
+        <div class="perf-card">
+          <div class="perf-title">EPIC A — Identity &amp; Access</div>
+          <div class="perf-desc">
+            A1 OIDC auth middleware (JWKS cache)<br>
+            A2 RBAC permissions + endpoint guards<br>
+            A3 ABAC attributes (dept/cost center/risk tier)<br>
+            A4 Admin actions: step-up MFA requirement (policy)
+          </div>
+        </div>
+
+        <div class="perf-card">
+          <div class="perf-title">EPIC B — Policy Engine</div>
+          <div class="perf-desc">
+            B1 Policy schema + versioning<br>
+            B2 Signed policy releases (SECURITY quorum)<br>
+            B3 Evaluator: allowlist/limits/risk<br>
+            B4 Templates: Exchange/Treasury/Custodian
+          </div>
+        </div>
+
+        <div class="perf-card">
+          <div class="perf-title">EPIC C — Approvals &amp; SoD</div>
+          <div class="perf-desc">
+            C1 Approval payload signing (approver signature)<br>
+            C2 Quorum enforcement + hold periods<br>
+            C3 Maker/Checker/Approver separation validation<br>
+            C4 Break-glass approvals (extra evidence)
+          </div>
+        </div>
+
+        <div class="perf-card">
+          <div class="perf-title">EPIC D — Session Manager</div>
+          <div class="perf-desc">
+            D1 State machine + persistence<br>
+            D2 Idempotent execute + request locking<br>
+            D3 Retry budgets + quorum degrade logic<br>
+            D4 Anti-tamper: tx_fingerprint lock pre-sign
+          </div>
+        </div>
+
+        <div class="perf-card">
+          <div class="perf-title">EPIC E — Transport Hardening</div>
+          <div class="perf-desc">
+            E1 mTLS + cert rotation plan<br>
+            E2 Signed envelopes (Ed25519 node identity)<br>
+            E3 Replay protection (seq_no, TTL)<br>
+            E4 JetStream subjects + ACL
+          </div>
+        </div>
+
+        <div class="perf-card">
+          <div class="perf-title">EPIC F — Audit Ledger</div>
+          <div class="perf-desc">
+            F1 Append-only ledger + hash chain + service signature<br>
+            F2 Evidence pack exporter (policy+approvals+hashes+tx)<br>
+            F3 Tamper verification CLI (audit-verify)<br>
+            F4 WORM storage integration (S3 object lock or immudb)
+          </div>
+        </div>
+
+        <div class="perf-card">
+          <div class="perf-title">EPIC G — Tx Simulation</div>
+          <div class="perf-desc">
+            G1 EVM simulate + ABI decode + proxy detect<br>
+            G2 BTC PSBT validation + fee sanity<br>
+            G3 SOL program allowlist + writable checks<br>
+            G4 Risk score + policy hooks
+          </div>
+        </div>
+
+        <div class="perf-card">
+          <div class="perf-title">EPIC H — Key Lifecycle</div>
+          <div class="perf-desc">
+            H1 Proactive refresh schedule + ceremony records<br>
+            H2 Reshare add/remove nodes (strict approvals)<br>
+            H3 Freeze/unfreeze wallet + abort sessions<br>
+            H4 Disaster recovery playbook + drills
+          </div>
+        </div>
+
+        <div class="perf-card">
+          <div class="perf-title">EPIC I — Multi-cloud Ops</div>
+          <div class="perf-desc">
+            I1 Enforce node distribution constraints (no 3-in-1 cloud quorum)<br>
+            I2 Health/heartbeat + quorum risk alerts<br>
+            I3 Provider failover for RPC broadcasting<br>
+            I4 Chaos tests: node kill, partition, replay
+          </div>
+        </div>
+
+      </div>
+
+      <div style="margin-top:12px; padding:12px 14px; border:1px solid var(--border); border-radius:6px; background:rgba(255,255,255,0.012);">
+        <div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--muted); line-height:1.8;">
+          <span style="color:var(--accent1); font-weight:700;">MVP Exit Criteria</span><br>
+          • 3-of-5 signing across multi-cloud + on-prem<br>
+          • Policy enforced pre-sign + approvals quorum enforced<br>
+          • Signed envelopes + replay protection passing tests<br>
+          • Append-only audit ledger + evidence pack export<br>
+          • Freeze + break-glass runbooks tested<br>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

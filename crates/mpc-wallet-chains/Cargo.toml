@@ -1,0 +1,38 @@
+[package]
+name = "mpc-wallet-chains"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MPC wallet chain providers: EVM, Bitcoin, Solana, Sui"
+
+[dependencies]
+mpc-wallet-core = { workspace = true }
+
+# Crypto
+k256 = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha3 = { workspace = true }
+sha2 = { workspace = true }
+blake2 = { workspace = true }
+
+# Blockchain SDKs
+alloy = { workspace = true }
+bitcoin = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Utilities
+hex = { workspace = true }
+bs58 = { workspace = true }
+bech32 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
