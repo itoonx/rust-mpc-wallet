@@ -17,20 +17,33 @@ pub struct EvmProvider {
 }
 
 impl EvmProvider {
-    pub fn new(chain: Chain, chain_id: u64) -> Self {
-        Self { chain, chain_id }
+    /// Create an `EvmProvider` for the given chain. The chain_id is derived
+    /// automatically from the chain variant. Returns `CoreError::InvalidInput`
+    /// for non-EVM chains (Bitcoin, Solana, Sui).
+    pub fn new(chain: Chain) -> Result<Self, CoreError> {
+        let chain_id = match chain {
+            Chain::Ethereum => 1,
+            Chain::Polygon => 137,
+            Chain::Bsc => 56,
+            other => {
+                return Err(CoreError::InvalidInput(format!(
+                    "chain '{other}' is not an EVM chain"
+                )))
+            }
+        };
+        Ok(Self { chain, chain_id })
     }
 
     pub fn ethereum() -> Self {
-        Self::new(Chain::Ethereum, 1)
+        Self { chain: Chain::Ethereum, chain_id: 1 }
     }
 
     pub fn polygon() -> Self {
-        Self::new(Chain::Polygon, 137)
+        Self { chain: Chain::Polygon, chain_id: 137 }
     }
 
     pub fn bsc() -> Self {
-        Self::new(Chain::Bsc, 56)
+        Self { chain: Chain::Bsc, chain_id: 56 }
     }
 }
 
