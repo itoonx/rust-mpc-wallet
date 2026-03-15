@@ -2,6 +2,8 @@ pub mod address;
 pub mod signer;
 pub mod tx;
 
+pub use tx::validate_sui_address;
+
 use async_trait::async_trait;
 
 use mpc_wallet_core::error::CoreError;
@@ -48,6 +50,34 @@ impl Default for SuiProvider {
 }
 
 impl SuiProvider {
+    /// Build a Sui transaction with an explicit sender address.
+    ///
+    /// Unlike `build_transaction` (which reads the sender from `params.extra["sender"]`),
+    /// this method takes the sender directly and validates it before constructing the tx.
+    ///
+    /// # Errors
+    /// Returns `CoreError::InvalidInput` if `sender` is not a valid Sui address
+    /// (`0x` + 64 lowercase hex chars).
+    pub async fn build_transaction_with_sender(
+        &self,
+        params: TransactionParams,
+        sender: &str,
+    ) -> Result<UnsignedTransaction, CoreError> {
+        // Validate sender address — fail fast before touching any transaction state.
+        tx::validate_sui_address(sender)?;
+
+        // Inject validated sender into extra params and delegate.
+        let mut params = params;
+        let extra = params
+            .extra
+            .get_or_insert(serde_json::Value::Object(Default::default()));
+        extra["sender"] = serde_json::Value::String(sender.to_string());
+        params.extra = Some(extra.clone());
+
+        // Delegate to existing build logic (requires pubkey stored).
+        self.build_transaction(params).await
+    }
+
     /// Broadcast a signed transaction to the Sui network.
     ///
     /// # TODO (production)

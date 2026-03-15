@@ -696,3 +696,48 @@ async fn test_solana_same_from_to_address() {
         result
     );
 }
+
+// ============================================================================
+// Sui sender address validation tests (T-06)
+// ============================================================================
+
+#[test]
+fn test_sui_validate_address_valid() {
+    let valid = "0x0000000000000000000000000000000000000000000000000000000000000001";
+    let result = mpc_wallet_chains::sui::tx::validate_sui_address(valid);
+    assert!(result.is_ok(), "valid Sui address must pass validation: {:?}", result);
+    assert_eq!(result.unwrap()[31], 0x01, "last byte must be 0x01");
+}
+
+#[test]
+fn test_sui_validate_address_missing_prefix() {
+    let bad = "0000000000000000000000000000000000000000000000000000000000000001";
+    let result = mpc_wallet_chains::sui::tx::validate_sui_address(bad);
+    assert!(result.is_err(), "address without 0x prefix must fail");
+}
+
+#[test]
+fn test_sui_validate_address_wrong_length() {
+    let bad = "0x00000000000000000000000000000000000000000000000000000000000001";
+    let result = mpc_wallet_chains::sui::tx::validate_sui_address(bad);
+    assert!(result.is_err(), "address with wrong length must fail");
+}
+
+#[tokio::test]
+async fn test_sui_build_with_sender_validates_address() {
+    use mpc_wallet_core::protocol::GroupPublicKey;
+    let provider = mpc_wallet_chains::sui::SuiProvider::with_pubkey(
+        GroupPublicKey::Ed25519(vec![1u8; 32])
+    );
+    let params = TransactionParams {
+        to: "0x0000000000000000000000000000000000000000000000000000000000000002".to_string(),
+        value: "1000".to_string(),
+        data: None, chain_id: None, extra: None,
+    };
+    let valid_sender = "0x0000000000000000000000000000000000000000000000000000000000000001";
+    let result = provider.build_transaction_with_sender(params.clone(), valid_sender).await;
+    assert!(result.is_ok(), "valid sender must succeed: {:?}", result);
+    let bad_sender = "not-a-valid-address";
+    let result = provider.build_transaction_with_sender(params, bad_sender).await;
+    assert!(result.is_err(), "invalid sender must return error");
+}

@@ -10,6 +10,24 @@
 use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::{GroupPublicKey, MpcSignature};
 
+/// Validate a Sui address string.
+/// A valid Sui address is `0x` followed by exactly 64 lowercase hex characters (32 bytes).
+pub fn validate_sui_address(addr: &str) -> Result<[u8; 32], CoreError> {
+    let hex_part = addr.strip_prefix("0x").ok_or_else(|| {
+        CoreError::InvalidInput(format!("Sui address must start with '0x', got: {addr}"))
+    })?;
+    if hex_part.len() != 64 {
+        return Err(CoreError::InvalidInput(format!(
+            "Sui address must be 0x + 64 hex chars (32 bytes), got {} hex chars",
+            hex_part.len()
+        )));
+    }
+    let bytes = hex::decode(hex_part).map_err(|e| {
+        CoreError::InvalidInput(format!("Sui address contains invalid hex: {e}"))
+    })?;
+    Ok(bytes.try_into().unwrap()) // safe: we checked len == 64 hex = 32 bytes
+}
+
 use crate::provider::{Chain, SignedTransaction, TransactionParams, UnsignedTransaction};
 
 /// Sui intent prefix for transaction signing: [intent_scope=0, version=0, app_id=0]
