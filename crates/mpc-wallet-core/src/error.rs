@@ -30,6 +30,10 @@ pub enum CoreError {
     #[error("key group frozen: {0}")]
     KeyFrozen(String),
 
+    /// A password is required but was not provided.
+    #[error("password required: {0}")]
+    PasswordRequired(String),
+
     #[error("invalid input: {0}")]
     InvalidInput(String),
 
