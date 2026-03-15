@@ -88,6 +88,39 @@ impl EncryptedFileStore {
     fn metadata_path(&self, group_id: &KeyGroupId) -> PathBuf {
         self.group_dir(group_id).join("metadata.json")
     }
+
+    /// Record the timestamp of the most recent key refresh for a key group.
+    ///
+    /// Writes a `touch.json` file in the group directory containing the current
+    /// Unix timestamp (seconds since epoch). Does NOT access or decrypt key shares.
+    ///
+    /// Used by the proactive refresh protocol to track when key material was
+    /// last rotated.
+    pub async fn touch(&self, group_id: &KeyGroupId) -> Result<(), CoreError> {
+        let group_dir = self.group_dir(group_id);
+        if !group_dir.exists() {
+            return Err(CoreError::KeyStore(format!(
+                "key group not found: {}",
+                group_id.0
+            )));
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| CoreError::KeyStore(e.to_string()))?
+            .as_secs();
+
+        let touch_data = serde_json::json!({ "last_refreshed": now });
+        let touch_path = group_dir.join("touch.json");
+        let json = serde_json::to_string_pretty(&touch_data)
+            .map_err(|e| CoreError::KeyStore(e.to_string()))?;
+
+        tokio::fs::write(&touch_path, json.as_bytes())
+            .await
+            .map_err(|e| CoreError::KeyStore(e.to_string()))?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -243,5 +276,33 @@ mod tests {
 
         // Cleanup
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_touch_updates_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EncryptedFileStore::new(dir.path().to_path_buf(), "test-password");
+        let group_id = KeyGroupId::new();
+
+        // touch should fail if group doesn't exist
+        let result = store.touch(&group_id).await;
+        assert!(result.is_err(), "touch on non-existent group should fail");
+
+        // create the group directory manually to simulate a saved key group
+        let group_dir = dir.path().join(&group_id.0);
+        tokio::fs::create_dir_all(&group_dir).await.unwrap();
+
+        // touch should succeed now
+        store.touch(&group_id).await.expect("touch should succeed");
+
+        // touch.json should exist and contain last_refreshed
+        let touch_path = group_dir.join("touch.json");
+        assert!(touch_path.exists(), "touch.json must be created");
+        let content = tokio::fs::read_to_string(&touch_path).await.unwrap();
+        let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(
+            json["last_refreshed"].as_u64().unwrap() > 0,
+            "timestamp must be positive"
+        );
     }
 }

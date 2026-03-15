@@ -61,13 +61,15 @@ async fn run_sign(
 }
 
 // ============================================================================
-// GG20 ECDSA tests
+// GG20 ECDSA tests — only compiled with `gg20-simulation` feature
 // ============================================================================
 
+#[cfg(feature = "gg20-simulation")]
 fn gg20_factory() -> Box<dyn MpcProtocol> {
     Box::new(mpc_wallet_core::protocol::gg20::Gg20Protocol::new())
 }
 
+#[cfg(feature = "gg20-simulation")]
 #[tokio::test]
 async fn test_gg20_keygen_sign_verify() {
     let shares = run_keygen(gg20_factory, 2, 3).await;
@@ -108,6 +110,7 @@ async fn test_gg20_keygen_sign_verify() {
     vk.verify(message, &sig).unwrap();
 }
 
+#[cfg(feature = "gg20-simulation")]
 #[tokio::test]
 async fn test_gg20_different_signer_subsets() {
     let shares = run_keygen(gg20_factory, 2, 3).await;
