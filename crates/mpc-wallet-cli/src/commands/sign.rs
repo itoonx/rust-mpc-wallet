@@ -29,7 +29,11 @@ pub struct SignArgs {
 
 pub async fn run(args: SignArgs, format: OutputFormat) -> anyhow::Result<()> {
     let group_id = KeyGroupId::from_string(args.key_group);
-    let password = args.password.unwrap_or_else(|| "demo-password".into());
+    let password = match args.password {
+        Some(p) => p,
+        None => rpassword::prompt_password("Enter wallet password: ")
+            .map_err(|e| anyhow::anyhow!("Failed to read password: {e}"))?,
+    };
 
     let store = mpc_wallet_core::key_store::encrypted::EncryptedFileStore::new(
         crate::config::key_store_dir(),
