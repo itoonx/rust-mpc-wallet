@@ -386,10 +386,11 @@ async fn distributed_sign(
     use sha2::Digest;
 
     // Deserialize our Shamir share.
-    // SEC-004 partial fix: wrap the share_data clone in Zeroizing so the raw
-    // bytes are zeroed on drop.  The deserialized Gg20ShareData also derives
-    // ZeroizeOnDrop, ensuring the scalar bytes (y field) are erased after use.
-    let share_data_copy = Zeroizing::new(key_share.share_data.clone());
+    // SEC-004 root fix (T-S4-00): share_data is now Zeroizing<Vec<u8>>.
+    // Cloning it produces another Zeroizing<Vec<u8>> — no need to wrap again.
+    // The deserialized Gg20ShareData derives ZeroizeOnDrop, ensuring the scalar
+    // bytes (y field) are erased after use.
+    let share_data_copy = key_share.share_data.clone();
     let my_share: Gg20ShareData = serde_json::from_slice(&share_data_copy)
         .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
@@ -667,8 +668,11 @@ async fn simulation_keygen(
             party_id,
             config,
             group_public_key: GroupPublicKey::Secp256k1(group_pubkey_bytes),
-            share_data: serde_json::to_vec(&share_data)
-                .map_err(|e| CoreError::Serialization(e.to_string()))?,
+            // SEC-004 root fix (T-S4-00/T-S4-01): wrap in Zeroizing
+            share_data: zeroize::Zeroizing::new(
+                serde_json::to_vec(&share_data)
+                    .map_err(|e| CoreError::Serialization(e.to_string()))?,
+            ),
         })
     } else {
         let msg = transport.recv().await?;
@@ -684,7 +688,8 @@ async fn simulation_keygen(
             party_id,
             config,
             group_public_key: GroupPublicKey::Secp256k1(group_pubkey_bytes),
-            share_data: share_bytes,
+            // SEC-004 root fix (T-S4-00/T-S4-01): wrap in Zeroizing
+            share_data: zeroize::Zeroizing::new(share_bytes),
         })
     }
 }
@@ -705,10 +710,9 @@ async fn simulation_sign(
 ) -> Result<MpcSignature, CoreError> {
     use k256::SecretKey;
 
-    // SEC-004 partial fix: wrap the share_data clone in Zeroizing so the raw
-    // bytes are zeroed on drop.  The deserialized Gg20ShareData also derives
-    // ZeroizeOnDrop, ensuring the scalar bytes (y field) are erased after use.
-    let share_data_copy = Zeroizing::new(key_share.share_data.clone());
+    // SEC-004 root fix (T-S4-00): share_data is now Zeroizing<Vec<u8>>.
+    // Cloning produces another Zeroizing<Vec<u8>> — no double-wrap needed.
+    let share_data_copy = key_share.share_data.clone();
     let my_share: Gg20ShareData = serde_json::from_slice(&share_data_copy)
         .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
