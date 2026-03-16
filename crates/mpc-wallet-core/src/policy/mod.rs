@@ -28,7 +28,7 @@ use std::sync::RwLock;
 
 use crate::error::CoreError;
 use crate::policy::evaluator::{evaluate, EvalResult};
-pub use crate::policy::schema::{ChainPolicy, Policy, POLICY_SCHEMA_VERSION};
+pub use crate::policy::schema::{ChainPolicy, Policy, SignedPolicy, POLICY_SCHEMA_VERSION};
 
 /// In-memory store for the active signing policy.
 ///
@@ -81,6 +81,16 @@ impl PolicyStore {
         }
         *self.policy.write().unwrap() = Some(policy);
         Ok(())
+    }
+
+    /// Load a signed policy bundle after verifying its Ed25519 signature.
+    ///
+    /// Rejects the policy if:
+    /// - Signature verification fails
+    /// - Policy version doesn't match [`POLICY_SCHEMA_VERSION`]
+    pub fn load_signed(&self, signed: &SignedPolicy) -> Result<(), CoreError> {
+        let policy = signed.verify()?;
+        self.load(policy.clone())
     }
 
     /// Clear the active policy.
@@ -252,5 +262,75 @@ mod tests {
         store.clear();
         let err = store.check("ethereum", "0xabc", 1).unwrap_err();
         assert!(matches!(err, CoreError::PolicyRequired(_)));
+    }
+
+    // --- Signed policy bundle tests ---
+
+    fn make_signing_key() -> ed25519_dalek::SigningKey {
+        use rand::rngs::OsRng;
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        ed25519_dalek::SigningKey::from_bytes(&bytes)
+    }
+
+    #[test]
+    fn test_signed_policy_roundtrip() {
+        let signing_key = make_signing_key();
+        let policy = Policy::allow_all("signed-test");
+        let signed = SignedPolicy::sign(policy, &signing_key);
+
+        assert!(signed.verify().is_ok());
+        assert_eq!(signed.verify().unwrap().name, "signed-test");
+    }
+
+    #[test]
+    fn test_signed_policy_tampered_rejected() {
+        let signing_key = make_signing_key();
+        let policy = Policy::allow_all("original");
+        let mut signed = SignedPolicy::sign(policy, &signing_key);
+
+        // Tamper with the policy name
+        signed.policy.name = "TAMPERED".into();
+
+        assert!(
+            signed.verify().is_err(),
+            "tampered policy must fail verification"
+        );
+    }
+
+    #[test]
+    fn test_signed_policy_wrong_key_rejected() {
+        let key1 = make_signing_key();
+        let key2 = make_signing_key();
+
+        let policy = Policy::allow_all("test");
+        let mut signed = SignedPolicy::sign(policy, &key1);
+        // Replace signer key with a different key
+        signed.signer_key_hex = hex::encode(key2.verifying_key().to_bytes());
+
+        assert!(signed.verify().is_err());
+    }
+
+    #[test]
+    fn test_load_signed_policy() {
+        let signing_key = make_signing_key();
+        let store = PolicyStore::new();
+        let policy = Policy::allow_all("signed-loaded");
+        let signed = SignedPolicy::sign(policy, &signing_key);
+
+        store.load_signed(&signed).unwrap();
+        assert!(store.check("ethereum", "0xabc", 100).is_ok());
+    }
+
+    #[test]
+    fn test_load_signed_tampered_rejected() {
+        let signing_key = make_signing_key();
+        let store = PolicyStore::new();
+        let policy = Policy::allow_all("test");
+        let mut signed = SignedPolicy::sign(policy, &signing_key);
+        signed.policy.name = "TAMPERED".into();
+
+        assert!(store.load_signed(&signed).is_err());
     }
 }

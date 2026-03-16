@@ -5,6 +5,7 @@
 //! "no policy → no sign" rule (FR-B5): a signing session cannot start unless
 //! a valid policy has been loaded via [`super::PolicyStore::load`].
 
+use crate::error::CoreError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -75,5 +76,61 @@ impl Policy {
             name: name.into(),
             chains: HashMap::new(),
         }
+    }
+}
+
+/// A policy document signed by an authorized policy administrator.
+///
+/// The signature covers the canonical JSON bytes of the inner `Policy`.
+/// Use [`SignedPolicy::verify`] to check authenticity before loading.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedPolicy {
+    /// The policy document.
+    pub policy: Policy,
+    /// Ed25519 signature over the canonical JSON of `policy`.
+    pub signature: Vec<u8>,
+    /// Hex-encoded Ed25519 verifying key of the signer.
+    pub signer_key_hex: String,
+}
+
+impl SignedPolicy {
+    /// Sign a policy with an Ed25519 signing key.
+    pub fn sign(policy: Policy, signing_key: &ed25519_dalek::SigningKey) -> Self {
+        use ed25519_dalek::Signer;
+        let canonical = serde_json::to_vec(&policy).expect("policy serialization cannot fail");
+        let signature = signing_key.sign(&canonical);
+        Self {
+            policy,
+            signature: signature.to_bytes().to_vec(),
+            signer_key_hex: hex::encode(signing_key.verifying_key().to_bytes()),
+        }
+    }
+
+    /// Verify the signature and return the inner policy if valid.
+    pub fn verify(&self) -> Result<&Policy, CoreError> {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        let vk_bytes = hex::decode(&self.signer_key_hex)
+            .map_err(|e| CoreError::PolicyRequired(format!("invalid signer key hex: {e}")))?;
+        let vk_arr: [u8; 32] = vk_bytes
+            .try_into()
+            .map_err(|_| CoreError::PolicyRequired("signer key must be 32 bytes".into()))?;
+        let verifying_key = VerifyingKey::from_bytes(&vk_arr)
+            .map_err(|e| CoreError::PolicyRequired(format!("invalid verifying key: {e}")))?;
+
+        let sig_bytes: [u8; 64] = self
+            .signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| CoreError::PolicyRequired("signature must be 64 bytes".into()))?;
+        let signature = Signature::from_bytes(&sig_bytes);
+
+        let canonical =
+            serde_json::to_vec(&self.policy).expect("policy serialization cannot fail");
+        verifying_key
+            .verify(&canonical, &signature)
+            .map_err(|_| CoreError::PolicyRequired("policy signature verification failed".into()))?;
+
+        Ok(&self.policy)
     }
 }
