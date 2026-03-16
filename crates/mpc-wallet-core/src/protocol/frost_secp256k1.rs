@@ -187,10 +187,10 @@ impl MpcProtocol for FrostSecp256k1TrProtocol {
         transport: &dyn Transport,
     ) -> Result<MpcSignature, CoreError> {
         // Deserialize stored data.
-        // SEC-004 partial fix: wrap the share_data clone in Zeroizing so the raw
-        // bytes are zeroed on drop.  The deserialized FrostSecp256k1ShareData also
-        // derives ZeroizeOnDrop, ensuring key material bytes are erased after use.
-        let share_data_copy = Zeroizing::new(key_share.share_data.clone());
+        // SEC-004 root fix (T-S4-00): share_data is now Zeroizing<Vec<u8>>.
+        // Cloning produces another Zeroizing<Vec<u8>> — no double-wrap needed.
+        // The deserialized FrostSecp256k1ShareData also derives ZeroizeOnDrop.
+        let share_data_copy = key_share.share_data.clone();
         let share_data: FrostSecp256k1ShareData =
             serde_json::from_slice(&share_data_copy)
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
