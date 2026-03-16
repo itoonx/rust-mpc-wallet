@@ -63,6 +63,10 @@ impl DwellirProvider {
             (Chain::Aptos, _) => Some("aptos"),
             (Chain::Movement, NetworkEnv::Testnet) => Some("movement-testnet"),
             (Chain::Movement, _) => Some("movement"),
+            // Alt L1s
+            (Chain::Ton, NetworkEnv::Testnet) => Some("ton-testnet"),
+            (Chain::Ton, _) => Some("ton"),
+            (Chain::Tron, _) => Some("tron"),
             // Non-EVM
             (Chain::BitcoinMainnet, _) => Some("bitcoin"),
             (Chain::Solana, _) => Some("solana"),
@@ -103,6 +107,8 @@ impl RpcProvider for DwellirProvider {
             Chain::MantaPacific,
             Chain::Aptos,
             Chain::Movement,
+            Chain::Ton,
+            Chain::Tron,
             Chain::BitcoinMainnet,
             Chain::Solana,
             Chain::Sui,

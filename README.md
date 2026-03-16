@@ -12,7 +12,7 @@
 
 **Threshold MPC Wallet SDK** — No single party ever holds a complete private key.
 
-EVM (22 chains) | Bitcoin | Solana | Sui | Aptos | Litecoin | Dogecoin | Zcash | Monero | 32 chains total
+EVM (22) | Bitcoin | Solana | Sui | Aptos | TON | TRON | LTC | DOGE | ZEC | XMR | 34 chains
 
 [![CI](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml)
 
@@ -84,7 +84,7 @@ cargo test --workspace     # 272 tests, ~4 seconds
 |----------|-----------|
 | **MPC Protocols** | GG20 ECDSA, FROST Ed25519, FROST Secp256k1-Taproot |
 | **Key Lifecycle** | Keygen, refresh, reshare (change threshold/add parties), freeze |
-| **32 Chains** | EVM L1/L2s, Bitcoin (Taproot), Solana, Sui, Aptos, Movement, LTC, DOGE, ZEC, XMR |
+| **34 Chains** | EVM L1/L2s, Bitcoin, Solana, Sui, Aptos, Movement, TON, TRON, LTC, DOGE, ZEC, XMR |
 | **RPC Registry** | Multi-provider (Dwellir, Alchemy, Infura, Blockstream, Mempool), failover, health tracking |
 | **Broadcast** | `eth_sendRawTransaction`, REST `/tx`, `sendTransaction`, `sui_executeTransactionBlock` |
 | **Transport** | NATS mTLS + per-session ECDH + SignedEnvelope replay protection |
@@ -142,6 +142,13 @@ cargo test --workspace     # 272 tests, ~4 seconds
 | Aptos | `0x` + 64 hex (SHA3-256) | FROST Ed25519 | :white_check_mark: |
 | Movement | `0x` + 64 hex (SHA3-256) | FROST Ed25519 | :white_check_mark: |
 
+### Alt L1s (2)
+
+| Chain | Address Format | Signing | Dwellir |
+|-------|---------------|---------|:-------:|
+| TON | `0:` + 64 hex (SHA-256) | FROST Ed25519 | :white_check_mark: |
+| TRON | Base58Check (`T...`, 0x41 prefix) | GG20 ECDSA (secp256k1) | :white_check_mark: |
+
 ### Other Chains (3)
 
 | Chain | Address Format | Signing | Dwellir |
@@ -185,7 +192,7 @@ docs/                  ← Architecture, security, CLI guide, sprint history
 ## Metrics
 
 ```
-  Chains:    32          Tests:    272 pass
+  Chains:    34          Tests:    272 pass
   LOC:       17,000+     CI:       fmt + clippy + test + audit
   Sprints:   17          Findings: 0 CRITICAL | 0 HIGH open
 ```

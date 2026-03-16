@@ -12,7 +12,7 @@
 
 **门限 MPC 钱包 SDK** — 没有任何一方持有完整的私钥。
 
-EVM（22 条链）| Bitcoin | Solana | Sui | Aptos | Litecoin | Dogecoin | Zcash | Monero | 共 32 条链
+EVM（22）| Bitcoin | Solana | Sui | Aptos | TON | TRON | LTC | DOGE | ZEC | XMR | 共 34 条链
 
 [![CI](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml)
 
@@ -84,7 +84,7 @@ cargo test --workspace     # 272 个测试，约 4 秒
 |------|------|
 | **MPC 协议** | GG20 ECDSA、FROST Ed25519、FROST Secp256k1-Taproot |
 | **密钥生命周期** | 生成、刷新、重分享（修改阈值/增删参与方）、冻结 |
-| **32 条链** | EVM L1/L2、Bitcoin（Taproot）、Solana、Sui、Aptos、Movement、LTC、DOGE、ZEC、XMR |
+| **34 条链** | EVM L1/L2、Bitcoin、Solana、Sui、Aptos、Movement、TON、TRON、LTC、DOGE、ZEC、XMR |
 | **RPC 注册表** | 多提供商（Dwellir、Alchemy、Infura、Blockstream、Mempool）、故障切换、健康追踪 |
 | **广播** | `eth_sendRawTransaction`、REST `/tx`、`sendTransaction`、`sui_executeTransactionBlock` |
 | **传输层** | NATS mTLS + 会话级 ECDH + SignedEnvelope 防重放 |
@@ -142,6 +142,13 @@ cargo test --workspace     # 272 个测试，约 4 秒
 | Aptos | `0x` + 64 hex (SHA3-256) | FROST Ed25519 | :white_check_mark: |
 | Movement | `0x` + 64 hex (SHA3-256) | FROST Ed25519 | :white_check_mark: |
 
+### 替代 L1（2 条）
+
+| 链 | 地址格式 | 签名协议 | Dwellir |
+|----|---------|---------|:-------:|
+| TON | `0:` + 64 hex (SHA-256) | FROST Ed25519 | :white_check_mark: |
+| TRON | Base58Check (`T...`, 0x41 前缀) | GG20 ECDSA (secp256k1) | :white_check_mark: |
+
 ### 其他链（3 条）
 
 | 链 | 地址格式 | 签名协议 | Dwellir |
@@ -185,7 +192,7 @@ docs/                  ← 架构、安全、CLI 指南、Sprint 历史
 ## 指标
 
 ```
-  链:       32           测试:     272 通过
+  链:       34           测试:     272 通过
   代码行:   17,000+      CI:       fmt + clippy + test + audit
   Sprint:   17           漏洞:     0 CRITICAL | 0 HIGH 未解决
 ```

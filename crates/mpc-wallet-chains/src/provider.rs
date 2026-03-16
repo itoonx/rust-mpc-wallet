@@ -45,6 +45,10 @@ pub enum Chain {
     Zcash,
     // CryptoNote
     Monero,
+    // Alt L1s
+    Ton,
+    Tron,
+    // Other
     Solana,
     Sui,
 }
@@ -82,6 +86,8 @@ impl std::fmt::Display for Chain {
             Chain::Dogecoin => write!(f, "dogecoin"),
             Chain::Zcash => write!(f, "zcash"),
             Chain::Monero => write!(f, "monero"),
+            Chain::Ton => write!(f, "ton"),
+            Chain::Tron => write!(f, "tron"),
             Chain::Solana => write!(f, "solana"),
             Chain::Sui => write!(f, "sui"),
         }
@@ -123,6 +129,8 @@ impl std::str::FromStr for Chain {
             "dogecoin" | "doge" => Ok(Chain::Dogecoin),
             "zcash" | "zec" => Ok(Chain::Zcash),
             "monero" | "xmr" => Ok(Chain::Monero),
+            "ton" => Ok(Chain::Ton),
+            "tron" | "trx" => Ok(Chain::Tron),
             "solana" | "sol" => Ok(Chain::Solana),
             "sui" => Ok(Chain::Sui),
             _ => Err(format!("unknown chain: {s}")),

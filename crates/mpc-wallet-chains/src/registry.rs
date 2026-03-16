@@ -15,6 +15,8 @@ use crate::provider::{Chain, ChainProvider, SignedTransaction};
 use crate::rpc::RpcRegistry;
 use crate::solana::SolanaProvider;
 use crate::sui::SuiProvider;
+use crate::ton::TonProvider;
+use crate::tron::TronProvider;
 use crate::utxo::UtxoProvider;
 
 /// Network environment.
@@ -115,6 +117,8 @@ impl ChainRegistry {
             Chain::Dogecoin => Box::new(UtxoProvider::dogecoin()),
             Chain::Zcash => Box::new(UtxoProvider::zcash()),
             Chain::Monero => Box::new(MoneroProvider::new()),
+            Chain::Ton => Box::new(TonProvider::new()),
+            Chain::Tron => Box::new(TronProvider::new()),
             Chain::Solana => Box::new(SolanaProvider::new()),
             Chain::Sui => Box::new(SuiProvider::new()),
         };
@@ -162,6 +166,9 @@ impl ChainRegistry {
             Chain::Zcash,
             // CryptoNote
             Chain::Monero,
+            // Alt L1s
+            Chain::Ton,
+            Chain::Tron,
             // Other
             Chain::Solana,
             Chain::Sui,
@@ -225,7 +232,7 @@ mod tests {
 
     #[test]
     fn test_supported_chains_count() {
-        assert_eq!(ChainRegistry::supported_chains().len(), 32);
+        assert_eq!(ChainRegistry::supported_chains().len(), 34);
     }
 
     #[test]
