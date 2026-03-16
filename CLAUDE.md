@@ -84,11 +84,11 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 5 complete)
+## Current State (as of Sprint 6 complete)
 
 ### Tests on `main`
 ```
-113 tests pass  (cargo test --workspace)
+128 tests pass  (cargo test --workspace)  1 ignored (NATS live-server test)
 cargo check     clean
 .github/workflows/ci.yml  ← CI pipeline active
 ```
@@ -99,7 +99,14 @@ cargo check     clean
 - **Sprint 3:** COMPLETE — all 5 tasks merged (T-S3-00 through T-S3-05)
 - **Sprint 4:** COMPLETE — all 5 tasks merged (T-S4-00 through T-S4-04)
 - **Sprint 5:** COMPLETE — all 5 tasks merged (T-S5-00 through T-S5-04)
-- **Sprint 6:** PENDING — NatsTransport SignedEnvelope integration, session persistence, evidence pack export, EVM low-S enforcement (SEC-012)
+- **Sprint 6:** COMPLETE — all 5 tasks merged (T-S6-00 through T-S6-04)
+- **Sprint 7:** PENDING — mTLS on NatsTransport (Epic E2), RBAC (Epic A), Solana v0 versioned tx, CLI `audit-verify` command
+
+### New in Sprint 6
+- `NatsTransport` — SEC-007 WIRED: SignedEnvelope on every send/recv, peer key registry, monotonic seq_no
+- `mpc_wallet_core::session` — FR-D3: `save_to_dir` / `load_from_dir` persistence across restarts
+- `mpc_wallet_core::audit` — FR-F.2: `export_evidence_pack` JSON bundle + `verify_pack` tamper-check
+- EVM `tx.rs` — SEC-012 FIX: auto-normalise high-S ECDSA signatures (EIP-2 low-S enforcement)
 
 ### New in Sprint 5
 - `mpc_wallet_core::approvals` — Approval workflow: Ed25519 quorum enforcement, maker/checker/approver SoD (FR-C)
@@ -131,7 +138,7 @@ cargo check     clean
 ### Open HIGH Findings (block merge)
 | ID | Summary | Owner |
 |----|---------|-------|
-| (none) | SEC-007 addressed by SignedEnvelope (T-S5-04); NatsTransport integration in Sprint 6 | R2 |
+| (none) | All HIGH findings resolved | — |
 
 ### Resolved HIGH Findings
 | ID | Summary | Resolved |
@@ -139,8 +146,9 @@ cargo check     clean
 | SEC-004 | `KeyShare.share_data` Vec<u8> not zeroized | Sprint 4 T-S4-00/T-S4-01 — `Zeroizing<Vec<u8>>` root fix |
 | SEC-005 | EncryptedFileStore password not zeroized | Sprint 3 T-S3-02 — Zeroizing<String> |
 | SEC-006 | Argon2 default params too weak | Sprint 3 T-S3-02 — 64MiB/3t/4p |
-| SEC-007 | ProtocolMessage.from unauthenticated | Sprint 5 T-S5-04 — SignedEnvelope Ed25519 + seq_no (NatsTransport integration pending Sprint 6) |
+| SEC-007 | ProtocolMessage.from unauthenticated | Sprint 6 T-S6-01 — NatsTransport wired with SignedEnvelope Ed25519 + seq_no |
 | SEC-009 | Bitcoin Taproot sighash uses empty script_pubkey | Sprint 5 T-S5-03 — require prev_script_pubkey |
+| SEC-012 | EVM high-S ECDSA signatures not normalised | Sprint 6 T-S6-03 — auto-normalise via n-s + flip recovery_id |
 | SEC-015 | KeyShare derives Debug — share bytes in logs | Sprint 4 T-S4-00 — manual Debug impl redacts share_data |
 | SEC-016 | Bitcoin SerializableTx::to_tx() uses unwrap | Sprint 5 T-S5-03 — proper error propagation |
 
