@@ -12,7 +12,7 @@
 
 **Threshold MPC Wallet SDK** — No single party ever holds a complete private key.
 
-EVM (26) | Bitcoin | Solana | Sui | Aptos | TON | TRON | LTC | DOGE | ZEC | XMR | 38 chains
+EVM (26) | Bitcoin | Solana | Sui | Aptos | TON | TRON | Cosmos | LTC | DOGE | ZEC | XMR | 43 chains
 
 [![CI](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml)
 
@@ -84,7 +84,7 @@ cargo test --workspace     # 272 tests, ~4 seconds
 |----------|-----------|
 | **MPC Protocols** | GG20 ECDSA, FROST Ed25519, FROST Secp256k1-Taproot |
 | **Key Lifecycle** | Keygen, refresh, reshare (change threshold/add parties), freeze |
-| **38 Chains** | EVM L1/L2s, Bitcoin, Solana, Sui, Aptos, Movement, TON, TRON, LTC, DOGE, ZEC, XMR |
+| **43 Chains** | EVM L1/L2s, Bitcoin, Solana, Sui, Aptos, Movement, TON, TRON, LTC, DOGE, ZEC, XMR |
 | **RPC Registry** | Multi-provider (Dwellir, Alchemy, Infura, Blockstream, Mempool), failover, health tracking |
 | **Broadcast** | `eth_sendRawTransaction`, REST `/tx`, `sendTransaction`, `sui_executeTransactionBlock` |
 | **Transport** | NATS mTLS + per-session ECDH + SignedEnvelope replay protection |
@@ -146,6 +146,16 @@ cargo test --workspace     # 272 tests, ~4 seconds
 | Aptos | `0x` + 64 hex (SHA3-256) | FROST Ed25519 | :white_check_mark: |
 | Movement | `0x` + 64 hex (SHA3-256) | FROST Ed25519 | :white_check_mark: |
 
+### Cosmos / IBC (5)
+
+| Chain | Address (bech32) | Signing | Dwellir |
+|-------|-----------------|---------|:-------:|
+| Cosmos Hub | `cosmos1...` | GG20 ECDSA (secp256k1) | :white_check_mark: |
+| Osmosis | `osmo1...` | GG20 ECDSA (secp256k1) | :white_check_mark: |
+| Celestia | `celestia1...` | GG20 ECDSA / Ed25519 | :white_check_mark: |
+| Injective | `inj1...` | GG20 ECDSA (secp256k1) | :white_check_mark: |
+| Sei | `sei1...` | GG20 ECDSA (secp256k1) | :white_check_mark: |
+
 ### Alt L1s (2)
 
 | Chain | Address Format | Signing | Dwellir |
@@ -196,7 +206,7 @@ docs/                  ← Architecture, security, CLI guide, sprint history
 ## Metrics
 
 ```
-  Chains:    38          Tests:    272 pass
+  Chains:    43          Tests:    272 pass
   LOC:       17,000+     CI:       fmt + clippy + test + audit
   Sprints:   17          Findings: 0 CRITICAL | 0 HIGH open
 ```

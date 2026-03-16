@@ -9,6 +9,7 @@ use mpc_wallet_core::error::CoreError;
 
 use crate::aptos::AptosProvider;
 use crate::bitcoin::BitcoinProvider;
+use crate::cosmos::CosmosProvider;
 use crate::evm::EvmProvider;
 use crate::monero::MoneroProvider;
 use crate::provider::{Chain, ChainProvider, SignedTransaction};
@@ -123,6 +124,11 @@ impl ChainRegistry {
             Chain::Monero => Box::new(MoneroProvider::new()),
             Chain::Ton => Box::new(TonProvider::new()),
             Chain::Tron => Box::new(TronProvider::new()),
+            Chain::CosmosHub => Box::new(CosmosProvider::cosmos_hub()),
+            Chain::Osmosis => Box::new(CosmosProvider::osmosis()),
+            Chain::Celestia => Box::new(CosmosProvider::celestia()),
+            Chain::Injective => Box::new(CosmosProvider::injective()),
+            Chain::Sei => Box::new(CosmosProvider::sei()),
             Chain::Solana => Box::new(SolanaProvider::new()),
             Chain::Sui => Box::new(SuiProvider::new()),
         };
@@ -178,6 +184,12 @@ impl ChainRegistry {
             // Alt L1s
             Chain::Ton,
             Chain::Tron,
+            // Cosmos / IBC
+            Chain::CosmosHub,
+            Chain::Osmosis,
+            Chain::Celestia,
+            Chain::Injective,
+            Chain::Sei,
             // Other
             Chain::Solana,
             Chain::Sui,
@@ -241,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_supported_chains_count() {
-        assert_eq!(ChainRegistry::supported_chains().len(), 38);
+        assert_eq!(ChainRegistry::supported_chains().len(), 43);
     }
 
     #[test]

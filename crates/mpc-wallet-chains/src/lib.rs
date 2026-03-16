@@ -4,6 +4,7 @@ pub mod rpc;
 
 pub mod aptos;
 pub mod bitcoin;
+pub mod cosmos;
 pub mod evm;
 pub mod monero;
 pub mod solana;

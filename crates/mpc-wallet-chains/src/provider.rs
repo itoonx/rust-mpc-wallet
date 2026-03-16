@@ -53,6 +53,12 @@ pub enum Chain {
     // Alt L1s
     Ton,
     Tron,
+    // Cosmos / IBC
+    CosmosHub,
+    Osmosis,
+    Celestia,
+    Injective,
+    Sei,
     // Other
     Solana,
     Sui,
@@ -97,6 +103,11 @@ impl std::fmt::Display for Chain {
             Chain::Monero => write!(f, "monero"),
             Chain::Ton => write!(f, "ton"),
             Chain::Tron => write!(f, "tron"),
+            Chain::CosmosHub => write!(f, "cosmos"),
+            Chain::Osmosis => write!(f, "osmosis"),
+            Chain::Celestia => write!(f, "celestia"),
+            Chain::Injective => write!(f, "injective"),
+            Chain::Sei => write!(f, "sei"),
             Chain::Solana => write!(f, "solana"),
             Chain::Sui => write!(f, "sui"),
         }
@@ -144,6 +155,11 @@ impl std::str::FromStr for Chain {
             "monero" | "xmr" => Ok(Chain::Monero),
             "ton" => Ok(Chain::Ton),
             "tron" | "trx" => Ok(Chain::Tron),
+            "cosmos" | "atom" | "cosmos-hub" => Ok(Chain::CosmosHub),
+            "osmosis" | "osmo" => Ok(Chain::Osmosis),
+            "celestia" | "tia" => Ok(Chain::Celestia),
+            "injective" | "inj" => Ok(Chain::Injective),
+            "sei" => Ok(Chain::Sei),
             "solana" | "sol" => Ok(Chain::Solana),
             "sui" => Ok(Chain::Sui),
             _ => Err(format!("unknown chain: {s}")),
