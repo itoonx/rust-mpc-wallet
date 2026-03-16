@@ -116,6 +116,11 @@ pub enum CoreError {
     #[error("evm low-s violation: {0}")]
     EvmLowS(String),
 
+    /// The caller is not authorized to perform the requested operation.
+    /// Returned when RBAC role checks or MFA step-up requirements fail.
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     /// A catch-all error variant for cases not covered by the more specific
     /// variants above. Prefer using a specific variant whenever possible so
     /// that callers can handle errors programmatically.

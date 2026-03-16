@@ -46,3 +46,8 @@ pub mod approvals;
 /// Use [`audit::AuditLedger`] to record every signing event. Call
 /// [`audit::AuditLedger::verify`] to check tamper-evident chain integrity.
 pub mod audit;
+/// Role-Based Access Control with MFA step-up enforcement (Epic A4).
+///
+/// Use [`rbac::AuthContext`] for authenticated request context, [`rbac::Permissions`]
+/// for role-gated checks, and [`rbac::require_mfa`] for MFA step-up on admin ops.
+pub mod rbac;
