@@ -1,6 +1,21 @@
 {
   "version": 1,
   "skills": {
+    "coding-guidelines": {
+      "source": "ZhangHanDong/rust-skills",
+      "sourceType": "github",
+      "computedHash": "0742312a0de5eb6bd84e093c1815b1db98126130b92713ea5fc2cf902338aa3b"
+    },
+    "domain-cli": {
+      "source": "ZhangHanDong/rust-skills",
+      "sourceType": "github",
+      "computedHash": "88a6efe282b5105161c8ddb320f09ca0ffed19323fe403dfa7adb4aaa708b8dc"
+    },
+    "domain-cloud-native": {
+      "source": "ZhangHanDong/rust-skills",
+      "sourceType": "github",
+      "computedHash": "10a6e60e8d2a1b977fc5d5935976c17b498335ee2f19255438e45fd15a8811bc"
+    },
     "memory-safety-patterns": {
       "source": "wshobson/agents",
       "sourceType": "github",
@@ -10,6 +25,46 @@
       "source": "wshobson/agents",
       "sourceType": "github",
       "computedHash": "1e68b5edfa95069e54af75acf2a34634a5d0266021fa4af3b9706eaec5b6207e"
+    },
+    "rust-call-graph": {
+      "source": "ZhangHanDong/rust-skills",
+      "sourceType": "github",
+      "computedHash": "0999fbe783c81b87ba1dc1347758bd87b5880dca0d66c69be53bbac133a4c888"
+    },
+    "rust-deps-visualizer": {
+      "source": "ZhangHanDong/rust-skills",
+      "sourceType": "github",
+      "computedHash": "b7cb6cbb693df52c43cae43149469ba44b05ad0747c5826c3d65f5e4b4ad3d74"
+    },
+    "rust-refactor-helper": {
+      "source": "ZhangHanDong/rust-skills",
+      "sourceType": "github",
+      "computedHash": "614d54b2b16a57965412a3fff048c6d36e6f1535fcbb9ac2cf71e7a987e5a119"
+    },
+    "rust-router": {
+      "source": "ZhangHanDong/rust-skills",
+      "sourceType": "github",
+      "computedHash": "ff5616fc8a0ef0d9434f1041e5128eb0f381d3484921ee8bfd009d64ad57045b"
+    },
+    "rust-skill-creator": {
+      "source": "ZhangHanDong/rust-skills",
+      "sourceType": "github",
+      "computedHash": "0314bb7b61f6e7be24a498b7fb45969f78924e81c2f74723badb056724697119"
+    },
+    "rust-symbol-analyzer": {
+      "source": "ZhangHanDong/rust-skills",
+      "sourceType": "github",
+      "computedHash": "1e6b2fd668a9a9574b89cf90797bcd825636163d0f3b5fc9e678fd71ce4869b9"
+    },
+    "rust-trait-explorer": {
+      "source": "ZhangHanDong/rust-skills",
+      "sourceType": "github",
+      "computedHash": "2feac2b9bb17689a7227fcae62c8a20351bb5afb271a47d49c27ba87ba9e7e26"
+    },
+    "unsafe-checker": {
+      "source": "ZhangHanDong/rust-skills",
+      "sourceType": "github",
+      "computedHash": "b76d79853846ea40ad42092c61de26da4561299b176768599751d5bcc13cf5db"
     }
   }
 }
