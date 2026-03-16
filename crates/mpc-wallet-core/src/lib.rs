@@ -36,3 +36,8 @@ pub mod policy;
 /// Use [`session::SessionManager`] to create and track signing sessions.
 /// Call [`session::SessionManager::create`] before initiating any MPC signing round.
 pub mod session;
+/// Approval workflow: M-of-N quorum enforcement and maker/checker/approver SoD.
+///
+/// Use [`approvals::ApprovalStore`] to register sessions, assign roles,
+/// collect Ed25519-signed approvals, and check quorum before signing (FR-C).
+pub mod approvals;
