@@ -84,11 +84,11 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 2 complete)
+## Current State (as of Sprint 3 complete)
 
 ### Tests on `main`
 ```
-52 tests pass  (cargo test --workspace)
+55 tests pass  (cargo test --workspace)
 cargo check    clean
 .github/workflows/ci.yml  ← CI pipeline active
 ```
@@ -96,27 +96,33 @@ cargo check    clean
 ### Sprint Status
 - **Sprint 1:** COMPLETE — all 5 tasks merged (T-01, T-02, T-05, T-06, T-07)
 - **Sprint 2:** COMPLETE — all 5 tasks merged (T-S2-00 through T-S2-05)
-- **Sprint 3:** PENDING — NATS transport (SEC-003), Key Lifecycle real impl, Policy Engine
+- **Sprint 3:** COMPLETE — all 5 tasks merged (T-S3-00 through T-S3-05)
+- **Sprint 4:** PENDING — Policy Engine, Approvals, Session Manager, SEC-004 root fix
 
 ### Open CRITICAL Security Findings (block production)
 | ID | Summary | Owner | Sprint |
 |----|---------|-------|--------|
-| SEC-003 | NatsTransport = all `todo!()` stubs | R2 | Sprint 3 Epic E |
+| (none) | All CRITICAL findings resolved | — | — |
 
 ### Resolved CRITICAL Findings
 | ID | Summary | Resolved |
 |----|---------|---------|
 | SEC-001 | GG20 reconstructed full private key | Sprint 2 T-S2-01 — distributed additive-share signing |
 | SEC-002 | Hardcoded "demo-password" in CLI | Sprint 2 T-S2-03 — rpassword interactive prompt |
+| SEC-003 | NatsTransport = all `todo!()` stubs | Sprint 3 T-S3-01 — real async-nats implementation |
 | SEC-011 | Sui tx was JSON stub | Sprint 2 T-S2-04 — real BCS encoding |
 
 ### Open HIGH Findings (block merge)
 | ID | Summary | Owner |
 |----|---------|-------|
-| SEC-004 | `KeyShare.share_data` Vec<u8> not zeroized | R0/R1 |
-| SEC-005 | EncryptedFileStore password not zeroized | R2 |
-| SEC-006 | Argon2 default params too weak | R2 |
+| SEC-004 | `KeyShare.share_data` Vec<u8> not zeroized (copies now zeroized — root fix Sprint 4) | R0 |
 | SEC-007 | ProtocolMessage.from unauthenticated | R2/R0 |
+
+### Resolved HIGH Findings
+| ID | Summary | Resolved |
+|----|---------|---------|
+| SEC-005 | EncryptedFileStore password not zeroized | Sprint 3 T-S3-02 — Zeroizing<String> |
+| SEC-006 | Argon2 default params too weak | Sprint 3 T-S3-02 — 64MiB/3t/4p |
 
 Full findings log → `docs/SECURITY_FINDINGS.md`
 
