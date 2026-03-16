@@ -1,17 +1,26 @@
 //! Starknet address derivation.
 //!
-//! Starknet address = pedersen_hash(contract_class_hash, salt, constructor_calldata_hash)
-//! Simplified: SHA-256(pubkey) truncated to 251 bits (Stark field), displayed as 0x + 64 hex.
+//! Starknet contract address = hash(PREFIX, deployer, salt, class_hash, constructor_calldata_hash)
+//! For account contracts: address = pedersen(contract_address_prefix, 0, salt, class_hash, calldata_hash)
+//!
+//! Since we don't have the Pedersen hash crate, we use a deterministic hash
+//! that follows the same structure: SHA-256 of the concatenated components,
+//! masked to 251 bits (Stark field element size).
 
 use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::GroupPublicKey;
 use sha2::{Digest, Sha256};
 
-/// Derive a Starknet address from a public key.
+/// Starknet contract address prefix constant.
+const CONTRACT_ADDRESS_PREFIX: &[u8] = b"STARKNET_CONTRACT_ADDRESS";
+
+/// OpenZeppelin account contract class hash (v0.8.1 placeholder).
+const OZ_ACCOUNT_CLASS_HASH: [u8; 32] = [0x04; 32];
+
+/// Derive a Starknet account address from a public key.
 ///
-/// Simplified: uses SHA-256 hash of the public key bytes as the contract address.
-/// Full Starknet address derivation requires Pedersen hash of the class hash,
-/// salt, and constructor calldata — this is a placeholder for the account address.
+/// Computes: hash(CONTRACT_ADDRESS_PREFIX || deployer(0) || salt(pubkey_hash) || class_hash || calldata_hash)
+/// Result masked to 251 bits (Stark field element).
 pub fn derive_starknet_address(group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
     let pubkey_bytes = match group_pubkey {
         GroupPublicKey::Secp256k1(bytes) => bytes.clone(),
@@ -19,11 +28,24 @@ pub fn derive_starknet_address(group_pubkey: &GroupPublicKey) -> Result<String, 
         GroupPublicKey::Ed25519(bytes) => bytes.clone(),
     };
 
-    let hash = Sha256::digest(&pubkey_bytes);
-    // Starknet addresses are 251-bit field elements, display as 0x + 64 hex
-    // Mask the top bits to fit in the Stark field
+    // Salt = hash of pubkey
+    let salt = Sha256::digest(&pubkey_bytes);
+
+    // Constructor calldata hash = hash of pubkey (single arg)
+    let calldata_hash = Sha256::digest(&pubkey_bytes);
+
+    // Contract address = hash(prefix || deployer(0) || salt || class_hash || calldata_hash)
+    let mut hasher = Sha256::new();
+    hasher.update(CONTRACT_ADDRESS_PREFIX);
+    hasher.update([0u8; 32]); // deployer = 0 (self-deployed)
+    hasher.update(salt);
+    hasher.update(OZ_ACCOUNT_CLASS_HASH);
+    hasher.update(calldata_hash);
+    let hash = hasher.finalize();
+
+    // Mask to 251 bits (Stark field element)
     let mut addr_bytes = hash.to_vec();
-    addr_bytes[0] &= 0x07; // Ensure < 2^251
+    addr_bytes[0] &= 0x07;
 
     Ok(format!("0x{}", hex::encode(addr_bytes)))
 }

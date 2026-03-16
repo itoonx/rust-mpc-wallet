@@ -1,7 +1,8 @@
 //! TRON address derivation.
 //!
-//! TRON address = Base58Check(0x41 + last 20 bytes of Keccak-256(uncompressed_pubkey[1..]))
-//! Similar to Ethereum but with 0x41 prefix instead of raw hex.
+//! TRON address = Base58Check(0x41 || last 20 bytes of Keccak-256(uncompressed_pubkey_64_bytes))
+//! The 0x04 prefix of the uncompressed key is stripped before hashing.
+//! For compressed keys, the key must be decompressed first.
 
 use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::GroupPublicKey;
@@ -10,20 +11,20 @@ use sha3::Keccak256;
 
 /// Derive a TRON address from a secp256k1 public key.
 ///
-/// Steps:
-/// 1. Keccak-256 hash of the public key bytes (excluding 0x04 prefix for uncompressed)
+/// TRON follows Ethereum-style address derivation:
+/// 1. Keccak-256 of the 64-byte uncompressed public key (without 0x04 prefix)
 /// 2. Take last 20 bytes
 /// 3. Prepend 0x41 (TRON mainnet prefix)
 /// 4. Base58Check encode (double SHA-256 checksum)
 pub fn derive_tron_address(group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
-    let pubkey_for_hash = match group_pubkey {
+    let pubkey_64 = match group_pubkey {
         GroupPublicKey::Secp256k1Uncompressed(bytes) => {
             if bytes.len() != 65 {
                 return Err(CoreError::Crypto(
                     "invalid uncompressed secp256k1 key length".into(),
                 ));
             }
-            // Skip 0x04 prefix, hash remaining 64 bytes
+            // Strip 0x04 prefix, use remaining 64 bytes
             bytes[1..].to_vec()
         }
         GroupPublicKey::Secp256k1(bytes) => {
@@ -32,8 +33,18 @@ pub fn derive_tron_address(group_pubkey: &GroupPublicKey) -> Result<String, Core
                     "invalid compressed secp256k1 key length".into(),
                 ));
             }
-            // For compressed keys, use the full 33 bytes
-            bytes.clone()
+            // Decompress using k256: compressed(33) → uncompressed(65) → strip 0x04 → 64 bytes
+            use k256::elliptic_curve::sec1::FromEncodedPoint;
+            let encoded = k256::EncodedPoint::from_bytes(bytes)
+                .map_err(|e| CoreError::Crypto(format!("invalid secp256k1 point: {e}")))?;
+            let affine: Option<k256::AffinePoint> =
+                k256::AffinePoint::from_encoded_point(&encoded).into();
+            let affine =
+                affine.ok_or_else(|| CoreError::Crypto("invalid secp256k1 point".into()))?;
+            // Re-encode as uncompressed
+            use k256::elliptic_curve::sec1::ToEncodedPoint;
+            let uncompressed = affine.to_encoded_point(false);
+            uncompressed.as_bytes()[1..65].to_vec()
         }
         GroupPublicKey::Ed25519(_) => {
             return Err(CoreError::Crypto(
@@ -42,13 +53,13 @@ pub fn derive_tron_address(group_pubkey: &GroupPublicKey) -> Result<String, Core
         }
     };
 
-    // Keccak-256 hash
-    let hash = Keccak256::digest(&pubkey_for_hash);
+    // Keccak-256 of 64-byte uncompressed public key
+    let hash = Keccak256::digest(&pubkey_64);
     // Take last 20 bytes
     let addr_bytes = &hash[12..32];
 
     // Prepend 0x41 (TRON mainnet)
-    let mut tron_addr = Vec::with_capacity(21);
+    let mut tron_addr = Vec::with_capacity(25);
     tron_addr.push(0x41);
     tron_addr.extend_from_slice(addr_bytes);
 

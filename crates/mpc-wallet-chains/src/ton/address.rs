@@ -1,16 +1,21 @@
 //! TON address derivation.
 //!
-//! TON raw address = `workchain_id:sha256(state_init)`
-//! User-friendly address = Base64url with flags + checksum (CRC16-CCITT)
+//! TON address is derived from the StateInit hash of the wallet contract.
+//! Raw address = `workchain_id:sha256(state_init_cell)`
+//! where state_init contains the wallet code cell and data cell (with pubkey).
 
 use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::GroupPublicKey;
 use sha2::{Digest, Sha256};
 
+use super::cell::Cell;
+
 /// Derive a TON raw address from an Ed25519 public key.
 ///
-/// Raw format: `0:hex(sha256(pubkey))`
-/// The workchain_id is 0 (basechain).
+/// Constructs a simplified wallet StateInit:
+///   state_init = Cell(code_hash || data_cell_hash)
+///   data_cell = Cell(seqno=0 || pubkey)
+///   address = 0:sha256(state_init_cell.hash())
 pub fn derive_ton_address(group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
     let pubkey_bytes = match group_pubkey {
         GroupPublicKey::Ed25519(bytes) => {
@@ -26,12 +31,24 @@ pub fn derive_ton_address(group_pubkey: &GroupPublicKey) -> Result<String, CoreE
         }
     };
 
-    // Simplified: hash pubkey to get address hash
-    // In production, this would hash the StateInit (code + data cells)
-    let hash = Sha256::digest(&pubkey_bytes);
+    // Build data cell: seqno(4 bytes, 0) || subwallet_id(4 bytes) || pubkey(32 bytes)
+    let mut data_cell_data = Vec::new();
+    data_cell_data.extend_from_slice(&0u32.to_be_bytes()); // seqno = 0
+    data_cell_data.extend_from_slice(&698983191u32.to_be_bytes()); // default subwallet_id
+    data_cell_data.extend_from_slice(&pubkey_bytes);
+    let data_cell = Cell::new(data_cell_data);
+
+    // Build code cell (wallet v4 code hash placeholder — real code cell is the compiled contract)
+    let code_cell = Cell::new(vec![0xFF; 32]); // placeholder code hash
+
+    // Build StateInit cell: code_cell + data_cell as refs
+    let state_init = Cell::with_refs(vec![0x00; 1], vec![code_cell, data_cell]);
+
+    // Address = SHA-256 of StateInit cell hash
+    let state_hash = Sha256::digest(state_init.hash());
 
     // Raw address: workchain:hash
-    Ok(format!("0:{}", hex::encode(hash)))
+    Ok(format!("0:{}", hex::encode(state_hash)))
 }
 
 /// Validate a TON raw address format: `workchain_id:64_hex_chars`.
