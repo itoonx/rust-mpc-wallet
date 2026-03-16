@@ -255,6 +255,17 @@ impl MpcProtocol for Gg20Protocol {
     ) -> Result<KeyShare, CoreError> {
         distributed_refresh(key_share, signers, transport).await
     }
+
+    async fn reshare(
+        &self,
+        key_share: &KeyShare,
+        old_signers: &[PartyId],
+        new_config: ThresholdConfig,
+        new_parties: &[PartyId],
+        transport: &dyn Transport,
+    ) -> Result<KeyShare, CoreError> {
+        distributed_reshare(key_share, old_signers, new_config, new_parties, transport).await
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -721,6 +732,165 @@ async fn distributed_refresh(
         group_public_key: key_share.group_public_key.clone(),
         share_data: Zeroizing::new(new_share_bytes),
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DISTRIBUTED key resharing — change threshold / add-remove parties (Epic H2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Key resharing for GG20 distributed ECDSA.
+///
+/// Allows changing the threshold configuration (t,n) while preserving the group
+/// public key. Old parties re-share their existing shares to a new set of
+/// parties using new Shamir polynomials.
+///
+/// # Mathematical basis
+///
+/// Each old party `i` in the signing set holds Shamir share `f(i)`. They first
+/// compute their Lagrange-weighted additive share `x_i = lambda_i * f(i)` where
+/// `sum(x_i) = x` (the secret key).
+///
+/// Each old party generates a new degree-(t_new-1) polynomial `g_i` with
+/// `g_i(0) = x_i` (their additive share as the constant term). They evaluate
+/// `g_i(j)` for each new party `j` and send via transport.
+///
+/// Each new party `j` sums the evaluations: `s'_j = sum_i(g_i(j))`.
+///
+/// **Correctness:**
+/// ```text
+/// At x=0: sum_i(g_i(0)) = sum_i(x_i) = x  (the original secret)
+/// ```
+/// So the new shares `s'_j` are valid Shamir shares of the same secret `x`
+/// under the new polynomial `G(x) = sum_i(g_i(x))` of degree `t_new - 1`.
+///
+/// The group public key `Q = x * G` is unchanged.
+///
+/// # Protocol rounds
+///
+/// **Round 200** — Each old party sends `g_i(j)` to new party `j` (unicast).
+/// **Receive** — Each new party collects evaluations from all old parties.
+/// **Local** — Each new party sums evaluations to get its new Shamir share.
+///
+/// # Participant roles
+///
+/// - Old parties (in `old_signers`): generate polynomials and send evaluations.
+///   Must have at least `old_threshold` parties to reconstruct the secret.
+/// - New parties (in `new_parties`): receive evaluations and compute new shares.
+/// - A party can be in both sets (e.g., party 1 stays across resharing).
+async fn distributed_reshare(
+    key_share: &KeyShare,
+    old_signers: &[PartyId],
+    new_config: ThresholdConfig,
+    new_parties: &[PartyId],
+    transport: &dyn Transport,
+) -> Result<KeyShare, CoreError> {
+    let my_party = key_share.party_id;
+    let is_old = old_signers.contains(&my_party);
+    let is_new = new_parties.contains(&my_party);
+
+    if !is_old && !is_new {
+        return Err(CoreError::Protocol(
+            "party is neither in old signers nor new parties for reshare".into(),
+        ));
+    }
+
+    // Validate old signers meet the old threshold.
+    if (old_signers.len() as u16) < key_share.config.threshold {
+        return Err(CoreError::Protocol(format!(
+            "reshare requires at least {} old signers, got {}",
+            key_share.config.threshold,
+            old_signers.len()
+        )));
+    }
+
+    // ── Old party: compute additive share and send evaluations to new parties ──
+    if is_old {
+        // Deserialize our current Shamir share.
+        let share_data_copy = key_share.share_data.clone();
+        let my_share: Gg20ShareData = serde_json::from_slice(&share_data_copy)
+            .map_err(|e| CoreError::Serialization(format!("deserialize share for reshare: {e}")))?;
+
+        let shamir_y = Scalar::from_repr(*k256::FieldBytes::from_slice(&my_share.y))
+            .into_option()
+            .ok_or_else(|| CoreError::Crypto("invalid Shamir share scalar in reshare".into()))?;
+
+        // Compute Lagrange coefficient for our party in the old signer set.
+        let old_indices: Vec<u16> = old_signers.iter().map(|p| p.0).collect();
+        let lambda_i = lagrange_coefficient(my_share.x, &old_indices)?;
+
+        // Additive share: x_i = lambda_i * f(i), where sum(x_i) = x.
+        let x_i = lambda_i * shamir_y;
+
+        // Generate new polynomial g_i of degree (t_new - 1) with g_i(0) = x_i.
+        let t_new = new_config.threshold;
+        let coefficients = {
+            let mut rng = rand::thread_rng();
+            let mut coeffs = Vec::with_capacity(t_new as usize);
+            coeffs.push(x_i); // g_i(0) = x_i (our additive share)
+            for _ in 1..t_new {
+                coeffs.push(Scalar::random(&mut rng));
+            }
+            coeffs
+        };
+
+        // Evaluate g_i(j) for each new party j and send via unicast.
+        for &new_party in new_parties {
+            let x_j = Scalar::from(new_party.0 as u64);
+            let eval = poly_eval(&coefficients, &x_j);
+
+            let msg = ProtocolMessage {
+                from: my_party,
+                to: Some(new_party),
+                round: 200, // high round number to distinguish reshare
+                payload: eval.to_repr().to_vec(),
+            };
+            transport.send(msg).await?;
+        }
+    }
+
+    // ── New party: receive evaluations from all old parties and sum ──
+    if is_new {
+        let mut new_share_scalar = Scalar::ZERO;
+
+        // Collect evaluations from all old signers.
+        for _old_idx in 0..old_signers.len() {
+            let msg = transport.recv().await?;
+            let eval_bytes: [u8; 32] = msg.payload.as_slice().try_into().map_err(|_| {
+                CoreError::Protocol(
+                    "invalid reshare evaluation size (expected 32 bytes)".into(),
+                )
+            })?;
+            let eval = Scalar::from_repr(*k256::FieldBytes::from_slice(&eval_bytes))
+                .into_option()
+                .ok_or_else(|| {
+                    CoreError::Crypto("invalid scalar in reshare evaluation".into())
+                })?;
+            new_share_scalar += eval;
+        }
+
+        // Build new Gg20ShareData with new share value.
+        let new_share_data = Gg20ShareData {
+            x: my_party.0,
+            y: new_share_scalar.to_repr().to_vec(),
+        };
+        let new_share_bytes = serde_json::to_vec(&new_share_data)
+            .map_err(|e| CoreError::Serialization(format!("serialize reshared share: {e}")))?;
+
+        Ok(KeyShare {
+            scheme: key_share.scheme,
+            party_id: my_party,
+            config: new_config,
+            group_public_key: key_share.group_public_key.clone(),
+            share_data: Zeroizing::new(new_share_bytes),
+        })
+    } else {
+        // Old-only party: does not receive a new share. Return a dummy key share
+        // indicating this party is no longer part of the group.
+        // In practice, the caller should discard this share.
+        Err(CoreError::Protocol(
+            "old-only party does not receive a new share after reshare".into(),
+        ))
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

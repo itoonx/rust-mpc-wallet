@@ -206,4 +206,39 @@ pub trait MpcProtocol: Send + Sync {
             "key refresh not supported by this protocol".into(),
         ))
     }
+
+    /// Reshare key shares to a new threshold configuration (Epic H2).
+    ///
+    /// Unlike `refresh` which keeps the same (t,n), `reshare` can:
+    /// - Change threshold: e.g., 2-of-3 -> 3-of-5
+    /// - Add new parties
+    /// - Remove old parties
+    ///
+    /// The group public key MUST remain unchanged.
+    ///
+    /// # Arguments
+    ///
+    /// * `key_share` - The existing key share held by this party (old parties only;
+    ///   new-only parties should use a dummy share with zeroed share_data).
+    /// * `old_signers` - The set of old parties participating in resharing (must
+    ///   satisfy the old threshold).
+    /// * `new_config` - The new threshold configuration (t_new, n_new).
+    /// * `new_parties` - The set of new party IDs that will receive shares.
+    /// * `transport` - Transport layer for inter-party communication.
+    ///
+    /// The default implementation returns an error indicating that the protocol
+    /// does not support key resharing. Override this in protocols that do.
+    async fn reshare(
+        &self,
+        _key_share: &KeyShare,
+        _old_signers: &[PartyId],
+        _new_config: ThresholdConfig,
+        _new_parties: &[PartyId],
+        _transport: &dyn Transport,
+    ) -> Result<KeyShare, CoreError> {
+        Err(CoreError::Protocol(format!(
+            "{:?} does not support key resharing yet",
+            self.scheme()
+        )))
+    }
 }
