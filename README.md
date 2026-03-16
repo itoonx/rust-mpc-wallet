@@ -12,7 +12,7 @@
 
 **Threshold MPC Wallet SDK** — No single party ever holds a complete private key.
 
-EVM (26) | Bitcoin | Solana | Sui | Aptos | TON | TRON | Cosmos | LTC | DOGE | ZEC | XMR | 43 chains
+EVM (26) | Bitcoin | Polkadot | Solana | Sui | Aptos | TON | TRON | Cosmos | Starknet | 50 chains
 
 [![CI](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml)
 
@@ -84,7 +84,7 @@ cargo test --workspace     # 272 tests, ~4 seconds
 |----------|-----------|
 | **MPC Protocols** | GG20 ECDSA, FROST Ed25519, FROST Secp256k1-Taproot |
 | **Key Lifecycle** | Keygen, refresh, reshare (change threshold/add parties), freeze |
-| **43 Chains** | EVM L1/L2s, Bitcoin, Solana, Sui, Aptos, Movement, TON, TRON, LTC, DOGE, ZEC, XMR |
+| **50 Chains** | EVM L1/L2s, Bitcoin, Solana, Sui, Aptos, Movement, TON, TRON, LTC, DOGE, ZEC, XMR |
 | **RPC Registry** | Multi-provider (Dwellir, Alchemy, Infura, Blockstream, Mempool), failover, health tracking |
 | **Broadcast** | `eth_sendRawTransaction`, REST `/tx`, `sendTransaction`, `sui_executeTransactionBlock` |
 | **Transport** | NATS mTLS + per-session ECDH + SignedEnvelope replay protection |
@@ -146,6 +146,19 @@ cargo test --workspace     # 272 tests, ~4 seconds
 | Aptos | `0x` + 64 hex (SHA3-256) | FROST Ed25519 | :white_check_mark: |
 | Movement | `0x` + 64 hex (SHA3-256) | FROST Ed25519 | :white_check_mark: |
 
+### Substrate / Polkadot (6)
+
+| Chain | Address (SS58) | Signing | Dwellir |
+|-------|---------------|---------|:-------:|
+| Polkadot | SS58 prefix 0 | FROST Ed25519 | :white_check_mark: |
+| Kusama | SS58 prefix 2 | FROST Ed25519 | :white_check_mark: |
+| Astar | SS58 prefix 5 | FROST Ed25519 | :white_check_mark: |
+| Acala | SS58 prefix 10 | FROST Ed25519 | :white_check_mark: |
+| Phala | SS58 prefix 30 | FROST Ed25519 | :white_check_mark: |
+| Interlay | SS58 prefix 2032 | FROST Ed25519 | :white_check_mark: |
+
+> Ed25519 signing via FROST. Sr25519 threshold MPC planned as future protocol.
+
 ### Cosmos / IBC (5)
 
 | Chain | Address (bech32) | Signing | Dwellir |
@@ -162,6 +175,14 @@ cargo test --workspace     # 272 tests, ~4 seconds
 |-------|---------------|---------|:-------:|
 | TON | `0:` + 64 hex (SHA-256) | FROST Ed25519 | :white_check_mark: |
 | TRON | Base58Check (`T...`, 0x41 prefix) | GG20 ECDSA (secp256k1) | :white_check_mark: |
+
+### Specialized (1)
+
+| Chain | Address Format | Signing | Dwellir |
+|-------|---------------|---------|:-------:|
+| Starknet | `0x` + 64 hex (251-bit field) | STARK curve (planned) | :white_check_mark: |
+
+> STARK curve threshold MPC signing is planned. Currently uses ECDSA-compatible placeholder.
 
 ### Other Chains (3)
 
@@ -206,7 +227,7 @@ docs/                  ← Architecture, security, CLI guide, sprint history
 ## Metrics
 
 ```
-  Chains:    43          Tests:    272 pass
+  Chains:    50          Tests:    272 pass
   LOC:       17,000+     CI:       fmt + clippy + test + audit
   Sprints:   17          Findings: 0 CRITICAL | 0 HIGH open
 ```

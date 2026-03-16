@@ -12,7 +12,7 @@
 
 **门限 MPC 钱包 SDK** — 没有任何一方持有完整的私钥。
 
-EVM（26）| Bitcoin | Solana | Sui | Aptos | TON | TRON | Cosmos | LTC | DOGE | ZEC | XMR | 共 43 条链
+EVM（26）| Bitcoin | Polkadot | Solana | Sui | Aptos | TON | TRON | Cosmos | Starknet | 共 50 条链
 
 [![CI](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml)
 
@@ -84,7 +84,7 @@ cargo test --workspace     # 272 个测试，约 4 秒
 |------|------|
 | **MPC 协议** | GG20 ECDSA、FROST Ed25519、FROST Secp256k1-Taproot |
 | **密钥生命周期** | 生成、刷新、重分享（修改阈值/增删参与方）、冻结 |
-| **43 条链** | EVM L1/L2、Bitcoin、Solana、Sui、Aptos、Movement、TON、TRON、LTC、DOGE、ZEC、XMR |
+| **50 条链** | EVM L1/L2、Bitcoin、Solana、Sui、Aptos、Movement、TON、TRON、LTC、DOGE、ZEC、XMR |
 | **RPC 注册表** | 多提供商（Dwellir、Alchemy、Infura、Blockstream、Mempool）、故障切换、健康追踪 |
 | **广播** | `eth_sendRawTransaction`、REST `/tx`、`sendTransaction`、`sui_executeTransactionBlock` |
 | **传输层** | NATS mTLS + 会话级 ECDH + SignedEnvelope 防重放 |
@@ -146,6 +146,19 @@ cargo test --workspace     # 272 个测试，约 4 秒
 | Aptos | `0x` + 64 hex (SHA3-256) | FROST Ed25519 | :white_check_mark: |
 | Movement | `0x` + 64 hex (SHA3-256) | FROST Ed25519 | :white_check_mark: |
 
+### Substrate / Polkadot（6 条）
+
+| 链 | 地址（SS58） | 签名协议 | Dwellir |
+|----|-------------|---------|:-------:|
+| Polkadot | SS58 前缀 0 | FROST Ed25519 | :white_check_mark: |
+| Kusama | SS58 前缀 2 | FROST Ed25519 | :white_check_mark: |
+| Astar | SS58 前缀 5 | FROST Ed25519 | :white_check_mark: |
+| Acala | SS58 前缀 10 | FROST Ed25519 | :white_check_mark: |
+| Phala | SS58 前缀 30 | FROST Ed25519 | :white_check_mark: |
+| Interlay | SS58 前缀 2032 | FROST Ed25519 | :white_check_mark: |
+
+> 通过 FROST 使用 Ed25519 签名。Sr25519 门限 MPC 计划作为未来协议添加。
+
 ### Cosmos / IBC（5 条）
 
 | 链 | 地址（bech32） | 签名协议 | Dwellir |
@@ -162,6 +175,14 @@ cargo test --workspace     # 272 个测试，约 4 秒
 |----|---------|---------|:-------:|
 | TON | `0:` + 64 hex (SHA-256) | FROST Ed25519 | :white_check_mark: |
 | TRON | Base58Check (`T...`, 0x41 前缀) | GG20 ECDSA (secp256k1) | :white_check_mark: |
+
+### 专用链（1 条）
+
+| 链 | 地址格式 | 签名协议 | Dwellir |
+|----|---------|---------|:-------:|
+| Starknet | `0x` + 64 hex（251位域） | STARK 曲线（计划中） | :white_check_mark: |
+
+> STARK 曲线门限 MPC 签名正在计划中。目前使用 ECDSA 兼容占位符。
 
 ### 其他链（3 条）
 
@@ -206,7 +227,7 @@ docs/                  ← 架构、安全、CLI 指南、Sprint 历史
 ## 指标
 
 ```
-  链:       43           测试:     272 通过
+  链:       50           测试:     272 通过
   代码行:   17,000+      CI:       fmt + clippy + test + audit
   Sprint:   17           漏洞:     0 CRITICAL | 0 HIGH 未解决
 ```
