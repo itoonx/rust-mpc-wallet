@@ -5,6 +5,7 @@ pub mod tx;
 pub use tx::validate_sui_address;
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::{GroupPublicKey, MpcSignature};
@@ -107,36 +108,6 @@ impl SuiProvider {
         // Delegate to existing build logic (requires pubkey stored).
         self.build_transaction(params).await
     }
-
-    /// Broadcast a signed transaction to the Sui network.
-    ///
-    /// # TODO (production)
-    /// Use the Sui JSON-RPC API: `sui_executeTransactionBlock`
-    /// - POST to `{rpc_url}` with:
-    ///   ```json
-    ///   {
-    ///     "jsonrpc": "2.0",
-    ///     "id": 1,
-    ///     "method": "sui_executeTransactionBlock",
-    ///     "params": [
-    ///       "<base64 tx_bytes>",
-    ///       ["<base64 signature>"],
-    ///       {"showEffects": true},
-    ///       "WaitForLocalExecution"
-    ///     ]
-    ///   }
-    ///   ```
-    /// Returns the transaction digest as the tx hash.
-    pub async fn broadcast_stub(
-        &self,
-        _signed: &crate::provider::SignedTransaction,
-    ) -> Result<String, mpc_wallet_core::error::CoreError> {
-        // TODO(production): implement HTTP call to Sui RPC
-        // For now, return a placeholder tx digest
-        Err(mpc_wallet_core::error::CoreError::Protocol(
-            "broadcast not yet implemented — use sui_executeTransactionBlock RPC".to_string(),
-        ))
-    }
 }
 
 #[async_trait]
@@ -167,6 +138,64 @@ impl ChainProvider for SuiProvider {
         sig: &MpcSignature,
     ) -> Result<SignedTransaction, CoreError> {
         tx::finalize_sui_transaction(unsigned, sig)
+    }
+
+    async fn broadcast(
+        &self,
+        signed: &SignedTransaction,
+        rpc_url: &str,
+    ) -> Result<String, CoreError> {
+        // Sui raw_tx contains BCS-encoded tx_bytes followed by the signature.
+        // The signature is the last 97 bytes: [flag(1) | sig(64) | pubkey(32)].
+        if signed.raw_tx.len() < 97 {
+            return Err(CoreError::InvalidInput(
+                "Sui signed tx too short for broadcast".into(),
+            ));
+        }
+        let sig_offset = signed.raw_tx.len() - 97;
+        let tx_bytes = &signed.raw_tx[..sig_offset];
+        let sig_bytes = &signed.raw_tx[sig_offset..];
+
+        let tx_b64 = BASE64.encode(tx_bytes);
+        let sig_b64 = BASE64.encode(sig_bytes);
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sui_executeTransactionBlock",
+            "params": [
+                tx_b64,
+                [sig_b64],
+                {"showEffects": true},
+                "WaitForLocalExecution"
+            ]
+        });
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(rpc_url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CoreError::Other(format!("broadcast request failed: {e}")))?;
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| CoreError::Other(format!("broadcast response parse failed: {e}")))?;
+        if let Some(err) = json.get("error") {
+            let msg = err
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown RPC error");
+            return Err(CoreError::Other(format!(
+                "sui_executeTransactionBlock: {msg}"
+            )));
+        }
+        // Extract digest from response
+        json.get("result")
+            .and_then(|r| r.get("digest"))
+            .and_then(|d| d.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| CoreError::Other("missing digest in Sui RPC response".into()))
     }
 
     async fn simulate_transaction(

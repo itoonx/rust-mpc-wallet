@@ -167,13 +167,11 @@ impl RpcRegistry {
     pub fn ws_endpoint_from(&self, provider_name: &str, chain: Chain) -> Result<String, CoreError> {
         for provider in &self.providers {
             if provider.name() == provider_name {
-                return provider
-                    .wss_endpoint(chain, &self.network)
-                    .ok_or_else(|| {
-                        CoreError::Other(format!(
-                            "provider '{provider_name}' does not support chain {chain} (wss)"
-                        ))
-                    });
+                return provider.wss_endpoint(chain, &self.network).ok_or_else(|| {
+                    CoreError::Other(format!(
+                        "provider '{provider_name}' does not support chain {chain} (wss)"
+                    ))
+                });
             }
         }
         Err(CoreError::Other(format!(
@@ -184,27 +182,18 @@ impl RpcRegistry {
     /// Mark an endpoint URL as unhealthy.
     pub fn mark_unhealthy(&self, url: &str) {
         let mut health = self.health.write().expect("health lock poisoned");
-        health.insert(
-            url.to_string(),
-            EndpointHealth { healthy: false },
-        );
+        health.insert(url.to_string(), EndpointHealth { healthy: false });
     }
 
     /// Mark an endpoint URL as healthy.
     pub fn mark_healthy(&self, url: &str) {
         let mut health = self.health.write().expect("health lock poisoned");
-        health.insert(
-            url.to_string(),
-            EndpointHealth { healthy: true },
-        );
+        health.insert(url.to_string(), EndpointHealth { healthy: true });
     }
 
     fn is_healthy(&self, url: &str) -> bool {
         let health = self.health.read().expect("health lock poisoned");
-        health
-            .get(url)
-            .map(|h| h.healthy)
-            .unwrap_or(true) // unknown = healthy
+        health.get(url).map(|h| h.healthy).unwrap_or(true) // unknown = healthy
     }
 
     /// Get the next healthy HTTPS endpoint for a chain, trying all providers in order.
@@ -421,7 +410,10 @@ mod tests {
     #[test]
     fn test_custom_provider() {
         let mut https = HashMap::new();
-        https.insert(Chain::Ethereum, "https://my-node.example.com/rpc".to_string());
+        https.insert(
+            Chain::Ethereum,
+            "https://my-node.example.com/rpc".to_string(),
+        );
         let provider = CustomProvider::new("my-node", https, HashMap::new());
         let url = provider
             .https_endpoint(Chain::Ethereum, &NetworkEnv::Mainnet)
@@ -453,9 +445,7 @@ mod tests {
             timeout_ms: 5_000,
             max_retries: 5,
         };
-        let rpc = RpcRegistry::builder()
-            .chain_rpc_config(config)
-            .build();
+        let rpc = RpcRegistry::builder().chain_rpc_config(config).build();
         let cfg = rpc.chain_config(Chain::Ethereum).unwrap();
         assert_eq!(cfg.timeout_ms, 5_000);
         assert_eq!(cfg.max_retries, 5);

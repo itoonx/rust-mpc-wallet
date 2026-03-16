@@ -60,18 +60,12 @@ impl RpcProvider for InfuraProvider {
 
     fn https_endpoint(&self, chain: Chain, network: &NetworkEnv) -> Option<String> {
         let slug = Self::chain_slug(chain, network)?;
-        Some(format!(
-            "https://{slug}.infura.io/v3/{}",
-            self.project_id
-        ))
+        Some(format!("https://{slug}.infura.io/v3/{}", self.project_id))
     }
 
     fn wss_endpoint(&self, chain: Chain, network: &NetworkEnv) -> Option<String> {
         let slug = Self::chain_slug(chain, network)?;
-        Some(format!(
-            "wss://{slug}.infura.io/ws/v3/{}",
-            self.project_id
-        ))
+        Some(format!("wss://{slug}.infura.io/ws/v3/{}", self.project_id))
     }
 
     fn api_key_header(&self) -> Option<(&str, &str)> {

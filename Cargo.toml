@@ -47,6 +47,9 @@ rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
@@ -61,6 +64,7 @@ rustls-pemfile = "2"
 clap = { version = "4", features = ["derive"] }
 
 # Utilities
+base64 = "0.22"
 hex = "0.4"
 bs58 = "0.5"
 bech32 = "0.11"

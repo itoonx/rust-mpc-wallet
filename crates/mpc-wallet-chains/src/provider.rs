@@ -189,4 +189,17 @@ pub trait ChainProvider: Send + Sync {
             "simulate_transaction not implemented for this chain".into(),
         ))
     }
+
+    /// Broadcast a signed transaction to the network via the given RPC endpoint.
+    /// Returns the on-chain transaction hash/ID on success.
+    /// Default implementation returns an error; chain providers should override.
+    async fn broadcast(
+        &self,
+        _signed: &SignedTransaction,
+        _rpc_url: &str,
+    ) -> Result<String, CoreError> {
+        Err(CoreError::Other(
+            "broadcast not implemented for this chain".into(),
+        ))
+    }
 }

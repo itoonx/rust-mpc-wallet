@@ -9,7 +9,7 @@ use mpc_wallet_core::error::CoreError;
 
 use crate::bitcoin::BitcoinProvider;
 use crate::evm::EvmProvider;
-use crate::provider::{Chain, ChainProvider};
+use crate::provider::{Chain, ChainProvider, SignedTransaction};
 use crate::rpc::RpcRegistry;
 use crate::solana::SolanaProvider;
 use crate::sui::SuiProvider;
@@ -148,6 +148,25 @@ impl ChainRegistry {
             Chain::Solana,
             Chain::Sui,
         ]
+    }
+
+    /// Broadcast a signed transaction, resolving the RPC endpoint automatically.
+    ///
+    /// Uses `rest_endpoint()` for Bitcoin chains, `endpoint()` for JSON-RPC chains.
+    /// Requires an `RpcRegistry` to be attached via `with_rpc()`.
+    pub async fn broadcast(&self, signed: &SignedTransaction) -> Result<String, CoreError> {
+        let rpc = self
+            .rpc
+            .as_ref()
+            .ok_or_else(|| CoreError::Other("no RPC registry attached".into()))?;
+
+        let url = match signed.chain {
+            Chain::BitcoinMainnet | Chain::BitcoinTestnet => rpc.rest_endpoint(signed.chain)?,
+            _ => rpc.endpoint(signed.chain)?,
+        };
+
+        let provider = self.provider(signed.chain)?;
+        provider.broadcast(signed, &url).await
     }
 }
 

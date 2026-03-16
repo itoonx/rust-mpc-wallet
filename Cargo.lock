@@ -3188,6 +3188,7 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "async-trait",
+ "base64",
  "bcs",
  "bech32",
  "bitcoin",
@@ -3197,6 +3198,7 @@ dependencies = [
  "hex",
  "k256",
  "mpc-wallet-core",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

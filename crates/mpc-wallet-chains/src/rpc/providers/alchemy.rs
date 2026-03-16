@@ -54,18 +54,12 @@ impl RpcProvider for AlchemyProvider {
 
     fn https_endpoint(&self, chain: Chain, network: &NetworkEnv) -> Option<String> {
         let slug = Self::chain_slug(chain, network)?;
-        Some(format!(
-            "https://{slug}.g.alchemy.com/v2/{}",
-            self.api_key
-        ))
+        Some(format!("https://{slug}.g.alchemy.com/v2/{}", self.api_key))
     }
 
     fn wss_endpoint(&self, chain: Chain, network: &NetworkEnv) -> Option<String> {
         let slug = Self::chain_slug(chain, network)?;
-        Some(format!(
-            "wss://{slug}.g.alchemy.com/v2/{}",
-            self.api_key
-        ))
+        Some(format!("wss://{slug}.g.alchemy.com/v2/{}", self.api_key))
     }
 
     fn api_key_header(&self) -> Option<(&str, &str)> {

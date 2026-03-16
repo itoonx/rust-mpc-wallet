@@ -65,10 +65,7 @@ async fn do_sign(
     message: &[u8],
 ) -> Vec<MpcSignature> {
     let config = shares[0].config;
-    let signers: Vec<PartyId> = signer_indices
-        .iter()
-        .map(|&i| shares[i].party_id)
-        .collect();
+    let signers: Vec<PartyId> = signer_indices.iter().map(|&i| shares[i].party_id).collect();
     let net = LocalTransportNetwork::new(config.total_parties);
     let mut handles = Vec::new();
     for &idx in signer_indices {
@@ -88,14 +85,9 @@ async fn do_sign(
     sigs
 }
 
-async fn do_refresh(
-    factory: fn() -> Box<dyn MpcProtocol>,
-    shares: &[KeyShare],
-) -> Vec<KeyShare> {
+async fn do_refresh(factory: fn() -> Box<dyn MpcProtocol>, shares: &[KeyShare]) -> Vec<KeyShare> {
     let config = shares[0].config;
-    let signers: Vec<PartyId> = (1..=config.total_parties)
-        .map(|i| PartyId(i))
-        .collect();
+    let signers: Vec<PartyId> = (1..=config.total_parties).map(PartyId).collect();
     let net = LocalTransportNetwork::new(config.total_parties);
     let mut handles = Vec::new();
     for share in shares {
@@ -129,12 +121,14 @@ fn bench_keygen(c: &mut Criterion) {
 
     // FROST Ed25519
     group.bench_function(BenchmarkId::new("frost_ed25519", "2-of-3"), |b| {
-        b.to_async(&runtime).iter(|| do_keygen(frost_ed25519_factory, 2, 3));
+        b.to_async(&runtime)
+            .iter(|| do_keygen(frost_ed25519_factory, 2, 3));
     });
 
     // FROST Secp256k1-Taproot
     group.bench_function(BenchmarkId::new("frost_secp256k1_tr", "2-of-3"), |b| {
-        b.to_async(&runtime).iter(|| do_keygen(frost_secp256k1_factory, 2, 3));
+        b.to_async(&runtime)
+            .iter(|| do_keygen(frost_secp256k1_factory, 2, 3));
     });
 
     group.finish();
@@ -163,8 +157,14 @@ fn bench_sign(c: &mut Criterion) {
     });
 
     group.bench_function(BenchmarkId::new("frost_secp256k1_tr", "2-of-3"), |b| {
-        b.to_async(&runtime)
-            .iter(|| do_sign(frost_secp256k1_factory, &frost_secp_shares, &[0, 1], message));
+        b.to_async(&runtime).iter(|| {
+            do_sign(
+                frost_secp256k1_factory,
+                &frost_secp_shares,
+                &[0, 1],
+                message,
+            )
+        });
     });
 
     group.finish();
@@ -235,9 +235,7 @@ fn bench_ecdh_encryption(c: &mut Criterion) {
 
     group.bench_function("chacha20_encrypt_1kb", |b| {
         b.iter(|| {
-            enc_a
-                .encrypt(PartyId(2), &payload_1kb, PartyId(1))
-                .unwrap();
+            enc_a.encrypt(PartyId(2), &payload_1kb, PartyId(1)).unwrap();
         });
     });
 
@@ -266,11 +264,8 @@ fn bench_keystore(c: &mut Criterion) {
             let params = argon2::Params::new(65536, 3, 4, Some(32)).unwrap();
             let hasher =
                 argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-            let salt =
-                argon2::password_hash::SaltString::encode_b64(&[0u8; 22]).unwrap();
-            hasher
-                .hash_password(b"benchmark-password", &salt)
-                .ok();
+            let salt = argon2::password_hash::SaltString::encode_b64(&[0u8; 22]).unwrap();
+            hasher.hash_password(b"benchmark-password", &salt).ok();
         });
     });
 
@@ -330,22 +325,10 @@ fn bench_scaling(c: &mut Criterion) {
 
 // ─── Register All Benchmarks ────────────────────────────────────────────────
 
-criterion_group!(
-    protocol_benches,
-    bench_keygen,
-    bench_sign,
-    bench_refresh,
-);
+criterion_group!(protocol_benches, bench_keygen, bench_sign, bench_refresh,);
 
-criterion_group!(
-    infra_benches,
-    bench_ecdh_encryption,
-    bench_keystore,
-);
+criterion_group!(infra_benches, bench_ecdh_encryption, bench_keystore,);
 
-criterion_group!(
-    scaling_benches,
-    bench_scaling,
-);
+criterion_group!(scaling_benches, bench_scaling,);
 
 criterion_main!(protocol_benches, infra_benches, scaling_benches);
