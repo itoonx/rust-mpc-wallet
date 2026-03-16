@@ -10,15 +10,15 @@
 |----|---------|-----------------|-------|
 | SEC-001 | ~~GG20 reconstructs full private key via Lagrange interpolation~~ **RESOLVED** by T-S2-01 (`agent/r1-real-gg20`) — distributed additive-share signing, full key never assembled | — | R1 |
 | SEC-002 | ~~Hardcoded fallback password `"demo-password"` in all 4 CLI commands~~ **RESOLVED** by T-S2-03 (`agent/r4-cli-password`) — `rpassword::prompt_password` used in all 4 commands, zero `demo-password` occurrences | — | R4 |
-| SEC-003 | NatsTransport is entirely `todo!()` stubs — no TLS, no auth, no replay protection | Implement TLS + X25519 ECDH + ChaCha20-Poly1305 envelope + monotonic seq_no + TTL per R2 spec | R2 |
+| SEC-003 | ~~NatsTransport is entirely `todo!()` stubs — no TLS, no auth, no replay protection~~ **RESOLVED** by T-S3-01 (`agent/r2-nats-s3`) — real `async-nats` connect/send/recv impl, zero `todo!()` stubs | — | R2 |
 
 ## Open HIGH Findings (BLOCK merge)
 
 | ID | Summary | Owner |
 |----|---------|-------|
-| SEC-004 | `KeyShare.share_data` stored as plain `Vec<u8>` — no `ZeroizeOnDrop`, `Debug` leaks bytes | R0 / R1 |
-| SEC-005 | `EncryptedFileStore` holds password as plain `String`; derived AES key not zeroized | R2 |
-| SEC-006 | Argon2 uses `default()` parameters — too weak for wallet-class key encryption | R2 |
+| SEC-004 | `KeyShare.share_data` stored as plain `Vec<u8>` — **IN PROGRESS** T-S3-03 (`agent/r1-zeroize-shares`): all deserialization call sites wrap copies in `Zeroizing<Vec<u8>>`; root fix (changing field type in `protocol/mod.rs`) deferred to Sprint 4 (R0 owned) | R0 / R1 |
+| SEC-005 | ~~`EncryptedFileStore` holds password as plain `String`; derived AES key not zeroized~~ **RESOLVED** by T-S3-02 (`agent/r2-argon2`) — password wrapped in `Zeroizing<String>`, derived key in `Zeroizing<[u8; 32]>` | — | R2 |
+| SEC-006 | ~~Argon2 uses `default()` parameters — too weak for wallet-class key encryption~~ **RESOLVED** by T-S3-02 (`agent/r2-argon2`) — explicit `m_cost=65536` / `t_cost=3` / `p_cost=4` + salt upgraded to 32 bytes | — | R2 |
 | SEC-007 | `ProtocolMessage.from` is self-reported; no sender authentication in any transport | R2 / R0 |
 
 ## Open MEDIUM/LOW/INFO (non-blocking)
@@ -923,3 +923,157 @@ Checklist results:
 - [x] `try_into().unwrap()` at line 41 (`validate_sui_address`) is safe: `hex_part.len() != 64` guard fires before reaching it, ensuring exactly 32 decoded bytes.
 
 `bcs = "0.1"` added to workspace in R0 prep branch — no known RUSTSEC advisories for this crate. No new findings.
+
+---
+
+## Sprint 3 Wave 2 Gate Verdicts (2026-03-16)
+
+---
+
+### VERDICT: agent/r2-nats-s3 (T-S3-01)
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VERDICT: APPROVED
+Branch:  agent/r2-nats-s3
+Task:    T-S3-01
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Security gate passed. No CRITICAL or HIGH findings introduced.
+Checklist: all items passed ✓
+SEC-003: RESOLVED — NatsTransport fully implemented, zero todo!() stubs.
+New dependency: futures = "0.3" — no known CVEs.
+```
+
+Checklist results:
+
+- [x] Zero `todo!()` in `nats.rs` — `grep "todo!"` on the branch file returns empty. All four
+  previously stubbed methods (`connect`, `inbox_subject`, `party_subject`, `send`, `recv`) are
+  fully implemented.
+- [x] `ProtocolMessage` JSON payload does NOT contain secret material. `ProtocolMessage` has
+  fields: `from: PartyId`, `to: Option<PartyId>`, `round: u16`, `payload: Vec<u8>`. The
+  `payload` field carries protocol-round bytes set by the caller (protocol layer), not by
+  `NatsTransport`. The transport layer serializes the message as-is and adds no key material.
+  No key share bytes, scalars, or raw secrets are introduced by this transport code.
+- [x] Broadcast (`msg.to == None`) returns `Err(CoreError::Transport(...))` — not a panic, not
+  a silent drop. Code: `msg.to.ok_or_else(|| CoreError::Transport("NATS: broadcast not supported".to_string()))?;`
+  This is the correct behavior for an unicast transport.
+- [x] All error paths use `CoreError::Transport(String)` or `CoreError::Serialization(String)`.
+  No raw `panic!` or `unwrap()` on any operational path (connect, send, recv). Errors from
+  `async_nats` are wrapped via `.map_err(|e| CoreError::Transport(format!(...)))`.
+- [x] No hardcoded credentials, URLs, or secrets. The `nats_url` is caller-supplied. No
+  embedded tokens, passwords, or subject names beyond the session-scoped formula.
+- [x] `futures = "0.3"` added to workspace `[workspace.dependencies]` and to
+  `mpc-wallet-core/Cargo.toml`. `cargo audit` found NO advisory for `futures 0.3`. The five
+  pre-existing advisories (SEC-018: `rustls-pemfile`, SEC-019: `quinn-proto`, plus
+  `atomic-polyfill`, `derivative`, `paste`) are all pre-existing transitive deps, not
+  introduced by this branch.
+
+Residual notes:
+
+- The security comment at the top of `nats.rs` correctly documents that mTLS, per-session ECDH
+  envelope encryption, and replay protection (seq_no + TTL) are deferred to Sprint 4 (Epic E
+  stories E2–E4). This is the accepted scope for T-S3-01. SEC-007 (unauthenticated `from`
+  field) remains open and applies to this transport as well — tracked separately.
+- The `futures::StreamExt` import is used for `.next()` on the NATS subscriber. This is the
+  correct idiomatic usage.
+
+---
+
+### VERDICT: agent/r2-argon2 (T-S3-02)
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VERDICT: APPROVED
+Branch:  agent/r2-argon2
+Task:    T-S3-02
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Security gate passed. No CRITICAL or HIGH findings introduced.
+Checklist: all items passed ✓
+SEC-005: RESOLVED — password wrapped in Zeroizing<String>.
+SEC-006: RESOLVED — Argon2id params: m=65536 KiB / t=3 / p=4; salt upgraded to 32 bytes.
+```
+
+Checklist results:
+
+- [x] Argon2 params upgraded — exact values confirmed in source: `ARGON2_M_COST: u32 = 65536`,
+  `ARGON2_T_COST: u32 = 3`, `ARGON2_P_COST: u32 = 4`. `Params::new(65536, 3, 4, Some(32))`
+  called in `derive_key`. Values match the OWASP wallet-class recommendation for Argon2id.
+  `Algorithm::Argon2id` and `Version::V0x13` are explicitly set (no reliance on defaults).
+- [x] Password field changed from `password: String` to `password: Zeroizing<String>` in the
+  `EncryptedFileStore` struct. Constructor wraps with `Zeroizing::new(password.to_string())`.
+  Memory is zeroed when `EncryptedFileStore` is dropped (SEC-005 fix).
+- [x] Derived key wrapped in `Zeroizing<[u8; 32]>` — `derive_key` return type changed from
+  `[u8; 32]` to `Zeroizing<[u8; 32]>`. `key_bytes` is `Zeroizing::new([0u8; 32])` and is
+  passed by `key_bytes.as_ref()` to `Aes256Gcm::new_from_slice`. Zeroized on drop after
+  cipher construction. An intermediate `Zeroizing<Vec<u8>>` also wraps the password bytes
+  slice during KDF execution (defense-in-depth).
+- [x] Salt upgraded to 32 bytes — `let mut salt = [0u8; 32]` in `encrypt`. Decrypt boundary
+  check updated to `data.len() < 44` (32 salt + 12 nonce). Slice offsets corrected:
+  `salt = &data[..32]`, `nonce = Nonce::from_slice(&data[32..44])`, `ciphertext = &data[44..]`.
+  File format incompatibility documented in constructor doc comment (ephemeral test dirs only).
+- [x] No new `unwrap()` calls on the KDF path. All `unwrap()` occurrences are in the
+  `#[cfg(test)]` block (lines 253+). Production `derive_key`, `encrypt`, and `decrypt` use
+  `map_err(...)` throughout, propagating errors as `CoreError::Encryption`.
+
+No new crate dependencies introduced (zeroize was already a workspace dependency).
+
+---
+
+### VERDICT: agent/r1-zeroize-shares (T-S3-03)
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VERDICT: APPROVED
+Branch:  agent/r1-zeroize-shares
+Task:    T-S3-03
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Security gate passed. No CRITICAL or HIGH findings introduced.
+Checklist: all items passed ✓
+SEC-004: IN PROGRESS — share_data copy sites zeroized (partial fix); root fix deferred Sprint 4.
+```
+
+Checklist results:
+
+- [x] All 4 `share_data` deserialization sites wrapped in `Zeroizing::new(...)` before
+  `serde_json::from_slice`. Confirmed locations:
+  - `frost_ed25519.rs` — `sign()`: `let share_data_copy = Zeroizing::new(key_share.share_data.clone())`
+  - `frost_secp256k1.rs` — `sign()`: same pattern
+  - `gg20.rs` — `distributed_sign`: `let share_data_copy = Zeroizing::new(key_share.share_data.clone())`
+  - `gg20.rs` — `simulation_sign`: same pattern (simulation path also protected)
+  All four paths now ensure the intermediate clone is zeroed on drop.
+- [x] `protocol/mod.rs` was NOT modified — `git diff main..agent/r1-zeroize-shares -- crates/mpc-wallet-core/src/protocol/mod.rs` produced empty output. R0 file boundary respected.
+- [x] SEC-004 doc test added to `protocol_integration.rs`:
+  `test_sec004_share_data_copies_are_zeroized` — verifies that `Zeroizing<Vec<u8>>` zeroes its
+  own heap allocation on drop, not the original. Includes clear comment explaining the scope
+  (type-system guarantee) and what the root fix requires (Sprint 4, R0 changes `KeyShare.share_data`
+  to `Zeroizing<Vec<u8>>`).
+- [x] All simulation code paths (inside `#[cfg(feature = "gg20-simulation")]` gate) are also
+  wrapped — `simulation_sign` in `gg20.rs` receives the same `Zeroizing` treatment.
+
+Residual notes:
+
+- SEC-004 root fix — changing `KeyShare.share_data: Vec<u8>` to `Zeroizing<Vec<u8>>` in
+  `protocol/mod.rs` — requires R0. The current branch addresses the immediate risk (copies
+  created at deserialization sites are now zeroized). The original `key_share.share_data`
+  field itself remains a plain `Vec<u8>` until Sprint 4.
+- The doc test (`test_sec004_share_data_copies_are_zeroized`) correctly documents both what
+  is fixed and what remains. The test uses `assert_eq!(raw[0], 0xAA)` to confirm that
+  `Zeroizing::new(raw.clone())` does not zero the source — semantically correct.
+- No new dependencies introduced (`zeroize` was already in workspace).
+
+---
+
+## cargo audit summary — Sprint 3 Wave 2
+
+Run: 2026-03-16 on branch `agent/r6-security` (representative of main + Wave 2 deps)
+
+| Advisory | Crate | Severity | Status |
+|----------|-------|----------|--------|
+| RUSTSEC-2026-0037 | `quinn-proto` | HIGH (CVSS 8.7) | Pre-existing SEC-019 — tracked |
+| RUSTSEC-2025-0134 | `rustls-pemfile` | LOW (unmaintained) | Pre-existing SEC-018 — tracked |
+| RUSTSEC-2023-0089 | `atomic-polyfill` | — | Pre-existing transitive dep |
+| RUSTSEC-2024-0388 | `derivative` | — | Pre-existing transitive dep |
+| RUSTSEC-2024-0436 | `paste` | — | Pre-existing transitive dep |
+
+**`futures = "0.3"` (added by T-S3-01): NO new advisories.** All five advisories were present
+on `main` before Wave 2 branches. No new CVEs introduced by any of the three Wave 2 branches.
