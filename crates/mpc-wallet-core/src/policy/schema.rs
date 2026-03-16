@@ -77,3 +77,97 @@ impl Policy {
         }
     }
 }
+
+/// Pre-built policy templates for common enterprise use cases (Epic B4).
+///
+/// Each variant produces a [`Policy`] with sensible defaults via [`build`](PolicyTemplate::build).
+/// Operators should customize the generated policy (e.g. populate allowlists,
+/// adjust limits) before loading it into a [`super::PolicyStore`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyTemplate {
+    /// Exchange hot wallet: strict per-tx limits, low daily velocity.
+    ///
+    /// Covers ethereum, bitcoin, and solana with conservative limits.
+    /// Allowlists are empty by default — operators **must** populate them.
+    Exchange,
+    /// Treasury: moderate limits, ethereum-only by default.
+    ///
+    /// Higher per-tx and daily limits than Exchange, suitable for internal
+    /// treasury operations.
+    Treasury,
+    /// Custodian: permissive policy with no chain-specific restrictions.
+    ///
+    /// No per-chain rules are configured — all transactions on all chains
+    /// are allowed. Operators should add chain rules as needed.
+    Custodian,
+}
+
+impl PolicyTemplate {
+    /// Generate a [`Policy`] from this template.
+    ///
+    /// The returned policy uses [`POLICY_SCHEMA_VERSION`] and can be loaded
+    /// directly into a [`super::PolicyStore`].
+    ///
+    /// # Limits
+    ///
+    /// All monetary values are in the chain's native base unit (wei for EVM,
+    /// satoshis for Bitcoin, lamports for Solana).
+    pub fn build(&self) -> Policy {
+        match self {
+            PolicyTemplate::Exchange => Policy {
+                version: POLICY_SCHEMA_VERSION,
+                name: "exchange-hot-wallet".into(),
+                chains: {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "ethereum".into(),
+                        ChainPolicy {
+                            allowlist: vec![], // operator must configure
+                            max_amount_per_tx: Some(10_000_000_000_000_000_000), // 10 ETH in wei
+                            daily_velocity_limit: Some(18_000_000_000_000_000_000), // 18 ETH in wei
+                        },
+                    );
+                    m.insert(
+                        "bitcoin".into(),
+                        ChainPolicy {
+                            allowlist: vec![],
+                            max_amount_per_tx: Some(100_000_000), // 1 BTC in satoshis
+                            daily_velocity_limit: Some(1_000_000_000), // 10 BTC in satoshis
+                        },
+                    );
+                    m.insert(
+                        "solana".into(),
+                        ChainPolicy {
+                            allowlist: vec![],
+                            max_amount_per_tx: Some(10_000_000_000), // 10 SOL in lamports
+                            daily_velocity_limit: Some(100_000_000_000), // 100 SOL in lamports
+                        },
+                    );
+                    m
+                },
+            },
+            PolicyTemplate::Treasury => Policy {
+                version: POLICY_SCHEMA_VERSION,
+                name: "treasury".into(),
+                chains: {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "ethereum".into(),
+                        ChainPolicy {
+                            allowlist: vec![],
+                            max_amount_per_tx: Some(15_000_000_000_000_000_000), // 15 ETH in wei
+                            daily_velocity_limit: Some(18_000_000_000_000_000_000), // 18 ETH in wei
+                        },
+                    );
+                    m
+                },
+            },
+            PolicyTemplate::Custodian => Policy {
+                version: POLICY_SCHEMA_VERSION,
+                name: "custodian".into(),
+                chains: HashMap::new(), // no restrictions — allow all
+            },
+        }
+    }
+}
+

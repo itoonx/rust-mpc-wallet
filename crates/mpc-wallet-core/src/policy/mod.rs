@@ -28,7 +28,7 @@ use std::sync::RwLock;
 
 use crate::error::CoreError;
 use crate::policy::evaluator::{evaluate, EvalResult};
-pub use crate::policy::schema::{ChainPolicy, Policy, POLICY_SCHEMA_VERSION};
+pub use crate::policy::schema::{ChainPolicy, Policy, PolicyTemplate, POLICY_SCHEMA_VERSION};
 
 /// In-memory store for the active signing policy.
 ///
@@ -252,5 +252,63 @@ mod tests {
         store.clear();
         let err = store.check("ethereum", "0xabc", 1).unwrap_err();
         assert!(matches!(err, CoreError::PolicyRequired(_)));
+    }
+
+    // --- PolicyTemplate tests (Epic B4) ---
+
+    #[test]
+    fn test_exchange_template_has_strict_limits() {
+        let policy = PolicyTemplate::Exchange.build();
+        assert_eq!(policy.name, "exchange-hot-wallet");
+        assert_eq!(policy.version, POLICY_SCHEMA_VERSION);
+        // Must have ethereum, bitcoin, and solana chain policies
+        let eth = policy.chains.get("ethereum").unwrap();
+        assert!(eth.max_amount_per_tx.is_some());
+        assert!(eth.daily_velocity_limit.is_some());
+        let btc = policy.chains.get("bitcoin").unwrap();
+        assert!(btc.max_amount_per_tx.is_some());
+        let sol = policy.chains.get("solana").unwrap();
+        assert!(sol.max_amount_per_tx.is_some());
+    }
+
+    #[test]
+    fn test_treasury_template() {
+        let policy = PolicyTemplate::Treasury.build();
+        assert_eq!(policy.name, "treasury");
+        assert_eq!(policy.version, POLICY_SCHEMA_VERSION);
+        assert!(policy.chains.contains_key("ethereum"));
+        // Treasury has higher per-tx limit than exchange
+        let treasury_eth = policy.chains.get("ethereum").unwrap();
+        let exchange_eth = PolicyTemplate::Exchange.build();
+        let exchange_eth = exchange_eth.chains.get("ethereum").unwrap();
+        assert!(treasury_eth.max_amount_per_tx.unwrap() > exchange_eth.max_amount_per_tx.unwrap());
+    }
+
+    #[test]
+    fn test_custodian_template_permissive() {
+        let policy = PolicyTemplate::Custodian.build();
+        assert_eq!(policy.name, "custodian");
+        assert_eq!(policy.version, POLICY_SCHEMA_VERSION);
+        // No chain restrictions — allow everything
+        assert!(policy.chains.is_empty());
+    }
+
+    #[test]
+    fn test_template_loads_into_policy_store() {
+        let store = PolicyStore::new();
+        let policy = PolicyTemplate::Exchange.build();
+        store.load(policy).unwrap();
+        // Exchange template has no allowlist entries, so any address is allowed
+        // but amount must be within limit
+        assert!(store.check("ethereum", "0xabc", 1000).is_ok());
+        // Amount exceeding per-tx limit should be denied
+        let err = store
+            .check("ethereum", "0xabc", u64::MAX)
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::Protocol(_)),
+            "expected Protocol (policy denied), got {:?}",
+            err
+        );
     }
 }
