@@ -1,4 +1,4 @@
-use mpc_wallet_chains::provider::ChainProvider;
+use mpc_wallet_chains::provider::{ChainProvider, TransactionParams};
 use mpc_wallet_core::protocol::GroupPublicKey;
 
 // ============================================================================
@@ -89,4 +89,77 @@ fn test_bitcoin_mainnet_testnet_addresses_differ() {
         .derive_address(&pubkey)
         .unwrap();
     assert_ne!(mainnet_addr, testnet_addr);
+}
+
+// ============================================================================
+// Bitcoin transaction simulation tests (R3b — T-S10-03)
+// ============================================================================
+
+#[tokio::test]
+async fn test_bitcoin_simulation_basic() {
+    use mpc_wallet_chains::bitcoin::{BitcoinProvider, BitcoinSimulationConfig};
+
+    let provider = BitcoinProvider::testnet().with_simulation(BitcoinSimulationConfig::default());
+    let params = TransactionParams {
+        to: "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".into(),
+        value: "100000".into(), // 0.001 BTC — well above dust
+        data: None,
+        chain_id: None,
+        extra: None,
+    };
+    let result = provider.simulate_transaction(&params).await.unwrap();
+    assert!(result.success);
+    assert_eq!(result.risk_score, 0);
+    assert!(result.risk_flags.is_empty());
+}
+
+#[tokio::test]
+async fn test_bitcoin_simulation_dust_detected() {
+    use mpc_wallet_chains::bitcoin::{BitcoinProvider, BitcoinSimulationConfig};
+
+    let provider = BitcoinProvider::testnet().with_simulation(BitcoinSimulationConfig::default());
+    let params = TransactionParams {
+        to: "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".into(),
+        value: "100".into(), // below 546 dust threshold
+        data: None,
+        chain_id: None,
+        extra: None,
+    };
+    let result = provider.simulate_transaction(&params).await.unwrap();
+    assert!(result.risk_flags.contains(&"dust_output".to_string()));
+    assert!(result.risk_score >= 40);
+}
+
+#[tokio::test]
+async fn test_bitcoin_simulation_high_fee() {
+    use mpc_wallet_chains::bitcoin::{BitcoinProvider, BitcoinSimulationConfig};
+
+    let provider = BitcoinProvider::testnet().with_simulation(BitcoinSimulationConfig::default());
+    let params = TransactionParams {
+        to: "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".into(),
+        value: "100000".into(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({
+            "fee_rate_sat_vb": 1000,
+            "fee_sat": 2_000_000
+        })),
+    };
+    let result = provider.simulate_transaction(&params).await.unwrap();
+    assert!(result.risk_flags.contains(&"high_fee_rate".to_string()));
+    assert!(result.risk_flags.contains(&"excessive_fee".to_string()));
+    assert!(result.risk_score >= 110);
+}
+
+#[tokio::test]
+async fn test_bitcoin_simulation_not_configured() {
+    let provider = mpc_wallet_chains::bitcoin::BitcoinProvider::testnet();
+    let params = TransactionParams {
+        to: "tb1q".into(),
+        value: "0".into(),
+        data: None,
+        chain_id: None,
+        extra: None,
+    };
+    assert!(provider.simulate_transaction(&params).await.is_err());
 }

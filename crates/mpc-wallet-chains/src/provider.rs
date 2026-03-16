@@ -79,6 +79,21 @@ pub struct SignedTransaction {
     pub tx_hash: String,
 }
 
+/// Result of a transaction simulation / pre-flight check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulationResult {
+    /// Whether the simulated transaction would succeed.
+    pub success: bool,
+    /// Gas / weight units consumed (0 if not applicable).
+    pub gas_used: u64,
+    /// Arbitrary return data from the simulation.
+    pub return_data: Vec<u8>,
+    /// Human-readable risk flag labels.
+    pub risk_flags: Vec<String>,
+    /// Aggregate risk score (0 = safe, 255 = maximum risk). Capped at 255.
+    pub risk_score: u8,
+}
+
 /// Trait for chain-specific transaction building and signing.
 #[async_trait]
 pub trait ChainProvider: Send + Sync {
@@ -100,4 +115,15 @@ pub trait ChainProvider: Send + Sync {
         unsigned: &UnsignedTransaction,
         sig: &MpcSignature,
     ) -> Result<SignedTransaction, CoreError>;
+
+    /// Simulate / pre-flight check a transaction before signing.
+    /// Default implementation returns an error — chain providers should override.
+    async fn simulate_transaction(
+        &self,
+        _params: &TransactionParams,
+    ) -> Result<SimulationResult, CoreError> {
+        Err(CoreError::Other(
+            "simulate_transaction not implemented for this chain".into(),
+        ))
+    }
 }
