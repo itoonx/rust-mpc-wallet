@@ -84,28 +84,35 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 11 complete)
+## Current State (as of Sprint 14 — all epics complete, CI green)
 
 ### Tests on `main`
 ```
-200 tests pass  (cargo test --workspace)  1 ignored (NATS live-server test)
-cargo check     clean (0 warnings)
-.github/workflows/ci.yml  ← CI pipeline active
+233 tests pass  (cargo test --workspace)  1 ignored (NATS live-server test)
+cargo fmt        clean
+cargo clippy     clean (0 warnings, -D warnings)
+cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
+CI pipeline      ALL GREEN (fmt + clippy + test + audit)
 ```
 
 ### Sprint Status
-- **Sprint 1:** COMPLETE — all 5 tasks merged (T-01, T-02, T-05, T-06, T-07)
-- **Sprint 2:** COMPLETE — all 5 tasks merged (T-S2-00 through T-S2-05)
-- **Sprint 3:** COMPLETE — all 5 tasks merged (T-S3-00 through T-S3-05)
-- **Sprint 4:** COMPLETE — all 5 tasks merged (T-S4-00 through T-S4-04)
-- **Sprint 5:** COMPLETE — all 5 tasks merged (T-S5-00 through T-S5-04)
-- **Sprint 6:** COMPLETE — all 5 tasks merged (T-S6-00 through T-S6-04)
-- **Sprint 7:** COMPLETE — all 5 tasks merged (T-S7-00 through T-S7-04)
-- **Sprint 8:** COMPLETE — all 5 tasks merged (T-S8-00 through T-S8-04)
-- **Sprint 9:** COMPLETE — all 4 tasks merged (T-S9-00 through T-S9-03)
-- **Sprint 10:** COMPLETE — all 4 tasks merged (T-S10-00 through T-S10-03)
-- **Sprint 11:** COMPLETE — all 5 tasks merged (T-S11-00 through T-S11-04)
-- **Sprint 12:** PENDING — JetStream (Epic E5), key resharing (Epic H2), disaster recovery (Epic H4), multi-cloud ops (Epic I)
+- **Sprint 1–8:** COMPLETE — core MPC protocols, transport, key store, policy, approvals, audit
+- **Sprint 9:** COMPLETE — ABAC, MFA, EVM simulation, GG20 key refresh
+- **Sprint 10:** COMPLETE — FROST Ed25519/Secp256k1 refresh, signed policy bundles, Bitcoin simulation
+- **Sprint 11:** COMPLETE — Policy templates, Solana/Sui simulation, CLI simulate, ChainRegistry
+- **Sprint 12:** COMPLETE — GG20 key resharing, multi-cloud ops (distribution + quorum risk)
+- **Sprint 13:** COMPLETE — FROST reshare, DR plan, RPC failover, chaos framework
+- **Sprint 14:** COMPLETE — JetStream ACL (E5), WORM storage config (F4), CI fixes (clippy + audit)
+
+**All 10 epics: 100% COMPLETE**
+
+### New in Sprint 12–14
+- `mpc_wallet_core::protocol` — Epic H2: GG20 key resharing (change threshold + add/remove parties)
+- `mpc_wallet_core::ops` — Epic I: multi-cloud node distribution constraints, quorum risk assessment, RPC failover pool, chaos test framework, disaster recovery plan
+- `mpc_wallet_core::transport::jetstream` — Epic E5: JetStream stream config + per-party ACL with subject isolation
+- `mpc_wallet_core::audit` — Epic F4: WORM storage config (S3 Object Lock + local append-only)
+- FROST Ed25519 + Secp256k1 reshare (DKG-based, new group key)
+- CI fully green: clippy -D warnings, cargo audit with .cargo/audit.toml
 
 ### New in Sprint 11
 - `mpc_wallet_core::policy::templates` — Epic B4: policy templates (Exchange/Treasury/Custodian presets) with `PolicyTemplate::apply()` convenience
@@ -205,6 +212,8 @@ Full findings log → `docs/SECURITY_FINDINGS.md`
 | DEC-005 | Sprint 7 RBAC: Epic A2 only (roles + guards); OIDC/ABAC/MFA deferred to Sprint 8 |
 | DEC-006 | Solana v0: manual serialization continues (DEC-002 extended); no solana-sdk dependency |
 | DEC-007 | ChainRegistry: unified provider factory pattern — single entry point for all chain providers |
+| DEC-008 | FROST reshare = fresh DKG (new group key); GG20 reshare preserves group key via additive re-sharing |
+| DEC-009 | Work on `dev` branch; PR to `main` only after CI green |
 
 Full decision log → `docs/DECISIONS.md`
 
