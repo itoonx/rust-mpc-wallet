@@ -48,6 +48,7 @@ futures = "0.3"
 
 # Transport
 async-nats = "0.38"
+rustls-pemfile = "2"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
