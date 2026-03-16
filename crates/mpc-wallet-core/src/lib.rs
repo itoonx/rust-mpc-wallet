@@ -46,3 +46,8 @@ pub mod approvals;
 /// Use [`audit::AuditLedger`] to record every signing event. Call
 /// [`audit::AuditLedger::verify`] to check tamper-evident chain integrity.
 pub mod audit;
+/// Role-Based Access Control: API-level roles (initiator/approver/admin) and permission guards (FR-A.2).
+///
+/// Use [`rbac::require_role`] or [`rbac::Permissions`] to guard operations
+/// based on the authenticated user's roles.
+pub mod rbac;

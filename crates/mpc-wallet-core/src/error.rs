@@ -100,6 +100,13 @@ pub enum CoreError {
     #[error("approval error: {0}")]
     ApprovalRequired(String),
 
+    /// The caller lacks the required role or permission for this operation.
+    ///
+    /// Returned by RBAC guards when the authenticated user's roles do not
+    /// include the minimum required role for the requested action.
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     /// An audit ledger error (e.g. hash-chain integrity violation, service
     /// signature failure, or append I/O error).
     ///

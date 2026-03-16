@@ -63,6 +63,10 @@ pub struct Session {
     pub created_at: u64,
     /// Unix timestamp (seconds since epoch) of the most recent state transition.
     pub updated_at: u64,
+    /// The user who initiated this signing session (from RBAC AuthContext).
+    /// Set when the session is created via an authenticated API call.
+    /// Used for audit logging and SoD enforcement.
+    pub initiator_id: Option<String>,
 }
 
 impl Session {
@@ -82,6 +86,7 @@ impl Session {
             state: SessionState::Pending,
             created_at: now,
             updated_at: now,
+            initiator_id: None,
         }
     }
 }
