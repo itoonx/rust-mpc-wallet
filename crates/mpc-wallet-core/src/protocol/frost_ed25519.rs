@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use frost_ed25519 as frost;
 use serde::{Deserialize, Serialize};
-use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroizing, ZeroizeOnDrop};
 
 use crate::error::CoreError;
 use crate::protocol::{GroupPublicKey, KeyShare, MpcProtocol, MpcSignature};
@@ -181,9 +181,13 @@ impl MpcProtocol for FrostEd25519Protocol {
         message: &[u8],
         transport: &dyn Transport,
     ) -> Result<MpcSignature, CoreError> {
-        // Deserialize stored data
+        // Deserialize stored data.
+        // SEC-004 partial fix: wrap the share_data clone in Zeroizing so the raw
+        // bytes are zeroed on drop.  The deserialized FrostEd25519ShareData also
+        // derives ZeroizeOnDrop, ensuring key material bytes are erased after use.
+        let share_data_copy = Zeroizing::new(key_share.share_data.clone());
         let share_data: FrostEd25519ShareData =
-            serde_json::from_slice(&key_share.share_data)
+            serde_json::from_slice(&share_data_copy)
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
         let key_package: frost::keys::KeyPackage =
             serde_json::from_slice(&share_data.key_package)

@@ -67,7 +67,7 @@ use k256::{
     ProjectivePoint, Scalar,
 };
 use serde::{Deserialize, Serialize};
-use zeroize::ZeroizeOnDrop;
+use zeroize::{Zeroizing, ZeroizeOnDrop};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared key-share data structure
@@ -384,7 +384,11 @@ async fn distributed_sign(
     use sha2::Digest;
 
     // Deserialize our Shamir share.
-    let my_share: Gg20ShareData = serde_json::from_slice(&key_share.share_data)
+    // SEC-004 partial fix: wrap the share_data clone in Zeroizing so the raw
+    // bytes are zeroed on drop.  The deserialized Gg20ShareData also derives
+    // ZeroizeOnDrop, ensuring the scalar bytes (y field) are erased after use.
+    let share_data_copy = Zeroizing::new(key_share.share_data.clone());
+    let my_share: Gg20ShareData = serde_json::from_slice(&share_data_copy)
         .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
     let shamir_y = Scalar::from_repr(*k256::FieldBytes::from_slice(&my_share.y))
@@ -699,7 +703,11 @@ async fn simulation_sign(
 ) -> Result<MpcSignature, CoreError> {
     use k256::SecretKey;
 
-    let my_share: Gg20ShareData = serde_json::from_slice(&key_share.share_data)
+    // SEC-004 partial fix: wrap the share_data clone in Zeroizing so the raw
+    // bytes are zeroed on drop.  The deserialized Gg20ShareData also derives
+    // ZeroizeOnDrop, ensuring the scalar bytes (y field) are erased after use.
+    let share_data_copy = Zeroizing::new(key_share.share_data.clone());
+    let my_share: Gg20ShareData = serde_json::from_slice(&share_data_copy)
         .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
     let my_y = Scalar::from_repr(*k256::FieldBytes::from_slice(&my_share.y))
