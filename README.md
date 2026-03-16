@@ -1,3 +1,5 @@
+<div align="center">
+
 ```
  ██╗   ██╗ █████╗ ██╗   ██╗██╗  ████████╗███████╗██╗  ██╗
  ██║   ██║██╔══██╗██║   ██║██║  ╚══██╔══╝██╔════╝╚██╗██╔╝
@@ -5,8 +7,11 @@
  ╚██╗ ██╔╝██╔══██║██║   ██║██║     ██║   ██╔══╝   ██╔██╗
   ╚████╔╝ ██║  ██║╚██████╔╝███████╗██║   ███████╗██╔╝ ██╗
    ╚═══╝  ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝   ╚══════╝╚═╝  ╚═╝
-        Your keys. Distributed. Unstoppable.
 ```
+
+**Your keys. Distributed. Unstoppable.**
+
+</div>
 
 <p align="center">
   <strong>Threshold MPC Wallet SDK</strong> — No single party ever holds a complete private key.
