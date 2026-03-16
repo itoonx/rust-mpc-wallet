@@ -1,5 +1,6 @@
 pub mod provider;
 pub mod registry;
+pub mod rpc;
 
 pub mod bitcoin;
 pub mod evm;

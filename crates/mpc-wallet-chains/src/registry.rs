@@ -10,6 +10,7 @@ use mpc_wallet_core::error::CoreError;
 use crate::bitcoin::BitcoinProvider;
 use crate::evm::EvmProvider;
 use crate::provider::{Chain, ChainProvider};
+use crate::rpc::RpcRegistry;
 use crate::solana::SolanaProvider;
 use crate::sui::SuiProvider;
 
@@ -34,6 +35,7 @@ pub enum NetworkEnv {
 /// ```
 pub struct ChainRegistry {
     env: NetworkEnv,
+    rpc: Option<RpcRegistry>,
 }
 
 impl ChainRegistry {
@@ -41,6 +43,7 @@ impl ChainRegistry {
     pub fn default_mainnet() -> Self {
         Self {
             env: NetworkEnv::Mainnet,
+            rpc: None,
         }
     }
 
@@ -48,7 +51,19 @@ impl ChainRegistry {
     pub fn default_testnet() -> Self {
         Self {
             env: NetworkEnv::Testnet,
+            rpc: None,
         }
+    }
+
+    /// Attach an RPC registry for endpoint resolution.
+    pub fn with_rpc(mut self, rpc: RpcRegistry) -> Self {
+        self.rpc = Some(rpc);
+        self
+    }
+
+    /// Get a reference to the attached RPC registry, if any.
+    pub fn rpc(&self) -> Option<&RpcRegistry> {
+        self.rpc.as_ref()
     }
 
     /// Get the network environment.
