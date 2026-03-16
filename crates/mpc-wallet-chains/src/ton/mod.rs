@@ -1,13 +1,14 @@
-//! Monero (XMR) chain provider.
+//! TON (The Open Network) chain provider.
 //!
-//! Monero uses the CryptoNote protocol with Ed25519 curve (Curve25519).
-//! Addresses are derived from a pair of keys (spend key + view key).
-//! For MPC, we use the spend public key to derive the standard address.
+//! TON uses Ed25519 signing (FROST Ed25519) with Cell/BOC encoding.
+//! Addresses are derived from SHA-256 of the wallet state init.
 
 pub mod address;
+pub mod cell;
 pub mod tx;
 
 use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
 use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::{GroupPublicKey, MpcSignature};
@@ -17,40 +18,36 @@ use crate::provider::{
     UnsignedTransaction,
 };
 
-/// Monero chain provider.
-///
-/// Uses Ed25519 signing (FROST Ed25519).
-/// Monero addresses are derived from spend + view key pairs.
-/// For MPC, the group public key serves as the spend public key.
-pub struct MoneroProvider;
+/// TON chain provider.
+pub struct TonProvider;
 
-impl MoneroProvider {
+impl TonProvider {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Default for MoneroProvider {
+impl Default for TonProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl ChainProvider for MoneroProvider {
+impl ChainProvider for TonProvider {
     fn chain(&self) -> Chain {
-        Chain::Monero
+        Chain::Ton
     }
 
     fn derive_address(&self, group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
-        address::derive_monero_address(group_pubkey)
+        address::derive_ton_address(group_pubkey)
     }
 
     async fn build_transaction(
         &self,
         params: TransactionParams,
     ) -> Result<UnsignedTransaction, CoreError> {
-        tx::build_monero_transaction(params).await
+        tx::build_ton_transaction(params).await
     }
 
     fn finalize_transaction(
@@ -58,7 +55,7 @@ impl ChainProvider for MoneroProvider {
         unsigned: &UnsignedTransaction,
         sig: &MpcSignature,
     ) -> Result<SignedTransaction, CoreError> {
-        tx::finalize_monero_transaction(unsigned, sig)
+        tx::finalize_ton_transaction(unsigned, sig)
     }
 
     async fn broadcast(
@@ -66,13 +63,11 @@ impl ChainProvider for MoneroProvider {
         signed: &SignedTransaction,
         rpc_url: &str,
     ) -> Result<String, CoreError> {
-        // Monero daemon JSON-RPC: /send_raw_transaction
-        let raw_hex = hex::encode(&signed.raw_tx);
+        let boc_b64 = BASE64.encode(&signed.raw_tx);
+        let url = format!("{rpc_url}/api/v2/sendBoc");
         let body = serde_json::json!({
-            "tx_as_hex": raw_hex,
-            "do_not_relay": false,
+            "boc": boc_b64,
         });
-        let url = format!("{rpc_url}/send_raw_transaction");
         let client = reqwest::Client::new();
         let resp = client
             .post(&url)
@@ -84,15 +79,14 @@ impl ChainProvider for MoneroProvider {
             .json()
             .await
             .map_err(|e| CoreError::Other(format!("broadcast response parse failed: {e}")))?;
-        if json.get("status").and_then(|s| s.as_str()) != Some("OK") {
-            let reason = json
-                .get("reason")
-                .and_then(|r| r.as_str())
-                .unwrap_or("unknown");
-            return Err(CoreError::Other(format!(
-                "Monero broadcast failed: {reason}"
-            )));
+        if json.get("ok").and_then(|o| o.as_bool()) != Some(true) {
+            let err = json
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("unknown error");
+            return Err(CoreError::Other(format!("TON broadcast failed: {err}")));
         }
+        // Return tx hash from sign payload
         Ok(signed.tx_hash.clone())
     }
 
@@ -103,9 +97,10 @@ impl ChainProvider for MoneroProvider {
         let mut risk_flags = Vec::new();
         let mut risk_score: u8 = 0;
 
-        let piconero: u64 = params.value.parse().unwrap_or(0);
-        // 1 XMR = 10^12 piconero, flag if > 100 XMR
-        if piconero > 100_000_000_000_000 {
+        // TON uses nanotons (1 TON = 10^9 nanoton)
+        let nanoton: u64 = params.value.parse().unwrap_or(0);
+        if nanoton > 10_000_000_000_000 {
+            // > 10,000 TON
             risk_flags.push("high_value".into());
             risk_score = risk_score.saturating_add(50);
         }

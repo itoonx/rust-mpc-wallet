@@ -67,6 +67,10 @@ impl EvmProvider {
             Chain::OpBnb => 204,
             Chain::Immutable => 13371,
             Chain::MantaPacific => 169,
+            Chain::Hyperliquid => 999,
+            Chain::Berachain => 80094,
+            Chain::MegaEth => 6342,
+            Chain::Monad => 143,
             other => {
                 return Err(CoreError::InvalidInput(format!(
                     "chain '{other}' is not an EVM chain"

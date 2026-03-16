@@ -1,8 +1,7 @@
-//! Monero (XMR) chain provider.
+//! TRON chain provider.
 //!
-//! Monero uses the CryptoNote protocol with Ed25519 curve (Curve25519).
-//! Addresses are derived from a pair of keys (spend key + view key).
-//! For MPC, we use the spend public key to derive the standard address.
+//! TRON uses ECDSA secp256k1 signing (GG20) with Base58Check addresses.
+//! Transaction format is Protobuf-based.
 
 pub mod address;
 pub mod tx;
@@ -17,40 +16,36 @@ use crate::provider::{
     UnsignedTransaction,
 };
 
-/// Monero chain provider.
-///
-/// Uses Ed25519 signing (FROST Ed25519).
-/// Monero addresses are derived from spend + view key pairs.
-/// For MPC, the group public key serves as the spend public key.
-pub struct MoneroProvider;
+/// TRON chain provider.
+pub struct TronProvider;
 
-impl MoneroProvider {
+impl TronProvider {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Default for MoneroProvider {
+impl Default for TronProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl ChainProvider for MoneroProvider {
+impl ChainProvider for TronProvider {
     fn chain(&self) -> Chain {
-        Chain::Monero
+        Chain::Tron
     }
 
     fn derive_address(&self, group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
-        address::derive_monero_address(group_pubkey)
+        address::derive_tron_address(group_pubkey)
     }
 
     async fn build_transaction(
         &self,
         params: TransactionParams,
     ) -> Result<UnsignedTransaction, CoreError> {
-        tx::build_monero_transaction(params).await
+        tx::build_tron_transaction(params).await
     }
 
     fn finalize_transaction(
@@ -58,7 +53,7 @@ impl ChainProvider for MoneroProvider {
         unsigned: &UnsignedTransaction,
         sig: &MpcSignature,
     ) -> Result<SignedTransaction, CoreError> {
-        tx::finalize_monero_transaction(unsigned, sig)
+        tx::finalize_tron_transaction(unsigned, sig)
     }
 
     async fn broadcast(
@@ -66,13 +61,11 @@ impl ChainProvider for MoneroProvider {
         signed: &SignedTransaction,
         rpc_url: &str,
     ) -> Result<String, CoreError> {
-        // Monero daemon JSON-RPC: /send_raw_transaction
         let raw_hex = hex::encode(&signed.raw_tx);
+        let url = format!("{rpc_url}/wallet/broadcasttransaction");
         let body = serde_json::json!({
-            "tx_as_hex": raw_hex,
-            "do_not_relay": false,
+            "raw_data_hex": raw_hex,
         });
-        let url = format!("{rpc_url}/send_raw_transaction");
         let client = reqwest::Client::new();
         let resp = client
             .post(&url)
@@ -84,16 +77,17 @@ impl ChainProvider for MoneroProvider {
             .json()
             .await
             .map_err(|e| CoreError::Other(format!("broadcast response parse failed: {e}")))?;
-        if json.get("status").and_then(|s| s.as_str()) != Some("OK") {
-            let reason = json
-                .get("reason")
-                .and_then(|r| r.as_str())
-                .unwrap_or("unknown");
-            return Err(CoreError::Other(format!(
-                "Monero broadcast failed: {reason}"
-            )));
+        if json.get("result").and_then(|r| r.as_bool()) != Some(true) {
+            let msg = json
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
+            return Err(CoreError::Other(format!("TRON broadcast failed: {msg}")));
         }
-        Ok(signed.tx_hash.clone())
+        json.get("txid")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| CoreError::Other("missing txid in TRON response".into()))
     }
 
     async fn simulate_transaction(
@@ -103,9 +97,10 @@ impl ChainProvider for MoneroProvider {
         let mut risk_flags = Vec::new();
         let mut risk_score: u8 = 0;
 
-        let piconero: u64 = params.value.parse().unwrap_or(0);
-        // 1 XMR = 10^12 piconero, flag if > 100 XMR
-        if piconero > 100_000_000_000_000 {
+        // TRON uses SUN (1 TRX = 1,000,000 SUN)
+        let sun: u64 = params.value.parse().unwrap_or(0);
+        if sun > 100_000_000_000 {
+            // > 100,000 TRX
             risk_flags.push("high_value".into());
             risk_score = risk_score.saturating_add(50);
         }

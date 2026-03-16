@@ -11,6 +11,7 @@
 pub mod address;
 pub mod broadcast;
 pub mod simulation;
+pub mod tx;
 
 pub use broadcast::broadcast_utxo_rest;
 pub use simulation::{simulate_utxo, UtxoSimulationConfig};
@@ -141,29 +142,7 @@ impl ChainProvider for UtxoProvider {
         &self,
         params: TransactionParams,
     ) -> Result<UnsignedTransaction, CoreError> {
-        let chain = self.config.chain;
-        let value: u64 = params
-            .value
-            .parse()
-            .map_err(|_| CoreError::InvalidInput(format!("invalid amount: {}", params.value)))?;
-
-        let mut payload_data = Vec::new();
-        payload_data.extend_from_slice(params.to.as_bytes());
-        payload_data.extend_from_slice(&value.to_le_bytes());
-        if let Some(extra) = &params.extra {
-            payload_data.extend_from_slice(extra.to_string().as_bytes());
-        }
-
-        // Double SHA-256 hash (standard for UTXO chains)
-        use sha2::{Digest, Sha256};
-        let first = Sha256::digest(&payload_data);
-        let sign_payload = Sha256::digest(first).to_vec();
-
-        Ok(UnsignedTransaction {
-            chain,
-            sign_payload,
-            tx_data: payload_data,
-        })
+        tx::build_utxo_transaction(self.config.chain, params).await
     }
 
     fn finalize_transaction(
@@ -171,27 +150,7 @@ impl ChainProvider for UtxoProvider {
         unsigned: &UnsignedTransaction,
         sig: &MpcSignature,
     ) -> Result<SignedTransaction, CoreError> {
-        let (r, s) = match sig {
-            MpcSignature::Ecdsa { r, s, .. } => (r.clone(), s.clone()),
-            _ => {
-                return Err(CoreError::InvalidInput(format!(
-                    "{} requires ECDSA signature",
-                    self.config.coin_name
-                )))
-            }
-        };
-
-        let mut raw_tx = unsigned.tx_data.clone();
-        raw_tx.extend_from_slice(&r);
-        raw_tx.extend_from_slice(&s);
-
-        let tx_hash = hex::encode(&unsigned.sign_payload);
-
-        Ok(SignedTransaction {
-            chain: self.config.chain,
-            raw_tx,
-            tx_hash,
-        })
+        tx::finalize_utxo_transaction(unsigned, sig, self.config.coin_name)
     }
 
     async fn broadcast(

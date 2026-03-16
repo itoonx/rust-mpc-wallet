@@ -1,8 +1,9 @@
-//! Monero (XMR) chain provider.
+//! Starknet chain provider.
 //!
-//! Monero uses the CryptoNote protocol with Ed25519 curve (Curve25519).
-//! Addresses are derived from a pair of keys (spend key + view key).
-//! For MPC, we use the spend public key to derive the standard address.
+//! Starknet uses the STARK curve for signing (not secp256k1 or Ed25519).
+//! Threshold MPC STARK signing is not yet implemented — this provider
+//! supports address derivation and transaction building with a placeholder
+//! signing flow that will be connected to a future STARK MPC protocol.
 
 pub mod address;
 pub mod tx;
@@ -17,40 +18,39 @@ use crate::provider::{
     UnsignedTransaction,
 };
 
-/// Monero chain provider.
+/// Starknet chain provider.
 ///
-/// Uses Ed25519 signing (FROST Ed25519).
-/// Monero addresses are derived from spend + view key pairs.
-/// For MPC, the group public key serves as the spend public key.
-pub struct MoneroProvider;
+/// Signing uses STARK curve — threshold MPC for this curve is planned.
+/// Currently supports address derivation and tx building structure.
+pub struct StarknetProvider;
 
-impl MoneroProvider {
+impl StarknetProvider {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl Default for MoneroProvider {
+impl Default for StarknetProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl ChainProvider for MoneroProvider {
+impl ChainProvider for StarknetProvider {
     fn chain(&self) -> Chain {
-        Chain::Monero
+        Chain::Starknet
     }
 
     fn derive_address(&self, group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
-        address::derive_monero_address(group_pubkey)
+        address::derive_starknet_address(group_pubkey)
     }
 
     async fn build_transaction(
         &self,
         params: TransactionParams,
     ) -> Result<UnsignedTransaction, CoreError> {
-        tx::build_monero_transaction(params).await
+        tx::build_starknet_transaction(params).await
     }
 
     fn finalize_transaction(
@@ -58,7 +58,7 @@ impl ChainProvider for MoneroProvider {
         unsigned: &UnsignedTransaction,
         sig: &MpcSignature,
     ) -> Result<SignedTransaction, CoreError> {
-        tx::finalize_monero_transaction(unsigned, sig)
+        tx::finalize_starknet_transaction(unsigned, sig)
     }
 
     async fn broadcast(
@@ -66,16 +66,17 @@ impl ChainProvider for MoneroProvider {
         signed: &SignedTransaction,
         rpc_url: &str,
     ) -> Result<String, CoreError> {
-        // Monero daemon JSON-RPC: /send_raw_transaction
+        // Starknet JSON-RPC: starknet_addInvokeTransaction
         let raw_hex = hex::encode(&signed.raw_tx);
         let body = serde_json::json!({
-            "tx_as_hex": raw_hex,
-            "do_not_relay": false,
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "starknet_addInvokeTransaction",
+            "params": [{"raw_tx": raw_hex}]
         });
-        let url = format!("{rpc_url}/send_raw_transaction");
         let client = reqwest::Client::new();
         let resp = client
-            .post(&url)
+            .post(rpc_url)
             .json(&body)
             .send()
             .await
@@ -84,16 +85,20 @@ impl ChainProvider for MoneroProvider {
             .json()
             .await
             .map_err(|e| CoreError::Other(format!("broadcast response parse failed: {e}")))?;
-        if json.get("status").and_then(|s| s.as_str()) != Some("OK") {
-            let reason = json
-                .get("reason")
-                .and_then(|r| r.as_str())
-                .unwrap_or("unknown");
+        if let Some(err) = json.get("error") {
+            let msg = err
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown RPC error");
             return Err(CoreError::Other(format!(
-                "Monero broadcast failed: {reason}"
+                "Starknet broadcast failed: {msg}"
             )));
         }
-        Ok(signed.tx_hash.clone())
+        json.get("result")
+            .and_then(|r| r.get("transaction_hash"))
+            .and_then(|h| h.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| CoreError::Other("missing tx hash in Starknet response".into()))
     }
 
     async fn simulate_transaction(
@@ -103,9 +108,8 @@ impl ChainProvider for MoneroProvider {
         let mut risk_flags = Vec::new();
         let mut risk_score: u8 = 0;
 
-        let piconero: u64 = params.value.parse().unwrap_or(0);
-        // 1 XMR = 10^12 piconero, flag if > 100 XMR
-        if piconero > 100_000_000_000_000 {
+        let amount: u64 = params.value.parse().unwrap_or(0);
+        if amount > 1_000_000_000_000_000_000 {
             risk_flags.push("high_value".into());
             risk_score = risk_score.saturating_add(50);
         }

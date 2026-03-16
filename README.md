@@ -12,7 +12,7 @@
 
 **Threshold MPC Wallet SDK** — No single party ever holds a complete private key.
 
-EVM (22 chains) | Bitcoin | Solana | Sui | Aptos | Litecoin | Dogecoin | Zcash | Monero | 32 chains total
+EVM (26) | Bitcoin | Polkadot | Solana | Sui | Aptos | TON | TRON | Cosmos | Starknet | 50 chains
 
 [![CI](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml)
 
@@ -84,7 +84,7 @@ cargo test --workspace     # 272 tests, ~4 seconds
 |----------|-----------|
 | **MPC Protocols** | GG20 ECDSA, FROST Ed25519, FROST Secp256k1-Taproot |
 | **Key Lifecycle** | Keygen, refresh, reshare (change threshold/add parties), freeze |
-| **32 Chains** | EVM L1/L2s, Bitcoin (Taproot), Solana, Sui, Aptos, Movement, LTC, DOGE, ZEC, XMR |
+| **50 Chains** | EVM L1/L2s, Bitcoin, Solana, Sui, Aptos, Movement, TON, TRON, LTC, DOGE, ZEC, XMR |
 | **RPC Registry** | Multi-provider (Dwellir, Alchemy, Infura, Blockstream, Mempool), failover, health tracking |
 | **Broadcast** | `eth_sendRawTransaction`, REST `/tx`, `sendTransaction`, `sui_executeTransactionBlock` |
 | **Transport** | NATS mTLS + per-session ECDH + SignedEnvelope replay protection |
@@ -96,7 +96,7 @@ cargo test --workspace     # 272 tests, ~4 seconds
 
 ## Supported Blockchains (32)
 
-### EVM Chains (22)
+### EVM Chains (26)
 
 | Chain | Chain ID | Type | Dwellir | Alchemy | Infura |
 |-------|----------|------|:-------:|:-------:|:------:|
@@ -122,6 +122,10 @@ cargo test --workspace     # 272 tests, ~4 seconds
 | opBNB | `204` | L2 (BNB) | :white_check_mark: | | |
 | Immutable | `13371` | L2 (zkEVM) | :white_check_mark: | | |
 | Manta Pacific | `169` | L2 (Privacy) | :white_check_mark: | | |
+| Hyperliquid | `999` | L1 (Perps DEX) | :white_check_mark: | | |
+| Berachain | `80094` | L1 (PoL) | :white_check_mark: | | |
+| MegaETH | `6342` | L2 (Real-time) | :white_check_mark: | | |
+| Monad | `143` | L1 (Parallel EVM) | :white_check_mark: | | |
 
 > All EVM chains use **GG20 ECDSA (secp256k1)** signing protocol and **EIP-1559** transaction format.
 
@@ -141,6 +145,44 @@ cargo test --workspace     # 272 tests, ~4 seconds
 |-------|---------------|---------|:-------:|
 | Aptos | `0x` + 64 hex (SHA3-256) | FROST Ed25519 | :white_check_mark: |
 | Movement | `0x` + 64 hex (SHA3-256) | FROST Ed25519 | :white_check_mark: |
+
+### Substrate / Polkadot (6)
+
+| Chain | Address (SS58) | Signing | Dwellir |
+|-------|---------------|---------|:-------:|
+| Polkadot | SS58 prefix 0 | FROST Ed25519 | :white_check_mark: |
+| Kusama | SS58 prefix 2 | FROST Ed25519 | :white_check_mark: |
+| Astar | SS58 prefix 5 | FROST Ed25519 | :white_check_mark: |
+| Acala | SS58 prefix 10 | FROST Ed25519 | :white_check_mark: |
+| Phala | SS58 prefix 30 | FROST Ed25519 | :white_check_mark: |
+| Interlay | SS58 prefix 2032 | FROST Ed25519 | :white_check_mark: |
+
+> Ed25519 signing via FROST. Sr25519 threshold MPC planned as future protocol.
+
+### Cosmos / IBC (5)
+
+| Chain | Address (bech32) | Signing | Dwellir |
+|-------|-----------------|---------|:-------:|
+| Cosmos Hub | `cosmos1...` | GG20 ECDSA (secp256k1) | :white_check_mark: |
+| Osmosis | `osmo1...` | GG20 ECDSA (secp256k1) | :white_check_mark: |
+| Celestia | `celestia1...` | GG20 ECDSA / Ed25519 | :white_check_mark: |
+| Injective | `inj1...` | GG20 ECDSA (secp256k1) | :white_check_mark: |
+| Sei | `sei1...` | GG20 ECDSA (secp256k1) | :white_check_mark: |
+
+### Alt L1s (2)
+
+| Chain | Address Format | Signing | Dwellir |
+|-------|---------------|---------|:-------:|
+| TON | `0:` + 64 hex (SHA-256) | FROST Ed25519 | :white_check_mark: |
+| TRON | Base58Check (`T...`, 0x41 prefix) | GG20 ECDSA (secp256k1) | :white_check_mark: |
+
+### Specialized (1)
+
+| Chain | Address Format | Signing | Dwellir |
+|-------|---------------|---------|:-------:|
+| Starknet | `0x` + 64 hex (251-bit field) | STARK curve (planned) | :white_check_mark: |
+
+> STARK curve threshold MPC signing is planned. Currently uses ECDSA-compatible placeholder.
 
 ### Other Chains (3)
 
@@ -185,7 +227,7 @@ docs/                  ← Architecture, security, CLI guide, sprint history
 ## Metrics
 
 ```
-  Chains:    32          Tests:    272 pass
+  Chains:    50          Tests:    272 pass
   LOC:       17,000+     CI:       fmt + clippy + test + audit
   Sprints:   17          Findings: 0 CRITICAL | 0 HIGH open
 ```

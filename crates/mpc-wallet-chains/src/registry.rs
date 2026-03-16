@@ -9,12 +9,17 @@ use mpc_wallet_core::error::CoreError;
 
 use crate::aptos::AptosProvider;
 use crate::bitcoin::BitcoinProvider;
+use crate::cosmos::CosmosProvider;
 use crate::evm::EvmProvider;
 use crate::monero::MoneroProvider;
 use crate::provider::{Chain, ChainProvider, SignedTransaction};
 use crate::rpc::RpcRegistry;
 use crate::solana::SolanaProvider;
+use crate::starknet::StarknetProvider;
+use crate::substrate::SubstrateProvider;
 use crate::sui::SuiProvider;
+use crate::ton::TonProvider;
+use crate::tron::TronProvider;
 use crate::utxo::UtxoProvider;
 
 /// Network environment.
@@ -100,7 +105,11 @@ impl ChainRegistry {
             | Chain::Ronin
             | Chain::OpBnb
             | Chain::Immutable
-            | Chain::MantaPacific => Box::new(EvmProvider::new(chain)?),
+            | Chain::MantaPacific
+            | Chain::Hyperliquid
+            | Chain::Berachain
+            | Chain::MegaEth
+            | Chain::Monad => Box::new(EvmProvider::new(chain)?),
             Chain::BitcoinMainnet => {
                 let p = match self.env {
                     NetworkEnv::Testnet | NetworkEnv::Devnet => BitcoinProvider::testnet(),
@@ -114,7 +123,21 @@ impl ChainRegistry {
             Chain::Litecoin => Box::new(UtxoProvider::litecoin()),
             Chain::Dogecoin => Box::new(UtxoProvider::dogecoin()),
             Chain::Zcash => Box::new(UtxoProvider::zcash()),
+            Chain::Polkadot => Box::new(SubstrateProvider::polkadot()),
+            Chain::Kusama => Box::new(SubstrateProvider::kusama()),
+            Chain::Astar => Box::new(SubstrateProvider::astar()),
+            Chain::Acala => Box::new(SubstrateProvider::acala()),
+            Chain::Phala => Box::new(SubstrateProvider::phala()),
+            Chain::Interlay => Box::new(SubstrateProvider::interlay()),
             Chain::Monero => Box::new(MoneroProvider::new()),
+            Chain::Ton => Box::new(TonProvider::new()),
+            Chain::Tron => Box::new(TronProvider::new()),
+            Chain::CosmosHub => Box::new(CosmosProvider::cosmos_hub()),
+            Chain::Osmosis => Box::new(CosmosProvider::osmosis()),
+            Chain::Celestia => Box::new(CosmosProvider::celestia()),
+            Chain::Injective => Box::new(CosmosProvider::injective()),
+            Chain::Sei => Box::new(CosmosProvider::sei()),
+            Chain::Starknet => Box::new(StarknetProvider::new()),
             Chain::Solana => Box::new(SolanaProvider::new()),
             Chain::Sui => Box::new(SuiProvider::new()),
         };
@@ -151,6 +174,11 @@ impl ChainRegistry {
             Chain::OpBnb,
             Chain::Immutable,
             Chain::MantaPacific,
+            // EVM — Phase 5 (Emerging)
+            Chain::Hyperliquid,
+            Chain::Berachain,
+            Chain::MegaEth,
+            Chain::Monad,
             // Move chains
             Chain::Aptos,
             Chain::Movement,
@@ -162,6 +190,24 @@ impl ChainRegistry {
             Chain::Zcash,
             // CryptoNote
             Chain::Monero,
+            // Alt L1s
+            Chain::Ton,
+            Chain::Tron,
+            // Substrate / Polkadot
+            Chain::Polkadot,
+            Chain::Kusama,
+            Chain::Astar,
+            Chain::Acala,
+            Chain::Phala,
+            Chain::Interlay,
+            // Cosmos / IBC
+            Chain::CosmosHub,
+            Chain::Osmosis,
+            Chain::Celestia,
+            Chain::Injective,
+            Chain::Sei,
+            // Specialized
+            Chain::Starknet,
             // Other
             Chain::Solana,
             Chain::Sui,
@@ -225,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_supported_chains_count() {
-        assert_eq!(ChainRegistry::supported_chains().len(), 32);
+        assert_eq!(ChainRegistry::supported_chains().len(), 50);
     }
 
     #[test]
