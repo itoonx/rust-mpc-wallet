@@ -84,12 +84,12 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 7 complete)
+## Current State (as of Sprint 8 complete)
 
 ### Tests on `main`
 ```
-157 tests pass  (cargo test --workspace)  1 ignored (NATS live-server test)
-cargo check     clean
+183 tests pass  (cargo test --workspace)  1 ignored (NATS live-server test)
+cargo check     clean (0 warnings)
 .github/workflows/ci.yml  ← CI pipeline active
 ```
 
@@ -101,7 +101,15 @@ cargo check     clean
 - **Sprint 5:** COMPLETE — all 5 tasks merged (T-S5-00 through T-S5-04)
 - **Sprint 6:** COMPLETE — all 5 tasks merged (T-S6-00 through T-S6-04)
 - **Sprint 7:** COMPLETE — all 5 tasks merged (T-S7-00 through T-S7-04)
-- **Sprint 8:** PENDING — OIDC JWT validation (Epic A1), ABAC attributes (Epic A3), MFA step-up (Epic A4), key refresh/reshare (Epic H)
+- **Sprint 8:** COMPLETE — all 5 tasks merged (T-S8-00 through T-S8-04)
+- **Sprint 9:** PENDING — Key refresh protocol (Epic H1), ABAC attributes (Epic A3), MFA step-up (Epic A4), JetStream (Epic E5)
+
+### New in Sprint 8
+- `mpc_wallet_core::transport::session_key` — Epic E3: per-session X25519 ECDH + ChaCha20-Poly1305 encryption, HKDF key derivation, nonce counter
+- `mpc_wallet_core::identity` — Epic A1 (FR-A.1): JWT token validation (RS256/ES256/HS256), claims extraction, `AuthContext` population from JWT
+- `mpc_wallet_core::policy` — Epic B3: daily velocity limit enforcement in `PolicyStore::check()`, rolling 24h window counter, `record_transaction()` + `prune_velocity()`
+- `mpc_wallet_core::protocol::MpcProtocol` — Epic H1 prep: `refresh()` default stub on trait (returns not-implemented)
+- `mpc_wallet_chains::provider::ChainProvider` — Epic G1 prep: `simulate_transaction()` default stub + `SimulationResult` type
 
 ### New in Sprint 7
 - `mpc_wallet_core::transport::nats` — Epic E2: mTLS support via `NatsTlsConfig` + `connect_signed_tls()`, PEM cert loading, client key zeroization (SEC-004 pattern)

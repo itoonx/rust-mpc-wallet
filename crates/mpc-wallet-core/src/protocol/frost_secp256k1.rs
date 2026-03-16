@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use frost_secp256k1_tr as frost;
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroizing, ZeroizeOnDrop};
+use zeroize::ZeroizeOnDrop;
 
 use crate::error::CoreError;
 use crate::protocol::{GroupPublicKey, KeyShare, MpcProtocol, MpcSignature};

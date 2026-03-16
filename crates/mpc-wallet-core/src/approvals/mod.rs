@@ -26,7 +26,7 @@
 //!
 //! **Not in Sprint 5:** hold periods (FR-C.3), break-glass (FR-C.4), RBAC integration.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::RwLock;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};

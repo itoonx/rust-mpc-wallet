@@ -67,7 +67,7 @@ use k256::{
     ProjectivePoint, Scalar,
 };
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroizing, ZeroizeOnDrop};
+use zeroize::ZeroizeOnDrop;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared key-share data structure
