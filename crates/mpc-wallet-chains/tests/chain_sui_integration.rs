@@ -193,7 +193,7 @@ async fn test_sui_rejects_wrong_signature_type_in_finalize() {
 }
 
 // ============================================================================
-// SuiProvider::new() / Default + broadcast_stub tests (R3d improvements)
+// SuiProvider::new() / Default + broadcast tests (R3d improvements)
 // ============================================================================
 
 /// Test 5: SuiProvider::new() / Default does not panic and derive_address works.
@@ -208,21 +208,20 @@ fn test_sui_provider_default_works() {
     assert_eq!(addr.len(), 66, "Sui address must be 66 chars (0x + 64 hex)");
 }
 
-/// Test 6: broadcast_stub must return Err (not yet implemented).
+/// Test 6: broadcast with invalid RPC URL returns error (no real RPC call).
 #[tokio::test]
-async fn test_sui_broadcast_stub_returns_not_implemented() {
+async fn test_sui_broadcast_invalid_url_returns_error() {
     use mpc_wallet_chains::provider::SignedTransaction;
     let provider = mpc_wallet_chains::sui::SuiProvider::new();
     let fake_signed = SignedTransaction {
         chain: Chain::Sui,
-        raw_tx: vec![0u8; 97],
+        raw_tx: vec![0u8; 128],
         tx_hash: "0xdeadbeef".to_string(),
     };
-    let result = provider.broadcast_stub(&fake_signed).await;
-    assert!(
-        result.is_err(),
-        "broadcast_stub must return Err until implemented"
-    );
+    let result = provider
+        .broadcast(&fake_signed, "http://invalid.localhost:1")
+        .await;
+    assert!(result.is_err(), "broadcast to invalid URL must return Err");
 }
 
 // ============================================================================

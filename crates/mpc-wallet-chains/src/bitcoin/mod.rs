@@ -95,6 +95,35 @@ impl ChainProvider for BitcoinProvider {
         tx::finalize_taproot_transaction(unsigned, sig)
     }
 
+    async fn broadcast(
+        &self,
+        signed: &SignedTransaction,
+        rpc_url: &str,
+    ) -> Result<String, CoreError> {
+        let raw_hex = hex::encode(&signed.raw_tx);
+        let url = format!("{rpc_url}/tx");
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(&url)
+            .header("Content-Type", "text/plain")
+            .body(raw_hex)
+            .send()
+            .await
+            .map_err(|e| CoreError::Other(format!("broadcast request failed: {e}")))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| CoreError::Other(format!("broadcast response read failed: {e}")))?;
+        if !status.is_success() {
+            return Err(CoreError::Other(format!(
+                "broadcast failed ({status}): {body}"
+            )));
+        }
+        // Blockstream/Mempool return the txid as plain text
+        Ok(body.trim().to_string())
+    }
+
     async fn simulate_transaction(
         &self,
         params: &TransactionParams,

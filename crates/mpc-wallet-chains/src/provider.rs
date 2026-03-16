@@ -5,11 +5,36 @@ use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::{GroupPublicKey, MpcSignature};
 
 /// Supported blockchain networks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Chain {
+    // EVM L1s
     Ethereum,
     Polygon,
     Bsc,
+    // EVM L2s — P0
+    Arbitrum,
+    Optimism,
+    Base,
+    // EVM L2s — P1
+    Avalanche,
+    Linea,
+    ZkSync,
+    Scroll,
+    // EVM L2s — P2
+    Mantle,
+    Blast,
+    Zora,
+    Fantom,
+    Gnosis,
+    // EVM L2s — P3
+    Cronos,
+    Celo,
+    Moonbeam,
+    Ronin,
+    OpBnb,
+    Immutable,
+    MantaPacific,
+    // Non-EVM
     BitcoinMainnet,
     BitcoinTestnet,
     Solana,
@@ -22,6 +47,25 @@ impl std::fmt::Display for Chain {
             Chain::Ethereum => write!(f, "ethereum"),
             Chain::Polygon => write!(f, "polygon"),
             Chain::Bsc => write!(f, "bsc"),
+            Chain::Arbitrum => write!(f, "arbitrum"),
+            Chain::Optimism => write!(f, "optimism"),
+            Chain::Base => write!(f, "base"),
+            Chain::Avalanche => write!(f, "avalanche"),
+            Chain::Linea => write!(f, "linea"),
+            Chain::ZkSync => write!(f, "zksync"),
+            Chain::Scroll => write!(f, "scroll"),
+            Chain::Mantle => write!(f, "mantle"),
+            Chain::Blast => write!(f, "blast"),
+            Chain::Zora => write!(f, "zora"),
+            Chain::Fantom => write!(f, "fantom"),
+            Chain::Gnosis => write!(f, "gnosis"),
+            Chain::Cronos => write!(f, "cronos"),
+            Chain::Celo => write!(f, "celo"),
+            Chain::Moonbeam => write!(f, "moonbeam"),
+            Chain::Ronin => write!(f, "ronin"),
+            Chain::OpBnb => write!(f, "opbnb"),
+            Chain::Immutable => write!(f, "immutable"),
+            Chain::MantaPacific => write!(f, "manta-pacific"),
             Chain::BitcoinMainnet => write!(f, "bitcoin-mainnet"),
             Chain::BitcoinTestnet => write!(f, "bitcoin-testnet"),
             Chain::Solana => write!(f, "solana"),
@@ -36,8 +80,27 @@ impl std::str::FromStr for Chain {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "ethereum" | "eth" => Ok(Chain::Ethereum),
-            "polygon" => Ok(Chain::Polygon),
-            "bsc" => Ok(Chain::Bsc),
+            "polygon" | "matic" => Ok(Chain::Polygon),
+            "bsc" | "bnb" => Ok(Chain::Bsc),
+            "arbitrum" | "arb" => Ok(Chain::Arbitrum),
+            "optimism" | "op" => Ok(Chain::Optimism),
+            "base" => Ok(Chain::Base),
+            "avalanche" | "avax" => Ok(Chain::Avalanche),
+            "linea" => Ok(Chain::Linea),
+            "zksync" | "zksync-era" => Ok(Chain::ZkSync),
+            "scroll" => Ok(Chain::Scroll),
+            "mantle" => Ok(Chain::Mantle),
+            "blast" => Ok(Chain::Blast),
+            "zora" => Ok(Chain::Zora),
+            "fantom" | "ftm" => Ok(Chain::Fantom),
+            "gnosis" | "xdai" => Ok(Chain::Gnosis),
+            "cronos" | "cro" => Ok(Chain::Cronos),
+            "celo" => Ok(Chain::Celo),
+            "moonbeam" | "glmr" => Ok(Chain::Moonbeam),
+            "ronin" | "ron" => Ok(Chain::Ronin),
+            "opbnb" => Ok(Chain::OpBnb),
+            "immutable" | "imx" => Ok(Chain::Immutable),
+            "manta-pacific" | "manta" => Ok(Chain::MantaPacific),
             "bitcoin" | "bitcoin-mainnet" | "btc" => Ok(Chain::BitcoinMainnet),
             "bitcoin-testnet" => Ok(Chain::BitcoinTestnet),
             "solana" | "sol" => Ok(Chain::Solana),
@@ -124,6 +187,19 @@ pub trait ChainProvider: Send + Sync {
     ) -> Result<SimulationResult, CoreError> {
         Err(CoreError::Other(
             "simulate_transaction not implemented for this chain".into(),
+        ))
+    }
+
+    /// Broadcast a signed transaction to the network via the given RPC endpoint.
+    /// Returns the on-chain transaction hash/ID on success.
+    /// Default implementation returns an error; chain providers should override.
+    async fn broadcast(
+        &self,
+        _signed: &SignedTransaction,
+        _rpc_url: &str,
+    ) -> Result<String, CoreError> {
+        Err(CoreError::Other(
+            "broadcast not implemented for this chain".into(),
         ))
     }
 }

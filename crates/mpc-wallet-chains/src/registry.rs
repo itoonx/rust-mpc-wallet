@@ -9,7 +9,8 @@ use mpc_wallet_core::error::CoreError;
 
 use crate::bitcoin::BitcoinProvider;
 use crate::evm::EvmProvider;
-use crate::provider::{Chain, ChainProvider};
+use crate::provider::{Chain, ChainProvider, SignedTransaction};
+use crate::rpc::RpcRegistry;
 use crate::solana::SolanaProvider;
 use crate::sui::SuiProvider;
 
@@ -34,6 +35,7 @@ pub enum NetworkEnv {
 /// ```
 pub struct ChainRegistry {
     env: NetworkEnv,
+    rpc: Option<RpcRegistry>,
 }
 
 impl ChainRegistry {
@@ -41,6 +43,7 @@ impl ChainRegistry {
     pub fn default_mainnet() -> Self {
         Self {
             env: NetworkEnv::Mainnet,
+            rpc: None,
         }
     }
 
@@ -48,7 +51,19 @@ impl ChainRegistry {
     pub fn default_testnet() -> Self {
         Self {
             env: NetworkEnv::Testnet,
+            rpc: None,
         }
+    }
+
+    /// Attach an RPC registry for endpoint resolution.
+    pub fn with_rpc(mut self, rpc: RpcRegistry) -> Self {
+        self.rpc = Some(rpc);
+        self
+    }
+
+    /// Get a reference to the attached RPC registry, if any.
+    pub fn rpc(&self) -> Option<&RpcRegistry> {
+        self.rpc.as_ref()
     }
 
     /// Get the network environment.
@@ -61,7 +76,28 @@ impl ChainRegistry {
     /// This is the single entry point — no more per-chain match blocks.
     pub fn provider(&self, chain: Chain) -> Result<Box<dyn ChainProvider>, CoreError> {
         let provider: Box<dyn ChainProvider> = match chain {
-            Chain::Ethereum | Chain::Polygon | Chain::Bsc => Box::new(EvmProvider::new(chain)?),
+            Chain::Ethereum
+            | Chain::Polygon
+            | Chain::Bsc
+            | Chain::Arbitrum
+            | Chain::Optimism
+            | Chain::Base
+            | Chain::Avalanche
+            | Chain::Linea
+            | Chain::ZkSync
+            | Chain::Scroll
+            | Chain::Mantle
+            | Chain::Blast
+            | Chain::Zora
+            | Chain::Fantom
+            | Chain::Gnosis
+            | Chain::Cronos
+            | Chain::Celo
+            | Chain::Moonbeam
+            | Chain::Ronin
+            | Chain::OpBnb
+            | Chain::Immutable
+            | Chain::MantaPacific => Box::new(EvmProvider::new(chain)?),
             Chain::BitcoinMainnet => {
                 let p = match self.env {
                     NetworkEnv::Testnet | NetworkEnv::Devnet => BitcoinProvider::testnet(),
@@ -79,14 +115,58 @@ impl ChainRegistry {
     /// List all supported chains.
     pub fn supported_chains() -> Vec<Chain> {
         vec![
+            // EVM L1s
             Chain::Ethereum,
             Chain::Polygon,
             Chain::Bsc,
+            // EVM L2s — P0
+            Chain::Arbitrum,
+            Chain::Optimism,
+            Chain::Base,
+            // EVM L2s — P1
+            Chain::Avalanche,
+            Chain::Linea,
+            Chain::ZkSync,
+            Chain::Scroll,
+            // EVM L2s — P2
+            Chain::Mantle,
+            Chain::Blast,
+            Chain::Zora,
+            Chain::Fantom,
+            Chain::Gnosis,
+            // EVM L2s — P3
+            Chain::Cronos,
+            Chain::Celo,
+            Chain::Moonbeam,
+            Chain::Ronin,
+            Chain::OpBnb,
+            Chain::Immutable,
+            Chain::MantaPacific,
+            // Non-EVM
             Chain::BitcoinMainnet,
             Chain::BitcoinTestnet,
             Chain::Solana,
             Chain::Sui,
         ]
+    }
+
+    /// Broadcast a signed transaction, resolving the RPC endpoint automatically.
+    ///
+    /// Uses `rest_endpoint()` for Bitcoin chains, `endpoint()` for JSON-RPC chains.
+    /// Requires an `RpcRegistry` to be attached via `with_rpc()`.
+    pub async fn broadcast(&self, signed: &SignedTransaction) -> Result<String, CoreError> {
+        let rpc = self
+            .rpc
+            .as_ref()
+            .ok_or_else(|| CoreError::Other("no RPC registry attached".into()))?;
+
+        let url = match signed.chain {
+            Chain::BitcoinMainnet | Chain::BitcoinTestnet => rpc.rest_endpoint(signed.chain)?,
+            _ => rpc.endpoint(signed.chain)?,
+        };
+
+        let provider = self.provider(signed.chain)?;
+        provider.broadcast(signed, &url).await
     }
 }
 
@@ -127,7 +207,7 @@ mod tests {
 
     #[test]
     fn test_supported_chains_count() {
-        assert_eq!(ChainRegistry::supported_chains().len(), 7);
+        assert_eq!(ChainRegistry::supported_chains().len(), 26);
     }
 
     #[test]
