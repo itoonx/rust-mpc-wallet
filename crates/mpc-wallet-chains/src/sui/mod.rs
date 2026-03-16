@@ -10,8 +10,27 @@ use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::{GroupPublicKey, MpcSignature};
 
 use crate::provider::{
-    Chain, ChainProvider, SignedTransaction, TransactionParams, UnsignedTransaction,
+    Chain, ChainProvider, SignedTransaction, SimulationResult, TransactionParams,
+    UnsignedTransaction,
 };
+
+/// Configuration for Sui transaction simulation / risk analysis.
+#[derive(Debug, Clone)]
+pub struct SuiSimulationConfig {
+    /// Maximum MIST (1 SUI = 10^9 MIST) per transaction before flagging as high-value.
+    pub max_mist_per_tx: u64,
+    /// Maximum gas budget before flagging as excessive.
+    pub max_gas_budget: u64,
+}
+
+impl Default for SuiSimulationConfig {
+    fn default() -> Self {
+        Self {
+            max_mist_per_tx: 1_000_000_000_000,
+            max_gas_budget: 50_000_000,
+        }
+    }
+}
 
 /// Sui chain provider.
 ///
@@ -25,12 +44,16 @@ use crate::provider::{
 /// derivation is needed.
 pub struct SuiProvider {
     group_pubkey: Option<GroupPublicKey>,
+    simulation_config: Option<SuiSimulationConfig>,
 }
 
 impl SuiProvider {
     /// Create a provider without a pre-loaded public key (address derivation only).
     pub fn new() -> Self {
-        Self { group_pubkey: None }
+        Self {
+            group_pubkey: None,
+            simulation_config: None,
+        }
     }
 
     /// Create a provider pre-loaded with the group's Ed25519 public key.
@@ -39,7 +62,14 @@ impl SuiProvider {
     pub fn with_pubkey(group_pubkey: GroupPublicKey) -> Self {
         Self {
             group_pubkey: Some(group_pubkey),
+            simulation_config: None,
         }
+    }
+
+    /// Attach a simulation configuration for risk analysis.
+    pub fn with_simulation(mut self, config: SuiSimulationConfig) -> Self {
+        self.simulation_config = Some(config);
+        self
     }
 }
 
@@ -137,5 +167,51 @@ impl ChainProvider for SuiProvider {
         sig: &MpcSignature,
     ) -> Result<SignedTransaction, CoreError> {
         tx::finalize_sui_transaction(unsigned, sig)
+    }
+
+    async fn simulate_transaction(
+        &self,
+        params: &TransactionParams,
+    ) -> Result<SimulationResult, CoreError> {
+        let config = match &self.simulation_config {
+            Some(c) => c,
+            None => {
+                return Ok(SimulationResult {
+                    success: true,
+                    gas_used: 0,
+                    return_data: vec![],
+                    risk_flags: vec![],
+                    risk_score: 0,
+                });
+            }
+        };
+
+        let mut risk_flags = Vec::new();
+        let mut risk_score: u16 = 0;
+
+        // Check value against max_mist_per_tx
+        let mist: u64 = params.value.parse().unwrap_or(0);
+        if mist > config.max_mist_per_tx {
+            risk_flags.push("high_value".to_string());
+            risk_score += 50;
+        }
+
+        // Check gas_budget from extra against max_gas_budget
+        if let Some(extra) = &params.extra {
+            if let Some(gas_budget) = extra.get("gas_budget").and_then(|v| v.as_u64()) {
+                if gas_budget > config.max_gas_budget {
+                    risk_flags.push("excessive_gas_budget".to_string());
+                    risk_score += 30;
+                }
+            }
+        }
+
+        Ok(SimulationResult {
+            success: true,
+            gas_used: 0,
+            return_data: vec![],
+            risk_flags,
+            risk_score: risk_score.min(255) as u8,
+        })
     }
 }

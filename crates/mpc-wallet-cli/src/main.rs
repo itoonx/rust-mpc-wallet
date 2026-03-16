@@ -33,13 +33,14 @@ enum Commands {
     ListKeys(commands::keys::ListKeysArgs),
     /// Verify an audit evidence pack file
     AuditVerify(commands::audit_verify::AuditVerifyArgs),
+    /// Simulate a transaction and assess risk
+    Simulate(commands::simulate::SimulateArgs),
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Initialize logging
     let filter = if cli.verbose { "debug" } else { "info" };
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -54,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::ExportAddress(args) => commands::address::run(args, cli.format).await?,
         Commands::ListKeys(args) => commands::keys::run(args, cli.format).await?,
         Commands::AuditVerify(args) => commands::audit_verify::run(args, cli.format).await?,
+        Commands::Simulate(args) => commands::simulate::run(args, cli.format).await?,
     }
 
     Ok(())
