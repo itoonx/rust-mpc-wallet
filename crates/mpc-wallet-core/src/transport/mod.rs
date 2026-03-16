@@ -2,6 +2,12 @@
 pub mod local;
 /// NATS-based transport for multi-process and multi-machine MPC deployments.
 pub mod nats;
+/// SEC-007 fix: Ed25519-signed message envelope with seq_no replay protection.
+///
+/// Use [`signed_envelope::SignedEnvelope::sign`] before sending and
+/// [`signed_envelope::SignedEnvelope::verify`] on receipt to authenticate senders
+/// and prevent replay attacks.
+pub mod signed_envelope;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
