@@ -61,12 +61,10 @@ pub fn evaluate(policy: &Policy, chain: &str, to_address: &str, amount: u64) -> 
         }
     }
 
-    // ── Daily velocity limit (Sprint 4: in-memory only) ───────────────────────
-    // The velocity counter is not tracked in the evaluator itself; the PolicyStore
-    // is responsible for maintaining and checking velocity state (future Sprint 5).
-    // For Sprint 4, daily_velocity_limit is stored in the schema but not enforced here.
-    // A TODO marker is left for the Sprint 5 implementation.
-    // TODO(Sprint 5): enforce daily_velocity_limit via a persistent rolling window counter.
+    // ── Daily velocity limit ────────────────────────────────────────────────────
+    // Velocity enforcement is handled by `PolicyStore::check()` which maintains
+    // a rolling 24-hour window of signed amounts per chain. The pure evaluator
+    // does not track state; it only checks stateless per-transaction rules.
 
     EvalResult::Allow
 }
