@@ -41,3 +41,8 @@ pub mod session;
 /// Use [`approvals::ApprovalStore`] to register sessions, assign roles,
 /// collect Ed25519-signed approvals, and check quorum before signing (FR-C).
 pub mod approvals;
+/// Append-only hash-chained audit ledger with Ed25519 service signatures (FR-F).
+///
+/// Use [`audit::AuditLedger`] to record every signing event. Call
+/// [`audit::AuditLedger::verify`] to check tamper-evident chain integrity.
+pub mod audit;
