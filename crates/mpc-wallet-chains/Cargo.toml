@@ -11,6 +11,7 @@ mpc-wallet-core = { workspace = true }
 # Crypto
 k256 = { workspace = true }
 ed25519-dalek = { workspace = true }
+ripemd = { workspace = true }
 sha3 = { workspace = true }
 sha2 = { workspace = true }
 blake2 = { workspace = true }
