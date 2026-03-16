@@ -26,3 +26,8 @@ pub mod protocol;
 pub mod transport;
 /// Shared primitive types: [`types::PartyId`], [`types::ThresholdConfig`], [`types::CryptoScheme`].
 pub mod types;
+/// Policy engine: signing policy schema, evaluator, and the "no policy → no sign" gate.
+///
+/// Use [`policy::PolicyStore`] to load a [`policy::Policy`] and call
+/// [`policy::PolicyStore::check`] before creating any signing session (FR-B5).
+pub mod policy;
