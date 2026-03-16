@@ -12,7 +12,7 @@
 
 **Threshold MPC Wallet SDK** — No single party ever holds a complete private key.
 
-EVM | Bitcoin | Solana | Sui
+EVM (22 chains) | Bitcoin | Solana | Sui | Aptos | Litecoin | Dogecoin | Zcash | Monero | 32 chains total
 
 [![CI](https://github.com/itoonx/rust-mpc-wallet/actions/workflows/ci.yml/badge.svg)](https://github.com/itoonx/rust-mpc-wallet/actions/workflows/ci.yml)
 
@@ -45,7 +45,7 @@ Vaultex is a **Rust workspace** for building enterprise-grade **threshold multi-
 **Why Vaultex?**
 
 - **Zero single point of failure** — compromise 1 server, attacker gets nothing
-- **Multi-chain** — EVM (ETH/Polygon/BSC), Bitcoin (Taproot), Solana, Sui
+- **Multi-chain** — 32 blockchains: EVM L1s & L2s, Bitcoin, Solana, Sui, Aptos, Litecoin, Dogecoin, Zcash, Monero
 - **Enterprise controls** — RBAC, policy engine, approval workflows, audit trail
 - **Proactive security** — key refresh rotates shares without changing addresses
 
@@ -57,7 +57,7 @@ Vaultex is a **Rust workspace** for building enterprise-grade **threshold multi-
 git clone https://github.com/itoonx/rust-mpc-wallet.git
 cd rust-mpc-wallet
 
-cargo test --workspace     # 233 tests, ~4 seconds
+cargo test --workspace     # 272 tests, ~4 seconds
 ./scripts/demo.sh          # interactive end-to-end demo
 ```
 
@@ -69,11 +69,33 @@ cargo test --workspace     # 233 tests, ~4 seconds
 |----------|-----------|
 | **MPC Protocols** | GG20 ECDSA, FROST Ed25519, FROST Secp256k1-Taproot |
 | **Key Lifecycle** | Keygen, refresh, reshare (change threshold/add parties), freeze |
-| **4 Chains** | EVM (EIP-1559), Bitcoin (Taproot), Solana (v0+ALT), Sui (BCS) |
+| **32 Chains** | EVM L1/L2s, Bitcoin (Taproot), Solana, Sui, Aptos, Movement, LTC, DOGE, ZEC, XMR |
+| **RPC Registry** | Multi-provider (Dwellir, Alchemy, Infura, Blockstream, Mempool), failover, health tracking |
+| **Broadcast** | `eth_sendRawTransaction`, REST `/tx`, `sendTransaction`, `sui_executeTransactionBlock` |
 | **Transport** | NATS mTLS + per-session ECDH + SignedEnvelope replay protection |
 | **Enterprise** | RBAC, ABAC, MFA, policy engine, approval workflows, audit ledger |
 | **Simulation** | Pre-sign risk scoring for all chains |
 | **Operations** | Multi-cloud constraints, RPC failover, chaos framework, DR |
+
+---
+
+## Supported Blockchains (32)
+
+| Category | Chains | Signing Protocol |
+|----------|--------|-----------------|
+| **EVM L1s** | Ethereum, Polygon, BSC | GG20 ECDSA (secp256k1) |
+| **EVM L2s (P0)** | Arbitrum, Optimism, Base | GG20 ECDSA |
+| **EVM L2s (P1)** | Avalanche, Linea, zkSync, Scroll | GG20 ECDSA |
+| **EVM L2s (P2)** | Mantle, Blast, Zora, Fantom, Gnosis | GG20 ECDSA |
+| **EVM L2s (P3)** | Cronos, Celo, Moonbeam, Ronin, OpBnb, Immutable, MantaPacific | GG20 ECDSA |
+| **Bitcoin** | Bitcoin (Mainnet/Testnet) | FROST Schnorr (Taproot P2TR) |
+| **UTXO** | Litecoin, Dogecoin, Zcash | GG20 ECDSA (secp256k1) |
+| **Move** | Aptos, Movement | FROST Ed25519 |
+| **Solana** | Solana | FROST Ed25519 |
+| **Sui** | Sui | FROST Ed25519 |
+| **CryptoNote** | Monero | FROST Ed25519 |
+
+**RPC Providers:** Dwellir (all chains), Alchemy (ETH/Polygon/Arbitrum/Optimism/Base), Infura (ETH/Polygon/Arbitrum/Optimism/Base/Avalanche/Linea), Blockstream (Bitcoin REST), Mempool.space (Bitcoin REST), Custom
 
 ---
 
@@ -111,7 +133,7 @@ Run benchmarks: `cargo bench -p mpc-wallet-core --bench mpc_benchmarks`
 ```
 crates/
   mpc-wallet-core/     ← MPC protocols, transport, key store, policy, identity
-  mpc-wallet-chains/   ← Chain adapters: EVM, Bitcoin, Solana, Sui
+  mpc-wallet-chains/   ← Chain adapters: EVM (22), Bitcoin, Solana, Sui, Aptos, UTXO, Monero
   mpc-wallet-cli/      ← CLI binary
 scripts/
   demo.sh              ← Interactive local demo (no external services)
@@ -123,9 +145,9 @@ docs/                  ← Architecture, security, CLI guide, sprint history
 ## Metrics
 
 ```
-  Tests:     233 pass    Epics:   10/10 (100%)
-  LOC:       13,800+     CI:      fmt + clippy + test + audit
-  Sprints:   14          Findings: 0 CRITICAL | 0 HIGH open
+  Chains:    32          Tests:    272 pass
+  LOC:       17,000+     CI:       fmt + clippy + test + audit
+  Sprints:   17          Findings: 0 CRITICAL | 0 HIGH open
 ```
 
 ---
