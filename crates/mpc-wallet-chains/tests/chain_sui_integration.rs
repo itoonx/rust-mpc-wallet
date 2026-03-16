@@ -319,6 +319,73 @@ async fn test_sui_bcs_tx_data_contains_bcs_plus_pubkey() {
     assert_eq!(pubkey_suffix, &[0xAAu8; 32], "last 32 bytes of tx_data must be the pubkey");
 }
 
+// ============================================================================
+// Sui simulation / risk analysis tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_sui_simulation_basic() {
+    let p = mpc_wallet_chains::sui::SuiProvider::new()
+        .with_simulation(mpc_wallet_chains::sui::SuiSimulationConfig::default());
+    let params = TransactionParams {
+        to: "0x0000000000000000000000000000000000000000000000000000000000000002".into(),
+        value: "1000".into(),
+        data: None,
+        chain_id: None,
+        extra: None,
+    };
+    let r = mpc_wallet_chains::provider::ChainProvider::simulate_transaction(&p, &params)
+        .await
+        .unwrap();
+    assert!(r.success);
+    assert_eq!(r.risk_score, 0);
+    assert!(r.risk_flags.is_empty());
+}
+
+#[tokio::test]
+async fn test_sui_simulation_high_value() {
+    let p = mpc_wallet_chains::sui::SuiProvider::new().with_simulation(
+        mpc_wallet_chains::sui::SuiSimulationConfig {
+            max_mist_per_tx: 500,
+            ..Default::default()
+        },
+    );
+    let params = TransactionParams {
+        to: "0x0000000000000000000000000000000000000000000000000000000000000002".into(),
+        value: "9999".into(),
+        data: None,
+        chain_id: None,
+        extra: None,
+    };
+    let r = mpc_wallet_chains::provider::ChainProvider::simulate_transaction(&p, &params)
+        .await
+        .unwrap();
+    assert!(r.risk_flags.contains(&"high_value".to_string()));
+    assert!(r.risk_score >= 50);
+}
+
+#[tokio::test]
+async fn test_sui_simulation_excessive_gas_budget() {
+    let p = mpc_wallet_chains::sui::SuiProvider::new().with_simulation(
+        mpc_wallet_chains::sui::SuiSimulationConfig {
+            max_gas_budget: 100,
+            ..Default::default()
+        },
+    );
+    let params = TransactionParams {
+        to: "0x0000000000000000000000000000000000000000000000000000000000000002".into(),
+        value: "10".into(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({"gas_budget": 999})),
+    };
+    let r = mpc_wallet_chains::provider::ChainProvider::simulate_transaction(&p, &params)
+        .await
+        .unwrap();
+    assert!(r.risk_flags.contains(&"excessive_gas_budget".to_string()));
+    assert!(r.risk_score >= 30);
+}
+
 /// finalize_sui_transaction must produce a 97-byte raw signature with correct layout.
 /// raw_tx = [0x00 | sig(64) | pubkey(32)] — no JSON wrapper (BCS migration).
 #[tokio::test]

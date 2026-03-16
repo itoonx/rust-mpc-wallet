@@ -79,6 +79,16 @@ pub struct SignedTransaction {
     pub tx_hash: String,
 }
 
+/// Result of a transaction simulation / risk analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulationResult {
+    pub success: bool,
+    pub gas_used: u64,
+    pub return_data: Vec<u8>,
+    pub risk_flags: Vec<String>,
+    pub risk_score: u8,
+}
+
 /// Trait for chain-specific transaction building and signing.
 #[async_trait]
 pub trait ChainProvider: Send + Sync {
@@ -100,4 +110,21 @@ pub trait ChainProvider: Send + Sync {
         unsigned: &UnsignedTransaction,
         sig: &MpcSignature,
     ) -> Result<SignedTransaction, CoreError>;
+
+    /// Simulate a transaction and return a risk assessment.
+    ///
+    /// The default implementation returns a neutral result (no risk flags, score 0).
+    /// Chain providers can override this to perform chain-specific analysis.
+    async fn simulate_transaction(
+        &self,
+        _params: &TransactionParams,
+    ) -> Result<SimulationResult, CoreError> {
+        Ok(SimulationResult {
+            success: true,
+            gas_used: 0,
+            return_data: vec![],
+            risk_flags: vec![],
+            risk_score: 0,
+        })
+    }
 }

@@ -31,6 +31,8 @@ enum Commands {
     ExportAddress(commands::address::ExportAddressArgs),
     /// List stored key groups
     ListKeys(commands::keys::ListKeysArgs),
+    /// Simulate a transaction and assess risk
+    Simulate(commands::simulate::SimulateArgs),
 }
 
 #[tokio::main]
@@ -51,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Sign(args) => commands::sign::run(args, cli.format).await?,
         Commands::ExportAddress(args) => commands::address::run(args, cli.format).await?,
         Commands::ListKeys(args) => commands::keys::run(args, cli.format).await?,
+        Commands::Simulate(args) => commands::simulate::run(args, cli.format).await?,
     }
 
     Ok(())

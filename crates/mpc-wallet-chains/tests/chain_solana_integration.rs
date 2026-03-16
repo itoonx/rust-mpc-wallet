@@ -293,3 +293,48 @@ async fn test_solana_same_from_to_address() {
         result
     );
 }
+
+// ============================================================================
+// Solana simulation / risk analysis tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_solana_simulation_basic() {
+    let p = mpc_wallet_chains::solana::SolanaProvider::new()
+        .with_simulation(mpc_wallet_chains::solana::SolanaSimulationConfig::default());
+    let params = mpc_wallet_chains::provider::TransactionParams {
+        to: "11111111111111111111111111111112".into(),
+        value: "1000".into(),
+        data: None,
+        chain_id: None,
+        extra: None,
+    };
+    let r = mpc_wallet_chains::provider::ChainProvider::simulate_transaction(&p, &params)
+        .await
+        .unwrap();
+    assert!(r.success);
+    assert_eq!(r.risk_score, 0);
+    assert!(r.risk_flags.is_empty());
+}
+
+#[tokio::test]
+async fn test_solana_simulation_high_value() {
+    let p = mpc_wallet_chains::solana::SolanaProvider::new().with_simulation(
+        mpc_wallet_chains::solana::SolanaSimulationConfig {
+            max_lamports_per_tx: 1000,
+            ..Default::default()
+        },
+    );
+    let params = mpc_wallet_chains::provider::TransactionParams {
+        to: "11111111111111111111111111111112".into(),
+        value: "9999".into(),
+        data: None,
+        chain_id: None,
+        extra: None,
+    };
+    let r = mpc_wallet_chains::provider::ChainProvider::simulate_transaction(&p, &params)
+        .await
+        .unwrap();
+    assert!(r.risk_flags.contains(&"high_value".to_string()));
+    assert!(r.risk_score >= 50);
+}
