@@ -84,11 +84,11 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 8 complete)
+## Current State (as of Sprint 11 complete)
 
 ### Tests on `main`
 ```
-183 tests pass  (cargo test --workspace)  1 ignored (NATS live-server test)
+200 tests pass  (cargo test --workspace)  1 ignored (NATS live-server test)
 cargo check     clean (0 warnings)
 .github/workflows/ci.yml  ← CI pipeline active
 ```
@@ -102,7 +102,29 @@ cargo check     clean (0 warnings)
 - **Sprint 6:** COMPLETE — all 5 tasks merged (T-S6-00 through T-S6-04)
 - **Sprint 7:** COMPLETE — all 5 tasks merged (T-S7-00 through T-S7-04)
 - **Sprint 8:** COMPLETE — all 5 tasks merged (T-S8-00 through T-S8-04)
-- **Sprint 9:** PENDING — Key refresh protocol (Epic H1), ABAC attributes (Epic A3), MFA step-up (Epic A4), JetStream (Epic E5)
+- **Sprint 9:** COMPLETE — all 4 tasks merged (T-S9-00 through T-S9-03)
+- **Sprint 10:** COMPLETE — all 4 tasks merged (T-S10-00 through T-S10-03)
+- **Sprint 11:** COMPLETE — all 5 tasks merged (T-S11-00 through T-S11-04)
+- **Sprint 12:** PENDING — JetStream (Epic E5), key resharing (Epic H2), disaster recovery (Epic H4), multi-cloud ops (Epic I)
+
+### New in Sprint 11
+- `mpc_wallet_core::policy::templates` — Epic B4: policy templates (Exchange/Treasury/Custodian presets) with `PolicyTemplate::apply()` convenience
+- `mpc_wallet_chains::solana::simulate` — Epic G3: Solana transaction simulation (program allowlist + value checks)
+- `mpc_wallet_chains::sui::simulate` — Epic G4: Sui transaction simulation (value + gas budget checks)
+- `mpc-wallet-cli` — Epic G5: `simulate` command for pre-sign transaction risk assessment
+- `mpc_wallet_chains::registry` — `ChainRegistry` unified provider factory (DEC-007)
+
+### New in Sprint 10
+- `mpc_wallet_core::protocol::frost_refresh` — Epic H1: FROST Ed25519 key refresh (DKG-based re-sharing preserves group pubkey)
+- `mpc_wallet_core::protocol::frost_secp_refresh` — Epic H1: FROST Secp256k1 key refresh (additive re-sharing for Taproot)
+- `mpc_wallet_core::policy::signed_bundle` — Epic B3: policy signed bundles (Ed25519 sign+verify for policy integrity)
+- `mpc_wallet_chains::bitcoin::simulate` — Epic G2: Bitcoin transaction simulation (fee/dust/RBF checks)
+
+### New in Sprint 9
+- `mpc_wallet_core::identity::abac` — Epic A3: ABAC attribute extensions (dept/cost_center/risk_tier extracted from JWT claims)
+- `mpc_wallet_core::identity::mfa` — Epic A4: MFA step-up enforcement (require_mfa flag + admin-gated operations)
+- `mpc_wallet_chains::evm::simulate` — Epic G1: EVM transaction simulation (risk scoring + proxy detection)
+- `mpc_wallet_core::protocol::gg20_refresh` — Epic H1: GG20 key refresh (additive re-sharing preserves group pubkey)
 
 ### New in Sprint 8
 - `mpc_wallet_core::transport::session_key` — Epic E3: per-session X25519 ECDH + ChaCha20-Poly1305 encryption, HKDF key derivation, nonce counter
@@ -182,6 +204,7 @@ Full findings log → `docs/SECURITY_FINDINGS.md`
 | DEC-004 | Sprint 2 GG20 hard commitment — DELIVERED |
 | DEC-005 | Sprint 7 RBAC: Epic A2 only (roles + guards); OIDC/ABAC/MFA deferred to Sprint 8 |
 | DEC-006 | Solana v0: manual serialization continues (DEC-002 extended); no solana-sdk dependency |
+| DEC-007 | ChainRegistry: unified provider factory pattern — single entry point for all chain providers |
 
 Full decision log → `docs/DECISIONS.md`
 
