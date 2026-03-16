@@ -3,6 +3,29 @@ use mpc_wallet_core::protocol::MpcSignature;
 
 use crate::provider::{Chain, SignedTransaction, TransactionParams, UnsignedTransaction};
 
+/// Solana transaction message version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolanaMessageVersion {
+    /// Legacy message format (no version prefix byte).
+    Legacy,
+    /// Version 0 message format with Address Lookup Table support.
+    V0,
+}
+
+/// An address lookup table reference for v0 versioned transactions.
+///
+/// Each ALT allows instructions to reference accounts by u8 index
+/// instead of including the full 32-byte public key, reducing tx size.
+#[derive(Debug, Clone)]
+pub struct AddressLookupTable {
+    /// The on-chain address of the lookup table account (32 bytes).
+    pub address: [u8; 32],
+    /// Indices of writable accounts in this lookup table.
+    pub writable_indices: Vec<u8>,
+    /// Indices of read-only accounts in this lookup table.
+    pub readonly_indices: Vec<u8>,
+}
+
 /// Encode a value as Solana compact-u16.
 /// For values < 128 this is a single byte.
 fn encode_compact_u16(val: u16) -> Vec<u8> {
@@ -76,6 +99,121 @@ fn build_message_bytes(
     msg
 }
 
+/// Build v0 versioned message bytes for a SOL transfer with optional ALTs.
+///
+/// v0 format:
+///   [1]     version prefix = 0x80 (bit 7 set = versioned, bits 0-6 = version 0)
+///   [1]     num_required_signatures
+///   [1]     num_readonly_signed
+///   [1]     num_readonly_unsigned
+///   [cu16]  num_account_keys (static accounts only)
+///   [32×N]  account_keys
+///   [32]    recent_blockhash
+///   [cu16]  num_instructions
+///   [...]   instructions (same format as legacy)
+///   [cu16]  num_address_table_lookups
+///   per table:
+///     [32]    table address
+///     [cu16]  num_writable_indices
+///     [u8×N]  writable_indices
+///     [cu16]  num_readonly_indices
+///     [u8×N]  readonly_indices
+fn build_message_bytes_v0(
+    from_bytes: &[u8; 32],
+    to_bytes: &[u8; 32],
+    lamports: u64,
+    recent_blockhash: &[u8; 32],
+    lookup_tables: &[AddressLookupTable],
+) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(256);
+
+    // Version prefix: 0x80 = versioned message, version 0
+    msg.push(0x80);
+
+    // Header (same as legacy for simple SOL transfer)
+    msg.push(1u8); // num_required_signatures
+    msg.push(0u8); // num_readonly_signed
+    msg.push(1u8); // num_readonly_unsigned (system program)
+
+    // Static account keys: 3 accounts (same as legacy)
+    msg.extend_from_slice(&encode_compact_u16(3));
+    msg.extend_from_slice(from_bytes);
+    msg.extend_from_slice(to_bytes);
+    msg.extend_from_slice(&[0u8; 32]); // system program
+
+    // Recent blockhash
+    msg.extend_from_slice(recent_blockhash);
+
+    // Instructions: 1 instruction (same as legacy)
+    msg.extend_from_slice(&encode_compact_u16(1));
+    msg.push(2u8); // program_id_index = 2
+    msg.extend_from_slice(&encode_compact_u16(2));
+    msg.push(0u8); // from
+    msg.push(1u8); // to
+    msg.extend_from_slice(&encode_compact_u16(12));
+    msg.extend_from_slice(&[2u8, 0u8, 0u8, 0u8]); // Transfer
+    msg.extend_from_slice(&lamports.to_le_bytes());
+
+    // Address table lookups
+    msg.extend_from_slice(&encode_compact_u16(lookup_tables.len() as u16));
+    for alt in lookup_tables {
+        msg.extend_from_slice(&alt.address);
+        // Writable indices
+        msg.extend_from_slice(&encode_compact_u16(alt.writable_indices.len() as u16));
+        msg.extend_from_slice(&alt.writable_indices);
+        // Readonly indices
+        msg.extend_from_slice(&encode_compact_u16(alt.readonly_indices.len() as u16));
+        msg.extend_from_slice(&alt.readonly_indices);
+    }
+
+    msg
+}
+
+/// Parse address lookup tables from JSON value.
+fn parse_lookup_tables(
+    val: Option<&serde_json::Value>,
+) -> Result<Vec<AddressLookupTable>, CoreError> {
+    let Some(arr) = val.and_then(|v| v.as_array()) else {
+        return Ok(Vec::new());
+    };
+
+    let mut tables = Vec::with_capacity(arr.len());
+    for item in arr {
+        let address_str = item["address"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidInput("ALT missing 'address'".into()))?;
+        let address = decode_base58_32(address_str, "lookup_table_address")?;
+
+        let writable_indices: Vec<u8> = item
+            .get("writable_indices")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as u8))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let readonly_indices: Vec<u8> = item
+            .get("readonly_indices")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as u8))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        tables.push(AddressLookupTable {
+            address,
+            writable_indices,
+            readonly_indices,
+        });
+    }
+
+    Ok(tables)
+}
+
 /// Decode a base58 string into exactly 32 bytes.
 fn decode_base58_32(s: &str, field: &str) -> Result<[u8; 32], CoreError> {
     let bytes = bs58::decode(s)
@@ -126,8 +264,24 @@ pub async fn build_solana_transaction(
         [0u8; 32]
     };
 
+    // Determine version
+    let version = params
+        .extra
+        .as_ref()
+        .and_then(|e| e.get("version"))
+        .and_then(|v| v.as_str());
+
     // Build binary message
-    let message_bytes = build_message_bytes(&from_bytes, &to_bytes, lamports, &recent_blockhash);
+    let message_bytes = match version {
+        Some("v0") => {
+            // Parse lookup tables if present
+            let lookup_tables = parse_lookup_tables(
+                params.extra.as_ref().and_then(|e| e.get("lookup_tables")),
+            )?;
+            build_message_bytes_v0(&from_bytes, &to_bytes, lamports, &recent_blockhash, &lookup_tables)
+        }
+        _ => build_message_bytes(&from_bytes, &to_bytes, lamports, &recent_blockhash),
+    };
 
     // tx_data carries the hex-encoded message plus metadata for finalize
     let tx_data_json = serde_json::json!({

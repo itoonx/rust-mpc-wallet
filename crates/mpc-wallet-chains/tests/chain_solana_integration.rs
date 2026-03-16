@@ -293,3 +293,164 @@ async fn test_solana_same_from_to_address() {
         result
     );
 }
+
+// ============================================================================
+// Solana v0 versioned transaction tests (T-S7-03)
+// ============================================================================
+
+#[tokio::test]
+async fn test_solana_v0_message_starts_with_version_byte() {
+    let provider = mpc_wallet_chains::solana::SolanaProvider::new();
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(),
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({
+            "from": "11111111111111111111111111111111",
+            "version": "v0"
+        })),
+    };
+    let unsigned = provider.build_transaction(params).await.unwrap();
+    assert_eq!(unsigned.sign_payload[0], 0x80, "v0 message must start with 0x80 version byte");
+}
+
+#[tokio::test]
+async fn test_solana_v0_header_after_version_byte() {
+    let provider = mpc_wallet_chains::solana::SolanaProvider::new();
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(),
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({
+            "from": "11111111111111111111111111111111",
+            "version": "v0"
+        })),
+    };
+    let unsigned = provider.build_transaction(params).await.unwrap();
+    let msg = &unsigned.sign_payload;
+    // After version byte: header is at offset 1-3
+    assert_eq!(msg[1], 1, "num_required_signatures must be 1");
+    assert_eq!(msg[2], 0, "num_readonly_signed must be 0");
+    assert_eq!(msg[3], 1, "num_readonly_unsigned must be 1");
+}
+
+#[tokio::test]
+async fn test_solana_v0_with_single_alt() {
+    let provider = mpc_wallet_chains::solana::SolanaProvider::new();
+    let alt_address = "11111111111111111111111111111112";
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(),
+        value: "500".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({
+            "from": "11111111111111111111111111111111",
+            "version": "v0",
+            "lookup_tables": [{
+                "address": alt_address,
+                "writable_indices": [0, 1],
+                "readonly_indices": [2]
+            }]
+        })),
+    };
+    let unsigned = provider.build_transaction(params).await.unwrap();
+    let msg = &unsigned.sign_payload;
+    // First byte must be version prefix
+    assert_eq!(msg[0], 0x80);
+    // Message should be larger than legacy due to ALT section
+    assert!(msg.len() > 145, "v0 with ALT should be larger than legacy, got {}", msg.len());
+}
+
+#[tokio::test]
+async fn test_solana_v0_with_multiple_alts() {
+    let provider = mpc_wallet_chains::solana::SolanaProvider::new();
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(),
+        value: "500".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({
+            "from": "11111111111111111111111111111111",
+            "version": "v0",
+            "lookup_tables": [
+                {
+                    "address": "11111111111111111111111111111112",
+                    "writable_indices": [0],
+                    "readonly_indices": [1, 2]
+                },
+                {
+                    "address": "11111111111111111111111111111111",
+                    "writable_indices": [3, 4],
+                    "readonly_indices": []
+                }
+            ]
+        })),
+    };
+    let unsigned = provider.build_transaction(params).await.unwrap();
+    assert_eq!(unsigned.sign_payload[0], 0x80);
+}
+
+#[tokio::test]
+async fn test_solana_v0_zero_alts() {
+    let provider = mpc_wallet_chains::solana::SolanaProvider::new();
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(),
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({
+            "from": "11111111111111111111111111111111",
+            "version": "v0",
+            "lookup_tables": []
+        })),
+    };
+    let unsigned = provider.build_transaction(params).await.unwrap();
+    // Should still have version prefix
+    assert_eq!(unsigned.sign_payload[0], 0x80);
+    // With zero ALTs, the message should end with compact-u16(0) = 0x00 byte for num_alts
+    let last = *unsigned.sign_payload.last().unwrap();
+    assert_eq!(last, 0x00, "zero ALTs should end with 0x00");
+}
+
+#[tokio::test]
+async fn test_solana_v0_finalize_produces_valid_signed_tx() {
+    let provider = mpc_wallet_chains::solana::SolanaProvider::new();
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(),
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({
+            "from": "11111111111111111111111111111111",
+            "version": "v0"
+        })),
+    };
+    let unsigned = provider.build_transaction(params).await.unwrap();
+    let fake_sig = MpcSignature::EdDsa { signature: [0xABu8; 64] };
+    let signed = provider.finalize_transaction(&unsigned, &fake_sig).unwrap();
+    // First byte: compact-u16(1) = 0x01
+    assert_eq!(signed.raw_tx[0], 0x01);
+    // Bytes 1..65: signature
+    assert_eq!(&signed.raw_tx[1..65], &[0xABu8; 64]);
+    // Byte 65: version prefix 0x80
+    assert_eq!(signed.raw_tx[65], 0x80, "message portion must start with v0 version byte");
+}
+
+#[tokio::test]
+async fn test_solana_legacy_unchanged_after_v0_addition() {
+    // Regression test: legacy tx building must be unaffected
+    let provider = mpc_wallet_chains::solana::SolanaProvider::new();
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(),
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({"from": "11111111111111111111111111111111"})),
+    };
+    let unsigned = provider.build_transaction(params).await.unwrap();
+    // Legacy: first byte is num_required_signatures (1), NOT version prefix (0x80)
+    assert_eq!(unsigned.sign_payload[0], 1, "legacy msg must NOT have version prefix");
+    assert_ne!(unsigned.sign_payload[0], 0x80);
+}
