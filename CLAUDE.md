@@ -84,12 +84,12 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 4 complete)
+## Current State (as of Sprint 5 complete)
 
 ### Tests on `main`
 ```
-85 tests pass  (cargo test --workspace)
-cargo check    clean
+113 tests pass  (cargo test --workspace)
+cargo check     clean
 .github/workflows/ci.yml  ← CI pipeline active
 ```
 
@@ -98,7 +98,15 @@ cargo check    clean
 - **Sprint 2:** COMPLETE — all 5 tasks merged (T-S2-00 through T-S2-05)
 - **Sprint 3:** COMPLETE — all 5 tasks merged (T-S3-00 through T-S3-05)
 - **Sprint 4:** COMPLETE — all 5 tasks merged (T-S4-00 through T-S4-04)
-- **Sprint 5:** PENDING — Approvals/SoD, Audit Ledger, Transport mTLS/ECDH (SEC-007), Bitcoin SEC-009
+- **Sprint 5:** COMPLETE — all 5 tasks merged (T-S5-00 through T-S5-04)
+- **Sprint 6:** PENDING — NatsTransport SignedEnvelope integration, session persistence, evidence pack export, EVM low-S enforcement (SEC-012)
+
+### New in Sprint 5
+- `mpc_wallet_core::approvals` — Approval workflow: Ed25519 quorum enforcement, maker/checker/approver SoD (FR-C)
+- `mpc_wallet_core::audit` — Append-only hash-chained audit ledger with Ed25519 service signatures + `verify()` tamper detection (FR-F)
+- `mpc_wallet_core::transport::signed_envelope` — SEC-007 FIX: Ed25519 signed envelope + seq_no replay protection + TTL
+- Bitcoin `tx.rs` — SEC-009 FIX: require `prev_script_pubkey` for Taproot sighash (invalid tx prevention)
+- Bitcoin `tx.rs` — SEC-016 FIX: `SerializableTx::to_tx()` unwrap → proper error propagation
 
 ### New in Sprint 4
 - `mpc_wallet_core::policy` — Policy Engine with "no policy → no sign" gate (FR-B5)
@@ -123,7 +131,7 @@ cargo check    clean
 ### Open HIGH Findings (block merge)
 | ID | Summary | Owner |
 |----|---------|-------|
-| SEC-007 | ProtocolMessage.from unauthenticated (requires transport MAC — Epic E2/E3) | R2/R0 |
+| (none) | SEC-007 addressed by SignedEnvelope (T-S5-04); NatsTransport integration in Sprint 6 | R2 |
 
 ### Resolved HIGH Findings
 | ID | Summary | Resolved |
@@ -131,7 +139,10 @@ cargo check    clean
 | SEC-004 | `KeyShare.share_data` Vec<u8> not zeroized | Sprint 4 T-S4-00/T-S4-01 — `Zeroizing<Vec<u8>>` root fix |
 | SEC-005 | EncryptedFileStore password not zeroized | Sprint 3 T-S3-02 — Zeroizing<String> |
 | SEC-006 | Argon2 default params too weak | Sprint 3 T-S3-02 — 64MiB/3t/4p |
+| SEC-007 | ProtocolMessage.from unauthenticated | Sprint 5 T-S5-04 — SignedEnvelope Ed25519 + seq_no (NatsTransport integration pending Sprint 6) |
+| SEC-009 | Bitcoin Taproot sighash uses empty script_pubkey | Sprint 5 T-S5-03 — require prev_script_pubkey |
 | SEC-015 | KeyShare derives Debug — share bytes in logs | Sprint 4 T-S4-00 — manual Debug impl redacts share_data |
+| SEC-016 | Bitcoin SerializableTx::to_tx() uses unwrap | Sprint 5 T-S5-03 — proper error propagation |
 
 Full findings log → `docs/SECURITY_FINDINGS.md`
 
