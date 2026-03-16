@@ -81,6 +81,15 @@ pub async fn run(args: SignArgs, format: OutputFormat) -> anyhow::Result<()> {
                 CryptoScheme::FrostEd25519 => {
                     Box::new(mpc_wallet_core::protocol::frost_ed25519::FrostEd25519Protocol::new())
                 }
+                CryptoScheme::Sr25519Threshold => {
+                    Box::new(mpc_wallet_core::protocol::sr25519::Sr25519Protocol::new())
+                }
+                CryptoScheme::StarkThreshold => {
+                    Box::new(mpc_wallet_core::protocol::stark::StarkProtocol::new())
+                }
+                CryptoScheme::Bls12_381Threshold => {
+                    Box::new(mpc_wallet_core::protocol::bls12_381::Bls12_381Protocol::new())
+                }
             };
             protocol
                 .sign(&share, &signers_clone, &message_clone, &*transport)
@@ -108,6 +117,13 @@ pub async fn run(args: SignArgs, format: OutputFormat) -> anyhow::Result<()> {
         }
         mpc_wallet_core::protocol::MpcSignature::Schnorr { signature } => hex::encode(signature),
         mpc_wallet_core::protocol::MpcSignature::EdDsa { signature } => hex::encode(signature),
+        mpc_wallet_core::protocol::MpcSignature::Sr25519Sig { signature } => hex::encode(signature),
+        mpc_wallet_core::protocol::MpcSignature::StarkSig { r, s } => {
+            format!("r={} s={}", hex::encode(r), hex::encode(s))
+        }
+        mpc_wallet_core::protocol::MpcSignature::Bls12_381Sig { signature } => {
+            hex::encode(signature)
+        }
     };
 
     let result = CliResult {

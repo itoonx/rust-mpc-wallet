@@ -25,6 +25,8 @@ k256 = { version = "0.13", features = ["ecdsa", "arithmetic"] }
 ed25519-dalek = { version = "2.1", features = ["serde"] }
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 ripemd = "0.1"
+schnorrkel = "0.11"
+blst = "0.3"
 sha3 = "0.10"
 sha2 = "0.10"
 blake2 = "0.10"

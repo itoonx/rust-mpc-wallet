@@ -40,6 +40,11 @@ pub fn derive_cosmos_address(
             }
             bytes[..33].to_vec()
         }
+        _ => {
+            return Err(CoreError::Crypto(
+                "Cosmos requires secp256k1 or Ed25519 public key".into(),
+            ));
+        }
     };
 
     // RIPEMD-160(SHA-256(pubkey)) — standard Cosmos address derivation

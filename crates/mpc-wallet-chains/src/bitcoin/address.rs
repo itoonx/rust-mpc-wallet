@@ -27,7 +27,7 @@ pub fn derive_taproot_address(
             }
             bytes[1..33].to_vec()
         }
-        GroupPublicKey::Ed25519(_) => {
+        _ => {
             return Err(CoreError::Crypto(
                 "cannot derive Taproot address from Ed25519 key".into(),
             ));

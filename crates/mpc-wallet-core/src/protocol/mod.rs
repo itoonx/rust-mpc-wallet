@@ -1,9 +1,15 @@
+/// Threshold BLS12-381 protocol (Filecoin, Ethereum validators).
+pub mod bls12_381;
 /// FROST threshold EdDSA protocol implementation for Ed25519 (Solana, Sui).
 pub mod frost_ed25519;
 /// FROST threshold Schnorr protocol implementation for secp256k1 with Taproot tweaks (Bitcoin).
 pub mod frost_secp256k1;
 /// GG20 threshold ECDSA protocol implementation for secp256k1 (EVM chains).
 pub mod gg20;
+/// Threshold Sr25519 protocol on Ristretto255 (Substrate/Polkadot).
+pub mod sr25519;
+/// Threshold signing on Stark curve (StarkNet).
+pub mod stark;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -117,6 +123,12 @@ pub enum GroupPublicKey {
     Secp256k1Uncompressed(Vec<u8>),
     /// Ed25519 public key (32 bytes).
     Ed25519(Vec<u8>),
+    /// Sr25519 public key on Ristretto255 (32 bytes).
+    Sr25519(Vec<u8>),
+    /// Stark curve public key (32 bytes).
+    StarkCurve(Vec<u8>),
+    /// BLS12-381 public key (48 bytes compressed G1).
+    Bls12_381(Vec<u8>),
 }
 
 impl GroupPublicKey {
@@ -126,6 +138,9 @@ impl GroupPublicKey {
             GroupPublicKey::Secp256k1(b) => b,
             GroupPublicKey::Secp256k1Uncompressed(b) => b,
             GroupPublicKey::Ed25519(b) => b,
+            GroupPublicKey::Sr25519(b) => b,
+            GroupPublicKey::StarkCurve(b) => b,
+            GroupPublicKey::Bls12_381(b) => b,
         }
     }
 }
@@ -153,6 +168,24 @@ pub enum MpcSignature {
         /// 64-byte Ed25519 signature in the standard `R || S` encoding.
         #[serde(with = "serde_byte_array_64")]
         signature: [u8; 64],
+    },
+    /// Sr25519 signature on Ristretto255 (for Substrate/Polkadot).
+    Sr25519Sig {
+        /// 64-byte Sr25519 Schnorr signature.
+        #[serde(with = "serde_byte_array_64")]
+        signature: [u8; 64],
+    },
+    /// STARK curve signature (for StarkNet).
+    StarkSig {
+        /// Stark field element r.
+        r: Vec<u8>,
+        /// Stark field element s.
+        s: Vec<u8>,
+    },
+    /// BLS12-381 signature (for Filecoin, Ethereum validators).
+    Bls12_381Sig {
+        /// Compressed G2 point (96 bytes).
+        signature: Vec<u8>,
     },
 }
 

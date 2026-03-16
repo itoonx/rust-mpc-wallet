@@ -35,7 +35,7 @@ pub fn derive_utxo_p2pkh_address(
             }
             bytes.clone()
         }
-        GroupPublicKey::Ed25519(_) => {
+        _ => {
             return Err(CoreError::Crypto(format!(
                 "{} requires secp256k1 public key",
                 config.coin_name

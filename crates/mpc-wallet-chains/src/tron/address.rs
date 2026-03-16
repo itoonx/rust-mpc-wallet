@@ -46,7 +46,7 @@ pub fn derive_tron_address(group_pubkey: &GroupPublicKey) -> Result<String, Core
             let uncompressed = affine.to_encoded_point(false);
             uncompressed.as_bytes()[1..65].to_vec()
         }
-        GroupPublicKey::Ed25519(_) => {
+        _ => {
             return Err(CoreError::Crypto(
                 "TRON requires secp256k1 public key".into(),
             ));

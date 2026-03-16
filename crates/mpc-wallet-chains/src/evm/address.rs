@@ -21,7 +21,7 @@ pub fn derive_evm_address(group_pubkey: &GroupPublicKey) -> Result<String, CoreE
                 .map_err(|e| CoreError::Crypto(format!("invalid secp256k1 key: {e}")))?;
             point.to_encoded_point(false).as_bytes().to_vec()
         }
-        GroupPublicKey::Ed25519(_) => {
+        _ => {
             return Err(CoreError::Crypto(
                 "cannot derive EVM address from Ed25519 key".into(),
             ));

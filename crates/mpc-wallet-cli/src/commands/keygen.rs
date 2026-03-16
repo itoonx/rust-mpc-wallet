@@ -51,6 +51,15 @@ pub async fn run(args: KeygenArgs, format: OutputFormat) -> anyhow::Result<()> {
         CryptoScheme::FrostEd25519 => {
             Box::new(mpc_wallet_core::protocol::frost_ed25519::FrostEd25519Protocol::new())
         }
+        CryptoScheme::Sr25519Threshold => {
+            Box::new(mpc_wallet_core::protocol::sr25519::Sr25519Protocol::new())
+        }
+        CryptoScheme::StarkThreshold => {
+            Box::new(mpc_wallet_core::protocol::stark::StarkProtocol::new())
+        }
+        CryptoScheme::Bls12_381Threshold => {
+            Box::new(mpc_wallet_core::protocol::bls12_381::Bls12_381Protocol::new())
+        }
     };
 
     // Create local transport for demo mode (all parties in one process)
@@ -84,6 +93,15 @@ pub async fn run(args: KeygenArgs, format: OutputFormat) -> anyhow::Result<()> {
                 ),
                 CryptoScheme::FrostEd25519 => {
                     Box::new(mpc_wallet_core::protocol::frost_ed25519::FrostEd25519Protocol::new())
+                }
+                CryptoScheme::Sr25519Threshold => {
+                    Box::new(mpc_wallet_core::protocol::sr25519::Sr25519Protocol::new())
+                }
+                CryptoScheme::StarkThreshold => {
+                    Box::new(mpc_wallet_core::protocol::stark::StarkProtocol::new())
+                }
+                CryptoScheme::Bls12_381Threshold => {
+                    Box::new(mpc_wallet_core::protocol::bls12_381::Bls12_381Protocol::new())
                 }
             };
             protocol.keygen(config_clone, party_id, &*transport).await

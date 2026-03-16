@@ -54,6 +54,12 @@ pub enum CryptoScheme {
     FrostSecp256k1Tr,
     /// FROST EdDSA on Ed25519 (for Solana, Sui).
     FrostEd25519,
+    /// Threshold Sr25519 on Ristretto255 (for Substrate/Polkadot).
+    Sr25519Threshold,
+    /// Threshold signing on Stark curve (for StarkNet).
+    StarkThreshold,
+    /// Threshold BLS on BLS12-381 (for Filecoin, Ethereum validators).
+    Bls12_381Threshold,
 }
 
 impl fmt::Display for CryptoScheme {
@@ -62,6 +68,9 @@ impl fmt::Display for CryptoScheme {
             CryptoScheme::Gg20Ecdsa => write!(f, "gg20-ecdsa"),
             CryptoScheme::FrostSecp256k1Tr => write!(f, "frost-secp256k1-tr"),
             CryptoScheme::FrostEd25519 => write!(f, "frost-ed25519"),
+            CryptoScheme::Sr25519Threshold => write!(f, "sr25519-threshold"),
+            CryptoScheme::StarkThreshold => write!(f, "stark-threshold"),
+            CryptoScheme::Bls12_381Threshold => write!(f, "bls12-381-threshold"),
         }
     }
 }
@@ -74,6 +83,9 @@ impl std::str::FromStr for CryptoScheme {
             "gg20-ecdsa" => Ok(CryptoScheme::Gg20Ecdsa),
             "frost-secp256k1-tr" => Ok(CryptoScheme::FrostSecp256k1Tr),
             "frost-ed25519" => Ok(CryptoScheme::FrostEd25519),
+            "sr25519" | "sr25519-threshold" => Ok(CryptoScheme::Sr25519Threshold),
+            "stark" | "stark-threshold" => Ok(CryptoScheme::StarkThreshold),
+            "bls12-381" | "bls12-381-threshold" => Ok(CryptoScheme::Bls12_381Threshold),
             _ => Err(format!("unknown scheme: {s}")),
         }
     }

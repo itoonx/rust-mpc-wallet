@@ -22,11 +22,7 @@ const OZ_ACCOUNT_CLASS_HASH: [u8; 32] = [0x04; 32];
 /// Computes: hash(CONTRACT_ADDRESS_PREFIX || deployer(0) || salt(pubkey_hash) || class_hash || calldata_hash)
 /// Result masked to 251 bits (Stark field element).
 pub fn derive_starknet_address(group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
-    let pubkey_bytes = match group_pubkey {
-        GroupPublicKey::Secp256k1(bytes) => bytes.clone(),
-        GroupPublicKey::Secp256k1Uncompressed(bytes) => bytes.clone(),
-        GroupPublicKey::Ed25519(bytes) => bytes.clone(),
-    };
+    let pubkey_bytes = group_pubkey.as_bytes().to_vec();
 
     // Salt = hash of pubkey
     let salt = Sha256::digest(&pubkey_bytes);
