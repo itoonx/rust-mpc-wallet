@@ -100,6 +100,7 @@ cargo test --workspace     # 233 个测试，约 4 秒
 | **[安全](docs/SECURITY.md)** | 威胁模型、已修复漏洞、漏洞披露政策 |
 | **[贡献指南](docs/CONTRIBUTING.md)** | 面向开发者和 LLM/AI Agent 的贡献指南 |
 | **[更新日志](CHANGELOG.md)** | 版本历史和发布说明 |
+| **[标准与参考](docs/STANDARDS.md)** | 所有密码学标准、RFC、EIP、BIP 参考文献 |
 | **[安全审计](docs/SECURITY_FINDINGS.md)** | 完整审计追踪（0 个 CRITICAL/HIGH 未解决） |
 
 ---
