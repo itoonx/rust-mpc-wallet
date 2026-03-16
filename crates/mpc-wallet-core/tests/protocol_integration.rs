@@ -290,7 +290,7 @@ async fn run_refresh(
         let transport = net.get_transport(s.party_id);
         let protocol = protocol_factory();
         handles.push(tokio::spawn(async move {
-            let signers: Vec<_> = (1..=s.config.total_parties).map(|i| PartyId(i as u32)).collect();
+            let signers: Vec<_> = (1..=s.config.total_parties).map(|i| PartyId(i as u16)).collect();
             protocol.refresh(&s, &signers, &*transport).await
         }));
     }
@@ -484,33 +484,6 @@ async fn test_frost_ed25519_different_signer_subsets() {
 // ============================================================================
 // FROST Ed25519 key refresh tests
 // ============================================================================
-
-/// Helper: run refresh for all parties concurrently, return refreshed key shares.
-async fn run_refresh(
-    protocol_factory: fn() -> Box<dyn MpcProtocol>,
-    shares: &[mpc_wallet_core::protocol::KeyShare],
-) -> Vec<mpc_wallet_core::protocol::KeyShare> {
-    let config = shares[0].config;
-    let net = LocalTransportNetwork::new(config.total_parties);
-
-    let mut handles = Vec::new();
-    for share in shares.iter() {
-        let party_id = share.party_id;
-        let transport = net.get_transport(party_id);
-        let protocol = protocol_factory();
-        let share_clone = share.clone();
-        handles.push(tokio::spawn(async move {
-            let signers: Vec<_> = (1..=share_clone.config.total_parties).map(|i| PartyId(i as u32)).collect();
-            protocol.refresh(&share_clone, &signers, &*transport).await
-        }));
-    }
-
-    let mut refreshed = Vec::new();
-    for h in handles {
-        refreshed.push(h.await.unwrap().unwrap());
-    }
-    refreshed
-}
 
 /// FROST Ed25519 key refresh: verify group public key unchanged, then sign with refreshed shares.
 #[tokio::test]
