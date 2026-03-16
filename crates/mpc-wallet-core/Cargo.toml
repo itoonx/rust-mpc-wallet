@@ -47,6 +47,7 @@ rand = { workspace = true }
 zeroize = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+jsonwebtoken = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }

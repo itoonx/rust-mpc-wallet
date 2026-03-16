@@ -51,3 +51,8 @@ pub mod audit;
 /// Use [`rbac::require_role`] or [`rbac::Permissions`] to guard operations
 /// based on the authenticated user's roles.
 pub mod rbac;
+/// JWT token validation and identity extraction (Epic A1, FR-A.1).
+///
+/// Use [`identity::JwtValidator`] to validate JWT tokens and extract
+/// [`rbac::AuthContext`] for permission checks.
+pub mod identity;
