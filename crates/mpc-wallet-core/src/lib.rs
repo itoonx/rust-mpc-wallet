@@ -31,3 +31,8 @@ pub mod types;
 /// Use [`policy::PolicyStore`] to load a [`policy::Policy`] and call
 /// [`policy::PolicyStore::check`] before creating any signing session (FR-B5).
 pub mod policy;
+/// Signing session manager: idempotent session lifecycle with `tx_fingerprint` lock.
+///
+/// Use [`session::SessionManager`] to create and track signing sessions.
+/// Call [`session::SessionManager::create`] before initiating any MPC signing round.
+pub mod session;
