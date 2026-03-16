@@ -100,6 +100,7 @@ Run benchmarks: `cargo bench -p mpc-wallet-core --bench mpc_benchmarks`
 | **[Security](docs/SECURITY.md)** | Threat model, resolved findings, disclosure policy |
 | **[Contributing](docs/CONTRIBUTING.md)** | Guide for humans and LLMs/AI agents |
 | **[Changelog](CHANGELOG.md)** | Version history and release notes |
+| **[Chain Roadmap](docs/CHAIN_ROADMAP.md)** | 54-chain expansion plan: EVM L2s, Move, Substrate, TON, Cosmos |
 | **[Standards & References](docs/STANDARDS.md)** | All cryptographic standards, RFCs, EIPs, BIPs implemented |
 | **[Security Findings](docs/SECURITY_FINDINGS.md)** | Full audit trail (0 CRITICAL/HIGH open) |
 
