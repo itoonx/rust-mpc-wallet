@@ -186,6 +186,84 @@ impl SessionManager {
         session.updated_at = now;
         Ok(())
     }
+
+    /// Persist all current sessions to a directory as JSON files.
+    ///
+    /// Each session is written to `{dir}/{session_id}.json`. The fingerprint
+    /// index is written to `{dir}/_index.json`.
+    ///
+    /// This enables recovery of signing sessions across process restarts (FR-D3).
+    /// Call after any state transition that should survive a restart.
+    pub fn save_to_dir(&self, dir: &std::path::Path) -> Result<(), CoreError> {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| CoreError::SessionError(format!("create session dir failed: {e}")))?;
+
+        let sessions = self.sessions.read().unwrap();
+        for (id, session) in sessions.iter() {
+            let path = dir.join(format!("{}.json", id));
+            let json = serde_json::to_string_pretty(session)
+                .map_err(|e| CoreError::SessionError(format!("serialize session: {e}")))?;
+            std::fs::write(&path, json)
+                .map_err(|e| CoreError::SessionError(format!("write session file: {e}")))?;
+        }
+
+        // Write fingerprint index
+        let idx = self.fingerprint_index.read().unwrap();
+        let idx_json = serde_json::to_string_pretty(&*idx)
+            .map_err(|e| CoreError::SessionError(format!("serialize index: {e}")))?;
+        std::fs::write(dir.join("_index.json"), idx_json)
+            .map_err(|e| CoreError::SessionError(format!("write index file: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Load sessions from a directory previously written by [`save_to_dir`].
+    ///
+    /// Reads all `*.json` files (except `_index.json`) as [`Session`] records
+    /// and reconstructs the fingerprint index from `_index.json`.
+    ///
+    /// Returns a new [`SessionManager`] populated with the loaded sessions.
+    pub fn load_from_dir(dir: &std::path::Path) -> Result<Self, CoreError> {
+        let mgr = SessionManager::new();
+
+        if !dir.exists() {
+            return Ok(mgr); // empty directory = no sessions
+        }
+
+        // Load fingerprint index
+        let idx_path = dir.join("_index.json");
+        if idx_path.exists() {
+            let idx_json = std::fs::read_to_string(&idx_path)
+                .map_err(|e| CoreError::SessionError(format!("read index file: {e}")))?;
+            let idx: HashMap<String, String> = serde_json::from_str(&idx_json)
+                .map_err(|e| CoreError::SessionError(format!("deserialize index: {e}")))?;
+            *mgr.fingerprint_index.write().unwrap() = idx;
+        }
+
+        // Load individual session files
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| CoreError::SessionError(format!("read session dir: {e}")))?;
+
+        {
+            let mut sessions = mgr.sessions.write().unwrap();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                if path.file_name().and_then(|n| n.to_str()) == Some("_index.json") {
+                    continue;
+                }
+                let json = std::fs::read_to_string(&path)
+                    .map_err(|e| CoreError::SessionError(format!("read session file: {e}")))?;
+                let session: Session = serde_json::from_str(&json)
+                    .map_err(|e| CoreError::SessionError(format!("deserialize session: {e}")))?;
+                sessions.insert(session.id.0.clone(), session);
+            }
+        } // drop sessions lock before returning mgr
+
+        Ok(mgr)
+    }
 }
 
 impl Default for SessionManager {
@@ -318,5 +396,83 @@ mod tests {
 
         let after = mgr.get(&id).unwrap().updated_at;
         assert!(after >= before, "updated_at should not decrease");
+    }
+
+    // ─── Persistence tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_save_and_load_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("mpc-sessions-{}", uuid::Uuid::new_v4()));
+
+        // Create and populate a session manager
+        let mgr = SessionManager::new();
+        let (id1, _) = mgr
+            .create("fp-persist-1".into(), "ethereum".into())
+            .unwrap();
+        let (id2, _) = mgr.create("fp-persist-2".into(), "bitcoin".into()).unwrap();
+        mgr.mark_signing(&id1).unwrap();
+        mgr.mark_completed(&id1, "0xabc".into()).unwrap();
+
+        // Save to disk
+        mgr.save_to_dir(&dir).unwrap();
+
+        // Load into a fresh manager
+        let mgr2 = SessionManager::load_from_dir(&dir).unwrap();
+
+        // Verify sessions round-tripped correctly
+        let s1 = mgr2.get(&id1).unwrap();
+        assert_eq!(s1.tx_fingerprint, "fp-persist-1");
+        assert_eq!(
+            s1.state,
+            crate::session::state::SessionState::Completed {
+                tx_hash: "0xabc".into()
+            }
+        );
+
+        let s2 = mgr2.get(&id2).unwrap();
+        assert_eq!(s2.tx_fingerprint, "fp-persist-2");
+        assert_eq!(s2.state, crate::session::state::SessionState::Pending);
+
+        // Verify idempotency index round-tripped (same fingerprint → same session ID)
+        let (id1_again, created) = mgr2
+            .create("fp-persist-1".into(), "ethereum".into())
+            .unwrap();
+        assert!(
+            !created,
+            "existing fingerprint must not create a new session"
+        );
+        assert_eq!(id1_again, id1);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_from_nonexistent_dir_returns_empty() {
+        let dir = std::env::temp_dir().join("mpc-sessions-does-not-exist-xyz");
+        let mgr = SessionManager::load_from_dir(&dir).unwrap();
+        // Should return an empty manager, not an error
+        assert!(mgr.sessions.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_save_overwrites_updated_state() {
+        let dir =
+            std::env::temp_dir().join(format!("mpc-sessions-update-{}", uuid::Uuid::new_v4()));
+
+        let mgr = SessionManager::new();
+        let (id, _) = mgr.create("fp-overwrite".into(), "solana".into()).unwrap();
+        mgr.save_to_dir(&dir).unwrap();
+
+        // Transition state and save again
+        mgr.mark_signing(&id).unwrap();
+        mgr.save_to_dir(&dir).unwrap();
+
+        // Load and verify updated state persisted
+        let mgr2 = SessionManager::load_from_dir(&dir).unwrap();
+        let s = mgr2.get(&id).unwrap();
+        assert_eq!(s.state, crate::session::state::SessionState::Signing);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
