@@ -196,6 +196,13 @@ impl KeyStore for EncryptedFileStore {
         group_id: &KeyGroupId,
         party_id: PartyId,
     ) -> Result<KeyShare, CoreError> {
+        // SEC: check frozen state BEFORE any decryption attempt.
+        // A frozen key group must never have its ciphertext read or decrypted.
+        let frozen_path = self.group_dir(group_id).join("frozen");
+        if frozen_path.exists() {
+            return Err(CoreError::KeyFrozen(group_id.0.clone()));
+        }
+
         let path = self.share_path(group_id, party_id);
         let encrypted = tokio::fs::read(&path)
             .await
@@ -237,15 +244,32 @@ impl KeyStore for EncryptedFileStore {
     }
 
     async fn freeze(&self, group_id: &KeyGroupId) -> Result<(), CoreError> {
-        // TODO(Sprint 1 T-04): write a `.frozen` marker file in the group directory
-        // and make `load()` return CoreError::KeyFrozen if the marker exists.
-        let _ = group_id;
+        let group_dir = self.group_dir(group_id);
+        if !group_dir.exists() {
+            return Err(CoreError::NotFound(format!(
+                "key group '{}' not found",
+                group_id.0
+            )));
+        }
+        // Write a zero-byte marker file. The file's existence (not its content)
+        // is what signals the frozen state — checked in load() before decryption.
+        let frozen_path = group_dir.join("frozen");
+        tokio::fs::write(&frozen_path, b"")
+            .await
+            .map_err(|e| CoreError::KeyStore(format!("failed to write frozen marker: {e}")))?;
         Ok(())
     }
 
     async fn unfreeze(&self, group_id: &KeyGroupId) -> Result<(), CoreError> {
-        // TODO(Sprint 1 T-04): remove the `.frozen` marker file.
-        let _ = group_id;
+        let frozen_path = self.group_dir(group_id).join("frozen");
+        if frozen_path.exists() {
+            tokio::fs::remove_file(&frozen_path)
+                .await
+                .map_err(|e| {
+                    CoreError::KeyStore(format!("failed to remove frozen marker: {e}"))
+                })?;
+        }
+        // If the frozen marker does not exist, unfreeze is idempotent — no error.
         Ok(())
     }
 }
@@ -361,5 +385,118 @@ mod tests {
             json["last_refreshed"].as_u64().unwrap() > 0,
             "timestamp must be positive"
         );
+    }
+
+    // ─── Freeze / Unfreeze tests ─────────────────────────────────────────────
+
+    fn make_test_share() -> KeyShare {
+        use crate::protocol::GroupPublicKey;
+        use crate::types::{CryptoScheme, ThresholdConfig};
+        KeyShare {
+            scheme: CryptoScheme::FrostEd25519,
+            party_id: PartyId(1),
+            config: ThresholdConfig::new(2, 3).unwrap(),
+            group_public_key: GroupPublicKey::Ed25519(vec![0u8; 32]),
+            share_data: zeroize::Zeroizing::new(vec![0xAB, 0xCD]),
+        }
+    }
+
+    fn make_test_metadata(group_id: &KeyGroupId) -> KeyMetadata {
+        use crate::types::{CryptoScheme, ThresholdConfig};
+        KeyMetadata {
+            group_id: group_id.clone(),
+            label: "freeze-test".into(),
+            scheme: CryptoScheme::FrostEd25519,
+            config: ThresholdConfig::new(2, 3).unwrap(),
+            created_at: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_freeze_blocks_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EncryptedFileStore::new(dir.path().to_path_buf(), "test-pw");
+        let group_id = KeyGroupId::new();
+        let share = make_test_share();
+        let meta = make_test_metadata(&group_id);
+
+        store.save(&group_id, &meta, PartyId(1), &share).await.unwrap();
+        // Verify load succeeds before freeze
+        assert!(store.load(&group_id, PartyId(1)).await.is_ok());
+
+        // Freeze the group
+        store.freeze(&group_id).await.unwrap();
+
+        // Load must now return KeyFrozen — no decryption should occur
+        let err = store.load(&group_id, PartyId(1)).await.unwrap_err();
+        assert!(
+            matches!(err, CoreError::KeyFrozen(_)),
+            "expected KeyFrozen after freeze, got {:?}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unfreeze_restores_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EncryptedFileStore::new(dir.path().to_path_buf(), "test-pw");
+        let group_id = KeyGroupId::new();
+        let share = make_test_share();
+        let meta = make_test_metadata(&group_id);
+
+        store.save(&group_id, &meta, PartyId(1), &share).await.unwrap();
+        store.freeze(&group_id).await.unwrap();
+        // Confirm frozen
+        assert!(matches!(
+            store.load(&group_id, PartyId(1)).await.unwrap_err(),
+            CoreError::KeyFrozen(_)
+        ));
+
+        // Unfreeze and confirm load works again
+        store.unfreeze(&group_id).await.unwrap();
+        assert!(store.load(&group_id, PartyId(1)).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_freeze_nonexistent_group_returns_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EncryptedFileStore::new(dir.path().to_path_buf(), "test-pw");
+        let group_id = KeyGroupId::new();
+
+        let err = store.freeze(&group_id).await.unwrap_err();
+        assert!(
+            matches!(err, CoreError::NotFound(_)),
+            "expected NotFound for freeze on non-existent group, got {:?}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_double_freeze_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EncryptedFileStore::new(dir.path().to_path_buf(), "test-pw");
+        let group_id = KeyGroupId::new();
+        let share = make_test_share();
+        let meta = make_test_metadata(&group_id);
+
+        store.save(&group_id, &meta, PartyId(1), &share).await.unwrap();
+        store.freeze(&group_id).await.unwrap();
+        // Second freeze on already-frozen group must succeed (idempotent)
+        assert!(store.freeze(&group_id).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_double_unfreeze_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = EncryptedFileStore::new(dir.path().to_path_buf(), "test-pw");
+        let group_id = KeyGroupId::new();
+        let share = make_test_share();
+        let meta = make_test_metadata(&group_id);
+
+        store.save(&group_id, &meta, PartyId(1), &share).await.unwrap();
+        // Unfreeze a group that was never frozen — must succeed (idempotent)
+        assert!(store.unfreeze(&group_id).await.is_ok());
+        // Unfreeze again — still idempotent
+        assert!(store.unfreeze(&group_id).await.is_ok());
     }
 }
