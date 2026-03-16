@@ -72,7 +72,7 @@ Vaultex is a **Rust workspace** for building enterprise-grade **threshold multi-
 git clone https://github.com/itoonx/vaultex-mpc-rust.git
 cd vaultex-mpc-rust
 
-cargo test --workspace     # 272 tests, ~4 seconds
+cargo test --workspace     # 325 tests, ~4 seconds
 ./scripts/demo.sh          # interactive end-to-end demo
 ```
 
@@ -82,7 +82,7 @@ cargo test --workspace     # 272 tests, ~4 seconds
 
 | Category | Highlights |
 |----------|-----------|
-| **MPC Protocols** | GG20 ECDSA, FROST Ed25519, FROST Secp256k1-Taproot |
+| **MPC Protocols** | GG20 ECDSA, FROST Ed25519, FROST Schnorr, Sr25519, STARK, BLS12-381 |
 | **Key Lifecycle** | Keygen, refresh, reshare (change threshold/add parties), freeze |
 | **50 Chains** | EVM L1/L2s, Bitcoin, Solana, Sui, Aptos, Movement, TON, TRON, LTC, DOGE, ZEC, XMR |
 | **RPC Registry** | Multi-provider (Dwellir, Alchemy, Infura, Blockstream, Mempool), failover, health tracking |
@@ -157,7 +157,7 @@ cargo test --workspace     # 272 tests, ~4 seconds
 | Phala | SS58 prefix 30 | FROST Ed25519 | :white_check_mark: |
 | Interlay | SS58 prefix 2032 | FROST Ed25519 | :white_check_mark: |
 
-> Ed25519 signing via FROST. Sr25519 threshold MPC planned as future protocol.
+> Supports both FROST Ed25519 and **Sr25519 threshold MPC** (Schnorrkel on Ristretto255).
 
 ### Cosmos / IBC (5)
 
@@ -182,7 +182,7 @@ cargo test --workspace     # 272 tests, ~4 seconds
 |-------|---------------|---------|:-------:|
 | Starknet | `0x` + 64 hex (251-bit field) | STARK curve (planned) | :white_check_mark: |
 
-> STARK curve threshold MPC signing is planned. Currently uses ECDSA-compatible placeholder.
+> STARK curve threshold MPC signing now available via `StarkProtocol`.
 
 ### Other Chains (3)
 
@@ -193,6 +193,21 @@ cargo test --workspace     # 272 tests, ~4 seconds
 | Monero | Base58 (spend + view key) | FROST Ed25519 | :white_check_mark: |
 
 > RPC Registry supports **failover** (auto-switch on unhealthy), **health tracking** per endpoint, **per-chain config** (timeout, retries), and **custom providers**.
+
+---
+
+## MPC Signing Protocols (6)
+
+| Protocol | Curve | Chains | Crate |
+|----------|-------|--------|-------|
+| **GG20 ECDSA** | secp256k1 | EVM (26), TRON, Cosmos (5), UTXO (3) | `k256` |
+| **FROST Schnorr** | secp256k1 | Bitcoin (Taproot P2TR) | `frost-secp256k1-tr` |
+| **FROST Ed25519** | Ed25519 | Solana, Sui, Aptos, Movement, TON, Monero | `frost-ed25519` |
+| **Sr25519 Threshold** | Ristretto255 | Polkadot, Kusama, Astar, Acala, Phala, Interlay | `schnorrkel` |
+| **STARK Threshold** | Stark curve | Starknet | custom |
+| **BLS12-381 Threshold** | BLS12-381 | Filecoin, Ethereum validators | `blst` |
+
+> All protocols support threshold key generation and distributed signing — the full private key is **never** assembled.
 
 ---
 
@@ -215,7 +230,7 @@ Run benchmarks: `cargo bench -p mpc-wallet-core --bench mpc_benchmarks`
 ```
 crates/
   mpc-wallet-core/     ← MPC protocols, transport, key store, policy, identity
-  mpc-wallet-chains/   ← Chain adapters: EVM (22), Bitcoin, Solana, Sui, Aptos, UTXO, Monero
+  mpc-wallet-chains/   ← Chain adapters: 50 chains (EVM, Bitcoin, Substrate, Move, Cosmos, UTXO, TON, TRON, Starknet, Monero)
   mpc-wallet-cli/      ← CLI binary
 scripts/
   demo.sh              ← Interactive local demo (no external services)
@@ -227,9 +242,9 @@ docs/                  ← Architecture, security, CLI guide, sprint history
 ## Metrics
 
 ```
-  Chains:    50          Tests:    272 pass
-  LOC:       17,000+     CI:       fmt + clippy + test + audit
-  Sprints:   17          Findings: 0 CRITICAL | 0 HIGH open
+  Chains:    50          Tests:     325 pass
+  Protocols: 6           CI:        fmt + clippy + test + audit
+  Sprints:   20          Findings:  0 CRITICAL | 0 HIGH open
 ```
 
 ---
