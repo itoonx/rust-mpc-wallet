@@ -246,6 +246,102 @@ impl AuditLedger {
 
         Ok(())
     }
+
+    /// Export an evidence pack as a self-contained JSON bundle (FR-F.2).
+    ///
+    /// The pack contains:
+    /// - All ledger entries (with their signatures)
+    /// - The service's Ed25519 verifying key (hex-encoded)
+    /// - A `generated_at` timestamp
+    /// - A `entry_count` for quick integrity check
+    ///
+    /// The recipient can verify the pack by calling [`AuditLedger::verify_pack`].
+    ///
+    /// # Format
+    /// ```json
+    /// {
+    ///   "schema_version": 1,
+    ///   "generated_at": 1234567890,
+    ///   "entry_count": 3,
+    ///   "service_verifying_key_hex": "...",
+    ///   "entries": [ ... ]
+    /// }
+    /// ```
+    pub fn export_evidence_pack(&self) -> Result<String, CoreError> {
+        let entries = self.entries.read().unwrap();
+        let vk_hex = hex::encode(self.signing_key.verifying_key().to_bytes());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let pack = serde_json::json!({
+            "schema_version": 1,
+            "generated_at": now,
+            "entry_count": entries.len(),
+            "service_verifying_key_hex": vk_hex,
+            "entries": *entries,
+        });
+
+        serde_json::to_string_pretty(&pack)
+            .map_err(|e| CoreError::AuditError(format!("serialize evidence pack: {e}")))
+    }
+
+    /// Verify an evidence pack previously exported by [`export_evidence_pack`].
+    ///
+    /// Deserialises the pack, extracts the service verifying key and entries,
+    /// then verifies the hash chain and all signatures in one pass.
+    ///
+    /// # Returns
+    /// `Ok(entry_count)` if the pack is valid.
+    /// `Err(CoreError::AuditError(...))` if anything is wrong.
+    pub fn verify_pack(pack_json: &str) -> Result<usize, CoreError> {
+        let pack: serde_json::Value = serde_json::from_str(pack_json)
+            .map_err(|e| CoreError::AuditError(format!("parse evidence pack: {e}")))?;
+
+        // Decode service verifying key
+        let vk_hex = pack["service_verifying_key_hex"]
+            .as_str()
+            .ok_or_else(|| CoreError::AuditError("missing service_verifying_key_hex".into()))?;
+        let vk_bytes = hex::decode(vk_hex)
+            .map_err(|e| CoreError::AuditError(format!("decode verifying key: {e}")))?;
+        let vk_arr: [u8; 32] = vk_bytes
+            .try_into()
+            .map_err(|_| CoreError::AuditError("verifying key must be 32 bytes".into()))?;
+        let verifying_key = VerifyingKey::from_bytes(&vk_arr)
+            .map_err(|e| CoreError::AuditError(format!("invalid verifying key: {e}")))?;
+
+        // Deserialise entries
+        let entries_val = pack["entries"]
+            .as_array()
+            .ok_or_else(|| CoreError::AuditError("missing entries array".into()))?;
+        let entries: Vec<LedgerEntry> =
+            serde_json::from_value(serde_json::Value::Array(entries_val.clone()))
+                .map_err(|e| CoreError::AuditError(format!("deserialize entries: {e}")))?;
+
+        // Verify hash chain and signatures
+        let mut expected_prev_hash = vec![0u8; 32];
+        for entry in &entries {
+            if entry.prev_hash != expected_prev_hash {
+                return Err(CoreError::AuditError(format!(
+                    "hash-chain broken at entry {}",
+                    entry.index
+                )));
+            }
+            let sig_bytes: [u8; 64] =
+                entry.service_signature.as_slice().try_into().map_err(|_| {
+                    CoreError::AuditError(format!("invalid sig at entry {}", entry.index))
+                })?;
+            let sig = Signature::from_bytes(&sig_bytes);
+            let canonical = entry.canonical_bytes();
+            verifying_key.verify(&canonical, &sig).map_err(|_| {
+                CoreError::AuditError(format!("signature invalid at entry {}", entry.index))
+            })?;
+            expected_prev_hash = entry.hash();
+        }
+
+        Ok(entries.len())
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -372,5 +468,83 @@ mod tests {
         }
         assert!(ledger.verify(&ledger.verifying_key()).is_ok());
         assert_eq!(ledger.entries().len(), 4);
+    }
+
+    // ─── Evidence pack tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_export_and_verify_pack_roundtrip() {
+        let ledger = new_ledger();
+        ledger
+            .append(EventKind::SessionCreated, Some("s1".into()), None)
+            .unwrap();
+        ledger
+            .append(
+                EventKind::SigningCompleted,
+                Some("s1".into()),
+                Some("0xabc".into()),
+            )
+            .unwrap();
+
+        let pack = ledger.export_evidence_pack().unwrap();
+
+        // Pack should be valid JSON with expected fields
+        let v: serde_json::Value = serde_json::from_str(&pack).unwrap();
+        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["entry_count"], 2);
+        assert!(v["service_verifying_key_hex"].is_string());
+
+        // Verify the pack
+        let count = AuditLedger::verify_pack(&pack).unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_empty_pack_verifies_ok() {
+        let ledger = new_ledger();
+        let pack = ledger.export_evidence_pack().unwrap();
+        let count = AuditLedger::verify_pack(&pack).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_tampered_pack_fails_verify() {
+        let ledger = new_ledger();
+        ledger
+            .append(EventKind::SessionCreated, Some("s1".into()), None)
+            .unwrap();
+        ledger
+            .append(
+                EventKind::SigningCompleted,
+                Some("s1".into()),
+                Some("original".into()),
+            )
+            .unwrap();
+
+        let mut pack: serde_json::Value =
+            serde_json::from_str(&ledger.export_evidence_pack().unwrap()).unwrap();
+
+        // Tamper with the details field of the second entry
+        pack["entries"][1]["details"] = serde_json::json!("TAMPERED");
+        let tampered = serde_json::to_string(&pack).unwrap();
+
+        assert!(
+            AuditLedger::verify_pack(&tampered).is_err(),
+            "tampered evidence pack must fail verification"
+        );
+    }
+
+    #[test]
+    fn test_pack_contains_all_entries() {
+        let ledger = new_ledger();
+        for i in 0..5 {
+            ledger
+                .append(EventKind::ApprovalSubmitted, Some(format!("s{i}")), None)
+                .unwrap();
+        }
+        let pack = ledger.export_evidence_pack().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&pack).unwrap();
+        assert_eq!(v["entry_count"], 5);
+        assert_eq!(v["entries"].as_array().unwrap().len(), 5);
     }
 }
