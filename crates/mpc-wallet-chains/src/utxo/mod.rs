@@ -1,10 +1,19 @@
-//! UTXO chain providers — Litecoin, Dogecoin, Zcash.
+//! UTXO chain infrastructure — shared by Bitcoin, Litecoin, Dogecoin, Zcash.
 //!
-//! These chains share Bitcoin's UTXO model and use secp256k1 ECDSA signing
-//! (reusing GG20 ECDSA). Each has different address formats but similar
-//! transaction structure.
+//! This module provides:
+//! - `UtxoChainConfig` — per-chain address version bytes and network params
+//! - `UtxoSimulationConfig` + `simulate_utxo()` — shared dust/fee/RBF risk checks
+//! - `broadcast_utxo_rest()` — shared REST POST /tx broadcast (Blockstream/Mempool pattern)
+//! - `UtxoProvider` — generic provider for LTC/DOGE/ZEC (Bitcoin has its own Taproot provider)
+//!
+//! Bitcoin stays in `crate::bitcoin` for Taproot-specific code but uses these shared utilities.
 
 pub mod address;
+pub mod broadcast;
+pub mod simulation;
+
+pub use broadcast::broadcast_utxo_rest;
+pub use simulation::{simulate_utxo, UtxoSimulationConfig};
 
 use async_trait::async_trait;
 
@@ -29,6 +38,28 @@ pub struct UtxoChainConfig {
     /// Coin name for display.
     pub coin_name: &'static str,
 }
+
+// ── Bitcoin configs (for reference — Bitcoin uses its own Taproot provider) ──
+
+/// Bitcoin mainnet configuration.
+pub const BITCOIN_MAINNET_CONFIG: UtxoChainConfig = UtxoChainConfig {
+    chain: Chain::BitcoinMainnet,
+    p2pkh_version: 0x00, // '1' prefix
+    p2sh_version: 0x05,  // '3' prefix
+    bech32_hrp: Some("bc"),
+    coin_name: "Bitcoin",
+};
+
+/// Bitcoin testnet configuration.
+pub const BITCOIN_TESTNET_CONFIG: UtxoChainConfig = UtxoChainConfig {
+    chain: Chain::BitcoinTestnet,
+    p2pkh_version: 0x6F, // 'm' or 'n' prefix
+    p2sh_version: 0xC4,  // '2' prefix
+    bech32_hrp: Some("tb"),
+    coin_name: "Bitcoin Testnet",
+};
+
+// ── Other UTXO chain configs ────────────────────────────────────────────────
 
 /// Litecoin configuration.
 pub const LITECOIN_CONFIG: UtxoChainConfig = UtxoChainConfig {
@@ -60,28 +91,39 @@ pub const ZCASH_CONFIG: UtxoChainConfig = UtxoChainConfig {
 /// Generic UTXO chain provider for Litecoin, Dogecoin, Zcash.
 ///
 /// Uses secp256k1 ECDSA signing (GG20) — same as Bitcoin legacy.
-/// Transaction building delegates to a simplified UTXO model.
+/// Bitcoin has its own `BitcoinProvider` with Taproot/Schnorr support,
+/// but shares broadcast and simulation utilities from this module.
 pub struct UtxoProvider {
     pub config: UtxoChainConfig,
+    pub simulation_config: Option<UtxoSimulationConfig>,
 }
 
 impl UtxoProvider {
     pub fn litecoin() -> Self {
         Self {
             config: LITECOIN_CONFIG,
+            simulation_config: None,
         }
     }
 
     pub fn dogecoin() -> Self {
         Self {
             config: DOGECOIN_CONFIG,
+            simulation_config: None,
         }
     }
 
     pub fn zcash() -> Self {
         Self {
             config: ZCASH_CONFIG,
+            simulation_config: None,
         }
+    }
+
+    /// Enable transaction simulation with the given configuration.
+    pub fn with_simulation(mut self, config: UtxoSimulationConfig) -> Self {
+        self.simulation_config = Some(config);
+        self
     }
 }
 
@@ -99,15 +141,12 @@ impl ChainProvider for UtxoProvider {
         &self,
         params: TransactionParams,
     ) -> Result<UnsignedTransaction, CoreError> {
-        // Simplified UTXO transaction: hash the tx params for signing.
-        // Full UTXO tx building (inputs, outputs, scripts) is a future enhancement.
         let chain = self.config.chain;
         let value: u64 = params
             .value
             .parse()
             .map_err(|_| CoreError::InvalidInput(format!("invalid amount: {}", params.value)))?;
 
-        // Build a minimal signing payload from tx params
         let mut payload_data = Vec::new();
         payload_data.extend_from_slice(params.to.as_bytes());
         payload_data.extend_from_slice(&value.to_le_bytes());
@@ -132,7 +171,6 @@ impl ChainProvider for UtxoProvider {
         unsigned: &UnsignedTransaction,
         sig: &MpcSignature,
     ) -> Result<SignedTransaction, CoreError> {
-        // Extract ECDSA signature
         let (r, s) = match sig {
             MpcSignature::Ecdsa { r, s, .. } => (r.clone(), s.clone()),
             _ => {
@@ -143,7 +181,6 @@ impl ChainProvider for UtxoProvider {
             }
         };
 
-        // Build raw tx: tx_data || DER-encoded signature
         let mut raw_tx = unsigned.tx_data.clone();
         raw_tx.extend_from_slice(&r);
         raw_tx.extend_from_slice(&s);
@@ -162,59 +199,19 @@ impl ChainProvider for UtxoProvider {
         signed: &SignedTransaction,
         rpc_url: &str,
     ) -> Result<String, CoreError> {
-        // UTXO chains use similar REST broadcast pattern
-        let raw_hex = hex::encode(&signed.raw_tx);
-        let url = format!("{rpc_url}/tx");
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(&url)
-            .header("Content-Type", "text/plain")
-            .body(raw_hex)
-            .send()
-            .await
-            .map_err(|e| CoreError::Other(format!("broadcast request failed: {e}")))?;
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| CoreError::Other(format!("broadcast response read failed: {e}")))?;
-        if !status.is_success() {
-            return Err(CoreError::Other(format!(
-                "broadcast failed ({status}): {body}"
-            )));
-        }
-        Ok(body.trim().to_string())
+        broadcast_utxo_rest(signed, rpc_url).await
     }
 
     async fn simulate_transaction(
         &self,
         params: &TransactionParams,
     ) -> Result<SimulationResult, CoreError> {
-        // Basic UTXO simulation — dust and fee checks
-        let mut risk_flags = Vec::new();
-        let mut risk_score: u8 = 0;
-
-        let value: u64 = params.value.parse().unwrap_or(0);
-        if value > 0 && value < 546 {
-            risk_flags.push("dust_output".into());
-            risk_score = risk_score.saturating_add(40);
-        }
-
-        if let Some(extra) = &params.extra {
-            if let Some(fee) = extra.get("fee_sat").and_then(|v| v.as_u64()) {
-                if fee > 1_000_000 {
-                    risk_flags.push("excessive_fee".into());
-                    risk_score = risk_score.saturating_add(50);
-                }
-            }
-        }
-
-        Ok(SimulationResult {
-            success: true,
-            gas_used: 0,
-            return_data: Vec::new(),
-            risk_flags,
-            risk_score,
-        })
+        let config = self.simulation_config.as_ref().ok_or_else(|| {
+            CoreError::Other(format!(
+                "{} simulation not configured",
+                self.config.coin_name
+            ))
+        })?;
+        Ok(simulate_utxo(params, config))
     }
 }

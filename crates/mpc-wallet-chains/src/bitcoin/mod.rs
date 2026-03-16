@@ -11,31 +11,14 @@ use crate::provider::{
     Chain, ChainProvider, SignedTransaction, SimulationResult, TransactionParams,
     UnsignedTransaction,
 };
+use crate::utxo::{broadcast_utxo_rest, simulate_utxo, UtxoSimulationConfig};
 
-/// Configuration for Bitcoin transaction simulation.
-#[derive(Debug, Clone)]
-pub struct BitcoinSimulationConfig {
-    /// Maximum fee rate in sat/vB before flagging as high-fee.
-    pub max_fee_rate_sat_vb: u64,
-    /// Maximum total fee in satoshis.
-    pub max_total_fee_sat: u64,
-    /// Minimum output value in satoshis (dust threshold).
-    pub dust_threshold_sat: u64,
-}
-
-impl Default for BitcoinSimulationConfig {
-    fn default() -> Self {
-        Self {
-            max_fee_rate_sat_vb: 500,     // 500 sat/vB
-            max_total_fee_sat: 1_000_000, // 0.01 BTC
-            dust_threshold_sat: 546,      // Bitcoin Core default dust limit
-        }
-    }
-}
+/// Re-export for backward compatibility — use `UtxoSimulationConfig` directly.
+pub type BitcoinSimulationConfig = UtxoSimulationConfig;
 
 pub struct BitcoinProvider {
     pub network: bitcoin::Network,
-    pub simulation_config: Option<BitcoinSimulationConfig>,
+    pub simulation_config: Option<UtxoSimulationConfig>,
 }
 
 impl BitcoinProvider {
@@ -61,7 +44,7 @@ impl BitcoinProvider {
     }
 
     /// Enable transaction simulation with the given configuration.
-    pub fn with_simulation(mut self, config: BitcoinSimulationConfig) -> Self {
+    pub fn with_simulation(mut self, config: UtxoSimulationConfig) -> Self {
         self.simulation_config = Some(config);
         self
     }
@@ -100,28 +83,7 @@ impl ChainProvider for BitcoinProvider {
         signed: &SignedTransaction,
         rpc_url: &str,
     ) -> Result<String, CoreError> {
-        let raw_hex = hex::encode(&signed.raw_tx);
-        let url = format!("{rpc_url}/tx");
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(&url)
-            .header("Content-Type", "text/plain")
-            .body(raw_hex)
-            .send()
-            .await
-            .map_err(|e| CoreError::Other(format!("broadcast request failed: {e}")))?;
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| CoreError::Other(format!("broadcast response read failed: {e}")))?;
-        if !status.is_success() {
-            return Err(CoreError::Other(format!(
-                "broadcast failed ({status}): {body}"
-            )));
-        }
-        // Blockstream/Mempool return the txid as plain text
-        Ok(body.trim().to_string())
+        broadcast_utxo_rest(signed, rpc_url).await
     }
 
     async fn simulate_transaction(
@@ -132,58 +94,6 @@ impl ChainProvider for BitcoinProvider {
             .simulation_config
             .as_ref()
             .ok_or_else(|| CoreError::Other("Bitcoin simulation not configured".into()))?;
-
-        let mut risk_flags = Vec::new();
-        let mut risk_score: u8 = 0;
-
-        // Parse value (output amount in satoshis)
-        let value: u64 = params.value.parse().unwrap_or(0);
-
-        // Dust check
-        if value > 0 && value < config.dust_threshold_sat {
-            risk_flags.push("dust_output".into());
-            risk_score = risk_score.saturating_add(40);
-        }
-
-        // Parse fee-related fields from extra params
-        if let Some(extra) = &params.extra {
-            // Fee rate check
-            if let Some(fee_rate) = extra.get("fee_rate_sat_vb").and_then(|v| v.as_u64()) {
-                if fee_rate > config.max_fee_rate_sat_vb {
-                    risk_flags.push("high_fee_rate".into());
-                    risk_score = risk_score.saturating_add(50);
-                }
-            }
-
-            // Total fee check
-            if let Some(total_fee) = extra.get("fee_sat").and_then(|v| v.as_u64()) {
-                if total_fee > config.max_total_fee_sat {
-                    risk_flags.push("excessive_fee".into());
-                    risk_score = risk_score.saturating_add(60);
-                }
-            }
-
-            // RBF (Replace-By-Fee) flag
-            if extra.get("rbf").and_then(|v| v.as_bool()).unwrap_or(false) {
-                risk_flags.push("rbf_enabled".into());
-                risk_score = risk_score.saturating_add(10);
-            }
-
-            // Multi-output check (potential change address confusion)
-            if let Some(outputs) = extra.get("output_count").and_then(|v| v.as_u64()) {
-                if outputs > 5 {
-                    risk_flags.push("many_outputs".into());
-                    risk_score = risk_score.saturating_add(20);
-                }
-            }
-        }
-
-        Ok(SimulationResult {
-            success: true,
-            gas_used: 0, // not applicable for Bitcoin
-            return_data: Vec::new(),
-            risk_flags,
-            risk_score,
-        })
+        Ok(simulate_utxo(params, config))
     }
 }
