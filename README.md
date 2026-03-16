@@ -180,7 +180,7 @@ cargo test --workspace     # 325 tests, ~4 seconds
 
 | Chain | Address Format | Signing | Dwellir |
 |-------|---------------|---------|:-------:|
-| Starknet | `0x` + 64 hex (251-bit field) | STARK curve (planned) | :white_check_mark: |
+| Starknet | `0x` + 64 hex (251-bit field) | STARK Threshold MPC | :white_check_mark: |
 
 > STARK curve threshold MPC signing now available via `StarkProtocol`.
 
