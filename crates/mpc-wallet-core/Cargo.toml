@@ -54,3 +54,8 @@ tracing = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 tempfile = "3"
+criterion = { workspace = true }
+
+[[bench]]
+name = "mpc_benchmarks"
+harness = false

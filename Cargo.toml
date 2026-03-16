@@ -69,6 +69,7 @@ rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 thiserror = "2"
 anyhow = "1"
+criterion = { version = "0.5", features = ["async_tokio"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
