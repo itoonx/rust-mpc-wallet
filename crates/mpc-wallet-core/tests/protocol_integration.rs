@@ -1,4 +1,4 @@
-use mpc_wallet_core::protocol::{MpcProtocol, MpcSignature};
+use mpc_wallet_core::protocol::{KeyShare, MpcProtocol, MpcSignature};
 use mpc_wallet_core::transport::local::LocalTransportNetwork;
 use mpc_wallet_core::types::{CryptoScheme, PartyId, ThresholdConfig};
 
@@ -154,6 +154,204 @@ async fn test_gg20_distributed_different_subsets() {
     sig_bytes[32..].copy_from_slice(s);
     vk.verify(message, &Signature::from_bytes(&sig_bytes.into()).unwrap())
         .expect("subset {1,3} signature must verify");
+}
+
+// ── GG20 key resharing tests (Epic H2) ──────────────────────────────────────
+
+/// GG20 reshare: 2-of-3 -> 2-of-4 (add party 4).
+///
+/// 1. Keygen 2-of-3 with parties {1,2,3}
+/// 2. Reshare to 2-of-4 with new parties {1,2,3,4} (all old signers participate)
+/// 3. Verify group pubkey unchanged
+/// 4. Sign with new parties {1,4} using new shares
+#[cfg(not(feature = "gg20-simulation"))]
+#[tokio::test]
+async fn test_gg20_reshare_add_party() {
+    use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+    // Step 1: Keygen 2-of-3
+    let shares = run_keygen(gg20_factory, 2, 3).await;
+    let original_gpk = shares[0].group_public_key.as_bytes().to_vec();
+
+    // Step 2: Reshare to 2-of-4, old signers = {1,2,3}, new parties = {1,2,3,4}
+    let old_signers: Vec<PartyId> = vec![PartyId(1), PartyId(2), PartyId(3)];
+    let new_config = ThresholdConfig::new(2, 4).unwrap();
+    let new_parties: Vec<PartyId> = vec![PartyId(1), PartyId(2), PartyId(3), PartyId(4)];
+
+    // Create a transport network that includes all parties (old + new = 4)
+    let net = LocalTransportNetwork::new(4);
+
+    let mut handles = Vec::new();
+    // Old parties (1,2,3) run reshare with their real shares
+    for i in 0..3 {
+        let share = shares[i].clone();
+        let transport = net.get_transport(share.party_id);
+        let protocol = gg20_factory();
+        let old_s = old_signers.clone();
+        let new_p = new_parties.clone();
+        handles.push(tokio::spawn(async move {
+            protocol
+                .reshare(&share, &old_s, new_config, &new_p, &*transport)
+                .await
+        }));
+    }
+    // New-only party (4) needs a dummy key share to pass to reshare
+    {
+        let dummy_share = KeyShare {
+            scheme: mpc_wallet_core::types::CryptoScheme::Gg20Ecdsa,
+            party_id: PartyId(4),
+            config: ThresholdConfig::new(2, 3).unwrap(),
+            group_public_key: shares[0].group_public_key.clone(),
+            share_data: zeroize::Zeroizing::new(vec![]),
+        };
+        let transport = net.get_transport(PartyId(4));
+        let protocol = gg20_factory();
+        let old_s = old_signers.clone();
+        let new_p = new_parties.clone();
+        handles.push(tokio::spawn(async move {
+            protocol
+                .reshare(&dummy_share, &old_s, new_config, &new_p, &*transport)
+                .await
+        }));
+    }
+
+    let mut new_shares = Vec::new();
+    for h in handles {
+        new_shares.push(h.await.unwrap().unwrap());
+    }
+
+    // Step 3: Verify group pubkey unchanged for all new parties
+    for share in &new_shares {
+        assert_eq!(
+            share.group_public_key.as_bytes(),
+            &original_gpk[..],
+            "group public key must be preserved after reshare"
+        );
+        assert_eq!(
+            share.config.threshold, 2,
+            "new threshold must be 2"
+        );
+        assert_eq!(
+            share.config.total_parties, 4,
+            "new total_parties must be 4"
+        );
+    }
+
+    // Step 4: Sign with new parties {1,4} using new shares
+    // new_shares[0] = party 1, new_shares[3] = party 4
+    let message = b"reshare test: sign with parties 1 and 4";
+    let sign_net = LocalTransportNetwork::new(4);
+    let signers = vec![PartyId(1), PartyId(4)];
+
+    let mut sign_handles = Vec::new();
+    for &idx in &[0usize, 3usize] {
+        let share = new_shares[idx].clone();
+        let transport = sign_net.get_transport(share.party_id);
+        let protocol = gg20_factory();
+        let signers_clone = signers.clone();
+        let msg = message.to_vec();
+        sign_handles.push(tokio::spawn(async move {
+            protocol
+                .sign(&share, &signers_clone, &msg, &*transport)
+                .await
+        }));
+    }
+
+    let mut sigs = Vec::new();
+    for h in sign_handles {
+        sigs.push(h.await.unwrap().unwrap());
+    }
+
+    // The coordinator (Party 1 = index 0) produces the canonical signature.
+    let MpcSignature::Ecdsa { r, s, recovery_id } = &sigs[0] else {
+        panic!("expected ECDSA signature from coordinator");
+    };
+    assert_eq!(r.len(), 32);
+    assert_eq!(s.len(), 32);
+    assert_ne!(*recovery_id, 0xff, "coordinator must return final signature");
+
+    // Cryptographic verification against original group pubkey.
+    let pubkey = k256::PublicKey::from_sec1_bytes(&original_gpk).unwrap();
+    let vk = VerifyingKey::from(&pubkey);
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(r);
+    sig_bytes[32..].copy_from_slice(s);
+    let sig = Signature::from_bytes(&sig_bytes.into()).unwrap();
+    vk.verify(message, &sig)
+        .expect("signature after reshare must verify against original group key");
+}
+
+/// GG20 reshare: 2-of-3 -> 3-of-3 (increase threshold, same parties).
+///
+/// 1. Keygen 2-of-3 with parties {1,2,3}
+/// 2. Reshare to 3-of-3 (all 3 parties stay, threshold increases)
+/// 3. Verify group pubkey unchanged
+/// 4. Sign with all 3 parties using new shares
+#[cfg(not(feature = "gg20-simulation"))]
+#[tokio::test]
+async fn test_gg20_reshare_change_threshold() {
+    use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+    // Step 1: Keygen 2-of-3
+    let shares = run_keygen(gg20_factory, 2, 3).await;
+    let original_gpk = shares[0].group_public_key.as_bytes().to_vec();
+
+    // Step 2: Reshare to 3-of-3
+    let old_signers: Vec<PartyId> = vec![PartyId(1), PartyId(2), PartyId(3)];
+    let new_config = ThresholdConfig::new(3, 3).unwrap();
+    let new_parties: Vec<PartyId> = vec![PartyId(1), PartyId(2), PartyId(3)];
+
+    let net = LocalTransportNetwork::new(3);
+
+    let mut handles = Vec::new();
+    for i in 0..3 {
+        let share = shares[i].clone();
+        let transport = net.get_transport(share.party_id);
+        let protocol = gg20_factory();
+        let old_s = old_signers.clone();
+        let new_p = new_parties.clone();
+        handles.push(tokio::spawn(async move {
+            protocol
+                .reshare(&share, &old_s, new_config, &new_p, &*transport)
+                .await
+        }));
+    }
+
+    let mut new_shares = Vec::new();
+    for h in handles {
+        new_shares.push(h.await.unwrap().unwrap());
+    }
+
+    // Step 3: Verify group pubkey unchanged
+    for share in &new_shares {
+        assert_eq!(
+            share.group_public_key.as_bytes(),
+            &original_gpk[..],
+            "group public key must be preserved after threshold change"
+        );
+        assert_eq!(share.config.threshold, 3);
+        assert_eq!(share.config.total_parties, 3);
+    }
+
+    // Step 4: Sign with all 3 parties (now 3-of-3 required)
+    let message = b"reshare test: sign after threshold change to 3-of-3";
+    let sigs = run_sign(gg20_factory, &new_shares, &[0, 1, 2], message).await;
+
+    let MpcSignature::Ecdsa { r, s, recovery_id } = &sigs[0] else {
+        panic!("expected ECDSA signature");
+    };
+    assert_eq!(r.len(), 32);
+    assert_eq!(s.len(), 32);
+    assert_ne!(*recovery_id, 0xff);
+
+    let pubkey = k256::PublicKey::from_sec1_bytes(&original_gpk).unwrap();
+    let vk = VerifyingKey::from(&pubkey);
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(r);
+    sig_bytes[32..].copy_from_slice(s);
+    let sig = Signature::from_bytes(&sig_bytes.into()).unwrap();
+    vk.verify(message, &sig)
+        .expect("signature after threshold change must verify against original group key");
 }
 
 // ── Simulation path (`gg20-simulation` ON — backward compat) ────────────────
