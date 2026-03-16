@@ -107,6 +107,15 @@ pub enum CoreError {
     #[error("audit error: {0}")]
     AuditError(String),
 
+    /// An EVM ECDSA signature has a high-S value that violates EIP-2 / low-S
+    /// canonicalization. Callers must normalise the signature before broadcasting.
+    ///
+    /// SEC-012: high-S signatures are rejected by many EVM infrastructure providers
+    /// and wallets. `finalize_evm_transaction` enforces low-S automatically; this
+    /// error is returned if the input MpcSignature cannot be normalised.
+    #[error("evm low-s violation: {0}")]
+    EvmLowS(String),
+
     /// A catch-all error variant for cases not covered by the more specific
     /// variants above. Prefer using a specific variant whenever possible so
     /// that callers can handle errors programmatically.
