@@ -45,7 +45,7 @@ Vaultex is a **Rust workspace** for building enterprise-grade **threshold multi-
 **Why Vaultex?**
 
 - **Zero single point of failure** — compromise 1 server, attacker gets nothing
-- **Multi-chain** — 32 blockchains: EVM L1s & L2s, Bitcoin, Solana, Sui, Aptos, Litecoin, Dogecoin, Zcash, Monero
+- **Multi-chain** — 50 blockchains across 8 ecosystems: EVM, Bitcoin, Substrate, Move, Cosmos, UTXO, TON/TRON, Starknet
 - **Enterprise controls** — RBAC, policy engine, approval workflows, audit trail
 - **Proactive security** — key refresh rotates shares without changing addresses
 
@@ -94,7 +94,7 @@ cargo test --workspace     # 325 tests, ~4 seconds
 
 ---
 
-## Supported Blockchains (32)
+## Supported Blockchains (50)
 
 ### EVM Chains (26)
 
