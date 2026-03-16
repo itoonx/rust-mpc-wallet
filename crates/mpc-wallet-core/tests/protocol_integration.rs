@@ -383,6 +383,53 @@ async fn test_frost_ed25519_different_signer_subsets() {
     }
 }
 
+// ============================================================================
+// Trait default method tests
+// ============================================================================
+
+/// Verify that the default `refresh` implementation returns an error.
+///
+/// All three protocol impls (GG20, FROST-secp256k1, FROST-Ed25519) inherit the
+/// default `refresh` stub which returns `CoreError::Protocol`. This test
+/// confirms the default is wired correctly so that future sprints can override
+/// it without breaking existing code.
+#[tokio::test]
+async fn test_refresh_default_returns_not_implemented() {
+    use mpc_wallet_core::protocol::KeyShare;
+    use mpc_wallet_core::protocol::GroupPublicKey;
+    use zeroize::Zeroizing;
+
+    let protocols: Vec<Box<dyn MpcProtocol>> = vec![
+        gg20_factory(),
+        frost_secp256k1_factory(),
+        frost_ed25519_factory(),
+    ];
+
+    let dummy_share = KeyShare {
+        scheme: mpc_wallet_core::types::CryptoScheme::Gg20Ecdsa,
+        party_id: PartyId(1),
+        config: mpc_wallet_core::types::ThresholdConfig::new(2, 3).unwrap(),
+        group_public_key: GroupPublicKey::Secp256k1(vec![2; 33]),
+        share_data: Zeroizing::new(vec![0; 32]),
+    };
+
+    let net = LocalTransportNetwork::new(3);
+    let transport = net.get_transport(PartyId(1));
+    let signers = [PartyId(1), PartyId(2)];
+
+    for protocol in &protocols {
+        let result = protocol
+            .refresh(&dummy_share, &signers, &*transport)
+            .await;
+        assert!(result.is_err(), "default refresh must return Err");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("refresh"),
+            "error should mention refresh: {err_msg}"
+        );
+    }
+}
+
 // ─── SEC-004 compile-time assertions ─────────────────────────────────────────
 // These functions verify at compile time that all share data structs implement
 // ZeroizeOnDrop. They are never called at runtime but will fail to compile if

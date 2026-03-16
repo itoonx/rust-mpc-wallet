@@ -79,6 +79,24 @@ pub struct SignedTransaction {
     pub tx_hash: String,
 }
 
+/// Result of a transaction simulation (dry-run).
+///
+/// Returned by [`ChainProvider::simulate_transaction`] when the simulation
+/// succeeds. A simulation failure (revert) returns `CoreError` instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimulationResult {
+    /// Whether the simulation succeeded (transaction would not revert).
+    pub success: bool,
+    /// Estimated gas usage (chain-specific; 0 for non-EVM chains).
+    pub gas_used: u64,
+    /// Return data from the simulation (e.g., decoded contract return value).
+    pub return_data: Vec<u8>,
+    /// Risk flags detected during simulation.
+    pub risk_flags: Vec<String>,
+    /// Risk score (0 = safe, 255 = maximum risk).
+    pub risk_score: u8,
+}
+
 /// Trait for chain-specific transaction building and signing.
 #[async_trait]
 pub trait ChainProvider: Send + Sync {
@@ -100,4 +118,26 @@ pub trait ChainProvider: Send + Sync {
         unsigned: &UnsignedTransaction,
         sig: &MpcSignature,
     ) -> Result<SignedTransaction, CoreError>;
+
+    /// Simulate a transaction before signing (Epic G1, FR-G.1).
+    ///
+    /// Performs a dry-run of the transaction to check for reverts, estimate
+    /// gas, detect proxy contracts, and compute a risk score.
+    ///
+    /// # Default implementation
+    /// Returns `CoreError::Other("simulation not implemented")` — chain
+    /// providers must override this to support simulation.
+    ///
+    /// # Arguments
+    /// - `params` — the same transaction parameters used for `build_transaction`.
+    async fn simulate_transaction(
+        &self,
+        params: &TransactionParams,
+    ) -> Result<SimulationResult, CoreError> {
+        let _ = params;
+        Err(CoreError::Other(format!(
+            "transaction simulation not implemented for {:?}",
+            self.chain()
+        )))
+    }
 }
