@@ -41,31 +41,10 @@ pub async fn run(args: ExportAddressArgs, format: OutputFormat) -> anyhow::Resul
     let share = store.load(&group_id, PartyId(1)).await?;
     let group_pubkey = &share.group_public_key;
 
-    // Get the chain provider
-    use mpc_wallet_chains::provider::ChainProvider;
-    let provider: Box<dyn ChainProvider> = match args.chain {
-        mpc_wallet_chains::provider::Chain::Ethereum => {
-            Box::new(mpc_wallet_chains::evm::EvmProvider::ethereum())
-        }
-        mpc_wallet_chains::provider::Chain::Polygon => {
-            Box::new(mpc_wallet_chains::evm::EvmProvider::polygon())
-        }
-        mpc_wallet_chains::provider::Chain::Bsc => {
-            Box::new(mpc_wallet_chains::evm::EvmProvider::bsc())
-        }
-        mpc_wallet_chains::provider::Chain::BitcoinMainnet => {
-            Box::new(mpc_wallet_chains::bitcoin::BitcoinProvider::mainnet())
-        }
-        mpc_wallet_chains::provider::Chain::BitcoinTestnet => {
-            Box::new(mpc_wallet_chains::bitcoin::BitcoinProvider::testnet())
-        }
-        mpc_wallet_chains::provider::Chain::Solana => {
-            Box::new(mpc_wallet_chains::solana::SolanaProvider::new())
-        }
-        mpc_wallet_chains::provider::Chain::Sui => {
-            Box::new(mpc_wallet_chains::sui::SuiProvider::new())
-        }
-    };
+    // Get the chain provider via registry
+    use mpc_wallet_chains::registry::ChainRegistry;
+    let registry = ChainRegistry::default_mainnet();
+    let provider = registry.provider(args.chain)?;
 
     let address = provider.derive_address(group_pubkey)?;
 
