@@ -344,6 +344,99 @@ impl AuditLedger {
     }
 }
 
+// ─── WORM Storage Configuration (Epic F4) ────────────────────────────────────
+
+/// WORM (Write Once Read Many) storage configuration for audit ledger persistence.
+///
+/// Supports S3 Object Lock (Governance or Compliance mode) and local
+/// append-only file storage for development/testing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WormStorageConfig {
+    /// Storage backend type.
+    pub backend: WormBackend,
+    /// Retention period in days (how long entries are immutable).
+    pub retention_days: u32,
+    /// Whether to encrypt entries at rest in WORM storage.
+    pub encrypt_at_rest: bool,
+}
+
+/// Supported WORM storage backends.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WormBackend {
+    /// AWS S3 with Object Lock.
+    S3ObjectLock {
+        /// S3 bucket name.
+        bucket: String,
+        /// AWS region (e.g., "us-east-1").
+        region: String,
+        /// Governance mode allows privileged delete; Compliance mode is truly immutable.
+        compliance_mode: bool,
+    },
+    /// Local file-based append-only log (for development/testing).
+    LocalAppendOnly {
+        /// Directory path for the append-only log files.
+        directory: String,
+    },
+}
+
+impl Default for WormStorageConfig {
+    fn default() -> Self {
+        Self {
+            backend: WormBackend::LocalAppendOnly {
+                directory: "./audit-worm".into(),
+            },
+            retention_days: 365,
+            encrypt_at_rest: true,
+        }
+    }
+}
+
+impl WormStorageConfig {
+    /// Create an S3 Object Lock configuration.
+    pub fn s3(bucket: &str, region: &str, compliance: bool) -> Self {
+        Self {
+            backend: WormBackend::S3ObjectLock {
+                bucket: bucket.into(),
+                region: region.into(),
+                compliance_mode: compliance,
+            },
+            retention_days: 2555, // 7 years (regulatory standard)
+            encrypt_at_rest: true,
+        }
+    }
+
+    /// Validate the configuration.
+    pub fn validate(&self) -> Result<(), CoreError> {
+        if self.retention_days == 0 {
+            return Err(CoreError::AuditError(
+                "retention_days must be > 0".into(),
+            ));
+        }
+        match &self.backend {
+            WormBackend::S3ObjectLock { bucket, region, .. } => {
+                if bucket.is_empty() {
+                    return Err(CoreError::AuditError(
+                        "S3 bucket name cannot be empty".into(),
+                    ));
+                }
+                if region.is_empty() {
+                    return Err(CoreError::AuditError(
+                        "S3 region cannot be empty".into(),
+                    ));
+                }
+            }
+            WormBackend::LocalAppendOnly { directory } => {
+                if directory.is_empty() {
+                    return Err(CoreError::AuditError(
+                        "directory path cannot be empty".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -546,5 +639,57 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&pack).unwrap();
         assert_eq!(v["entry_count"], 5);
         assert_eq!(v["entries"].as_array().unwrap().len(), 5);
+    }
+
+    // ─── WORM Storage tests (Epic F4) ────────────────────────────────────────
+
+    #[test]
+    fn test_worm_default_config() {
+        let config = WormStorageConfig::default();
+        assert_eq!(config.retention_days, 365);
+        assert!(config.encrypt_at_rest);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_worm_s3_config() {
+        let config = WormStorageConfig::s3("my-audit-bucket", "us-east-1", true);
+        assert_eq!(config.retention_days, 2555);
+        assert!(config.validate().is_ok());
+        match &config.backend {
+            WormBackend::S3ObjectLock {
+                compliance_mode, ..
+            } => assert!(compliance_mode),
+            _ => panic!("expected S3ObjectLock"),
+        }
+    }
+
+    #[test]
+    fn test_worm_zero_retention_rejected() {
+        let mut config = WormStorageConfig::default();
+        config.retention_days = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_worm_empty_bucket_rejected() {
+        let config = WormStorageConfig {
+            backend: WormBackend::S3ObjectLock {
+                bucket: "".into(),
+                region: "us-east-1".into(),
+                compliance_mode: false,
+            },
+            retention_days: 30,
+            encrypt_at_rest: true,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_worm_config_serialization() {
+        let config = WormStorageConfig::s3("bucket", "eu-west-1", false);
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: WormStorageConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.retention_days, 2555);
     }
 }
