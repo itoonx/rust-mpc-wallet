@@ -143,6 +143,88 @@ pub fn assess_quorum_risk(reports: &[NodeHealth], threshold: u16) -> QuorumRisk 
     }
 }
 
+// ─── RPC Failover (Epic I3) ──────────────────────────────────────────────────
+
+/// RPC endpoint with priority for failover ordering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RpcEndpoint {
+    pub url: String,
+    pub provider: String,
+    pub priority: u8,
+    pub healthy: bool,
+}
+
+/// RPC failover pool — tries endpoints in priority order.
+pub struct RpcFailoverPool {
+    endpoints: Vec<RpcEndpoint>,
+}
+
+impl RpcFailoverPool {
+    pub fn new(mut endpoints: Vec<RpcEndpoint>) -> Self {
+        endpoints.sort_by_key(|e| e.priority);
+        Self { endpoints }
+    }
+
+    /// Get the next healthy endpoint. Returns None if all are unhealthy.
+    pub fn next_healthy(&self) -> Option<&RpcEndpoint> {
+        self.endpoints.iter().find(|e| e.healthy)
+    }
+
+    /// Mark an endpoint as unhealthy (after failure).
+    pub fn mark_unhealthy(&mut self, url: &str) {
+        if let Some(ep) = self.endpoints.iter_mut().find(|e| e.url == url) {
+            ep.healthy = false;
+        }
+    }
+
+    /// Mark an endpoint as healthy (after recovery).
+    pub fn mark_healthy(&mut self, url: &str) {
+        if let Some(ep) = self.endpoints.iter_mut().find(|e| e.url == url) {
+            ep.healthy = true;
+        }
+    }
+
+    /// Get all endpoints.
+    pub fn endpoints(&self) -> &[RpcEndpoint] {
+        &self.endpoints
+    }
+
+    /// Count healthy endpoints.
+    pub fn healthy_count(&self) -> usize {
+        self.endpoints.iter().filter(|e| e.healthy).count()
+    }
+}
+
+// ─── Chaos Test Framework (Epic I4) ──────────────────────────────────────────
+
+/// Chaos scenario for testing resilience.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ChaosScenario {
+    /// Kill a specific party (simulate crash).
+    KillParty(PartyId),
+    /// Partition network: these parties cannot communicate with each other.
+    NetworkPartition(Vec<PartyId>, Vec<PartyId>),
+    /// Delay messages from a party by N milliseconds.
+    DelayMessages { party: PartyId, delay_ms: u64 },
+    /// Corrupt messages from a party (flip random bytes).
+    CorruptMessages(PartyId),
+}
+
+/// Result of running a chaos scenario.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChaosResult {
+    pub scenario: String,
+    pub protocol_completed: bool,
+    pub error: Option<String>,
+    pub duration_ms: u64,
+}
+
+/// Evaluate whether the system can tolerate a set of party failures.
+pub fn can_tolerate_failures(threshold: u16, total_parties: u16, failed_parties: u16) -> bool {
+    let healthy = total_parties.saturating_sub(failed_parties);
+    healthy >= threshold
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,5 +376,64 @@ mod tests {
         let risk = assess_quorum_risk(&reports, 2);
         assert!(!risk.quorum_available);
         assert_eq!(risk.risk_level, 2);
+    }
+
+    // ─── RPC Failover tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_rpc_failover_returns_highest_priority_healthy() {
+        let pool = RpcFailoverPool::new(vec![
+            RpcEndpoint { url: "http://primary".into(), provider: "alchemy".into(), priority: 1, healthy: true },
+            RpcEndpoint { url: "http://backup".into(), provider: "infura".into(), priority: 2, healthy: true },
+        ]);
+        assert_eq!(pool.next_healthy().unwrap().url, "http://primary");
+    }
+
+    #[test]
+    fn test_rpc_failover_skips_unhealthy() {
+        let mut pool = RpcFailoverPool::new(vec![
+            RpcEndpoint { url: "http://primary".into(), provider: "alchemy".into(), priority: 1, healthy: true },
+            RpcEndpoint { url: "http://backup".into(), provider: "infura".into(), priority: 2, healthy: true },
+        ]);
+        pool.mark_unhealthy("http://primary");
+        assert_eq!(pool.next_healthy().unwrap().url, "http://backup");
+    }
+
+    #[test]
+    fn test_rpc_failover_all_unhealthy_returns_none() {
+        let mut pool = RpcFailoverPool::new(vec![
+            RpcEndpoint { url: "http://a".into(), provider: "x".into(), priority: 1, healthy: true },
+        ]);
+        pool.mark_unhealthy("http://a");
+        assert!(pool.next_healthy().is_none());
+    }
+
+    #[test]
+    fn test_rpc_failover_recovery() {
+        let mut pool = RpcFailoverPool::new(vec![
+            RpcEndpoint { url: "http://a".into(), provider: "x".into(), priority: 1, healthy: true },
+        ]);
+        pool.mark_unhealthy("http://a");
+        assert!(pool.next_healthy().is_none());
+        pool.mark_healthy("http://a");
+        assert!(pool.next_healthy().is_some());
+    }
+
+    // ─── Chaos tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_can_tolerate_failures_2_of_3() {
+        assert!(can_tolerate_failures(2, 3, 1));  // 1 failure ok
+        assert!(!can_tolerate_failures(2, 3, 2)); // 2 failures = no quorum
+    }
+
+    #[test]
+    fn test_healthy_count() {
+        let pool = RpcFailoverPool::new(vec![
+            RpcEndpoint { url: "a".into(), provider: "x".into(), priority: 1, healthy: true },
+            RpcEndpoint { url: "b".into(), provider: "y".into(), priority: 2, healthy: false },
+            RpcEndpoint { url: "c".into(), provider: "z".into(), priority: 3, healthy: true },
+        ]);
+        assert_eq!(pool.healthy_count(), 2);
     }
 }
