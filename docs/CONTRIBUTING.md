@@ -6,8 +6,8 @@ We welcome contributions from humans and LLMs alike.
 
 ```bash
 # 1. Fork & clone
-git clone https://github.com/<you>/rust-mpc-wallet.git
-cd rust-mpc-wallet
+git clone https://github.com/<you>/vaultex-mpc-rust.git
+cd vaultex-mpc-rust
 
 # 2. Create a feature branch
 git checkout -b feat/your-feature

@@ -85,5 +85,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SEC-015: Debug leaks share bytes → manual Debug with `[REDACTED]`
 - SEC-016: Bitcoin unwrap → proper error propagation
 
-[Unreleased]: https://github.com/itoonx/rust-mpc-wallet/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/itoonx/rust-mpc-wallet/releases/tag/v0.1.0
+[Unreleased]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/itoonx/vaultex-mpc-rust/releases/tag/v0.1.0

@@ -14,7 +14,7 @@
 
 EVM (22 chains) | Bitcoin | Solana | Sui | Aptos | Litecoin | Dogecoin | Zcash | Monero | 32 chains total
 
-[![CI](https://github.com/itoonx/rust-mpc-wallet/actions/workflows/ci.yml/badge.svg)](https://github.com/itoonx/rust-mpc-wallet/actions/workflows/ci.yml)
+[![CI](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
@@ -54,8 +54,8 @@ Vaultex is a **Rust workspace** for building enterprise-grade **threshold multi-
 ## Quickstart
 
 ```bash
-git clone https://github.com/itoonx/rust-mpc-wallet.git
-cd rust-mpc-wallet
+git clone https://github.com/itoonx/vaultex-mpc-rust.git
+cd vaultex-mpc-rust
 
 cargo test --workspace     # 272 tests, ~4 seconds
 ./scripts/demo.sh          # interactive end-to-end demo

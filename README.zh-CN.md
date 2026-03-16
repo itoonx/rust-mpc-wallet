@@ -14,7 +14,7 @@
 
 EVM | Bitcoin | Solana | Sui
 
-[![CI](https://github.com/itoonx/rust-mpc-wallet/actions/workflows/ci.yml/badge.svg)](https://github.com/itoonx/rust-mpc-wallet/actions/workflows/ci.yml)
+[![CI](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/itoonx/vaultex-mpc-rust/actions/workflows/ci.yml)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
@@ -54,8 +54,8 @@ Vaultex 是一个用 **Rust** 构建的企业级**门限多方计算 (MPC) 钱�
 ## 快速开始
 
 ```bash
-git clone https://github.com/itoonx/rust-mpc-wallet.git
-cd rust-mpc-wallet
+git clone https://github.com/itoonx/vaultex-mpc-rust.git
+cd vaultex-mpc-rust
 
 cargo test --workspace     # 233 个测试，约 4 秒
 ./scripts/demo.sh          # 交互式端到端演示

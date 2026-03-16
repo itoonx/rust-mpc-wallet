@@ -41,8 +41,8 @@ Complete guide to the `mpc-wallet` command-line tool.
 
 ```bash
 # Clone the repository
-git clone https://github.com/itoonx/rust-mpc-wallet.git
-cd rust-mpc-wallet
+git clone https://github.com/itoonx/vaultex-mpc-rust.git
+cd vaultex-mpc-rust
 
 # Build in release mode
 cargo build --release
