@@ -26,6 +26,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use crate::config::AppConfig;
 use crate::middleware::auth::auth_middleware;
 use crate::middleware::hmac::hmac_middleware;
+use crate::routes::auth::AuthRouteState;
 use crate::state::AppState;
 
 #[tokio::main]
@@ -59,7 +60,18 @@ async fn main() {
 
 /// Build the Axum router with all routes and security layers.
 pub fn build_router(state: AppState, cors_origins: &[String]) -> Router {
-    // Public routes (no auth required) — only health and chains listing.
+    // Auth handshake routes (no auth required — this IS the auth flow).
+    let auth_state = AuthRouteState {
+        app: state.clone(),
+        pending: crate::routes::auth::PendingHandshakes::new(),
+    };
+    let auth_routes = Router::new()
+        .route("/v1/auth/hello", post(routes::auth::auth_hello))
+        .route("/v1/auth/verify", post(routes::auth::auth_verify))
+        .route("/v1/auth/revoked-keys", get(routes::auth::revoked_keys))
+        .with_state(auth_state);
+
+    // Public routes (no auth required) — health, chains, and auth handshake.
     let public_routes = Router::new()
         .route("/v1/health", get(routes::health::health))
         .route("/v1/chains", get(routes::chains::list_chains));
@@ -122,6 +134,7 @@ pub fn build_router(state: AppState, cors_origins: &[String]) -> Router {
     };
 
     Router::new()
+        .merge(auth_routes)
         .merge(public_routes)
         .merge(protected_routes)
         .layer(CompressionLayer::new())
@@ -424,6 +437,182 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── Handshake endpoints ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_auth_hello_endpoint() {
+        let app = test_router();
+        let client_eph = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let client_eph_pub = x25519_dalek::PublicKey::from(&client_eph);
+        let mut nonce = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let body = serde_json::to_string(&serde_json::json!({
+            "protocol_version": "mpc-wallet-auth-v1",
+            "supported_kex": ["x25519"],
+            "supported_sig": ["ed25519"],
+            "client_ephemeral_pubkey": hex::encode(client_eph_pub.as_bytes()),
+            "client_nonce": hex::encode(nonce),
+            "timestamp": now,
+            "client_key_id": "0000000000000000"
+        }))
+        .unwrap();
+
+        let req = Request::builder()
+            .uri("/v1/auth/hello")
+            .method("POST")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["success"].as_bool().unwrap());
+        assert_eq!(
+            json["data"]["protocol_version"].as_str().unwrap(),
+            "mpc-wallet-auth-v1"
+        );
+        assert!(!json["data"]["server_signature"]
+            .as_str()
+            .unwrap()
+            .is_empty());
+        assert!(!json["data"]["server_challenge"]
+            .as_str()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_auth_hello_wrong_version_rejected() {
+        let app = test_router();
+        let body = serde_json::to_string(&serde_json::json!({
+            "protocol_version": "wrong-v999",
+            "supported_kex": ["x25519"],
+            "supported_sig": ["ed25519"],
+            "client_ephemeral_pubkey": "00".repeat(32),
+            "client_nonce": "00".repeat(32),
+            "timestamp": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+            "client_key_id": "0000000000000000"
+        }))
+        .unwrap();
+
+        let req = Request::builder()
+            .uri("/v1/auth/hello")
+            .method("POST")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_auth_revoked_keys_endpoint() {
+        let app = test_router();
+        let req = Request::builder()
+            .uri("/v1/auth/revoked-keys")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_handshake_then_session_token_auth() {
+        use crate::auth::handshake::ServerHandshake;
+        use crate::auth::types::*;
+
+        let state = test_state();
+
+        // Run handshake directly (tested in handshake.rs unit tests).
+        let mut key_bytes = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key_bytes);
+        let client_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+        let client_eph = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
+        let client_eph_pub = x25519_dalek::PublicKey::from(&client_eph);
+
+        let mut nonce = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let client_key_id = hex::encode(&client_key.verifying_key().to_bytes()[..8]);
+
+        let client_hello = ClientHello {
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            supported_kex: vec![KeyExchangeAlgorithm::X25519],
+            supported_sig: vec![SignatureAlgorithm::Ed25519],
+            client_ephemeral_pubkey: hex::encode(client_eph_pub.as_bytes()),
+            client_nonce: hex::encode(nonce),
+            timestamp: now,
+            client_key_id: client_key_id.clone(),
+        };
+
+        let mut hs = ServerHandshake::new(state.server_signing_key.as_ref().clone());
+        let server_hello = hs.process_client_hello(&client_hello).unwrap();
+
+        // Build client auth (same transcript logic as handshake unit tests).
+        use sha2::{Digest, Sha256};
+        let mut transcript = Sha256::new();
+        transcript.update(serde_json::to_vec(&client_hello).unwrap());
+        let sh_t = serde_json::json!({
+            "protocol_version": server_hello.protocol_version,
+            "selected_kex": server_hello.selected_kex,
+            "selected_sig": server_hello.selected_sig,
+            "selected_aead": server_hello.selected_aead,
+            "server_ephemeral_pubkey": server_hello.server_ephemeral_pubkey,
+            "server_nonce": server_hello.server_nonce,
+            "server_challenge": server_hello.server_challenge,
+            "timestamp": server_hello.timestamp,
+            "server_key_id": server_hello.server_key_id,
+        });
+        transcript.update(serde_json::to_vec(&sh_t).unwrap());
+        let cpk = hex::encode(client_key.verifying_key().to_bytes());
+        transcript
+            .update(serde_json::to_vec(&serde_json::json!({"client_static_pubkey": cpk})).unwrap());
+        use ed25519_dalek::Signer;
+        let sig = client_key.sign(&transcript.finalize());
+        let client_auth = ClientAuth {
+            client_signature: hex::encode(sig.to_bytes()),
+            client_static_pubkey: cpk,
+        };
+
+        let session = hs.process_client_auth(&client_auth, &client_hello).unwrap();
+        let session_id = session.session_id.clone();
+        assert_eq!(session.client_key_id, client_key_id);
+
+        // Store session.
+        state.session_store.store(session).await;
+
+        // Verify session token works in auth middleware.
+        let protected = Router::new()
+            .route("/v1/wallets", get(routes::wallets::list_wallets))
+            .layer(axum_mw::from_fn_with_state(state.clone(), auth_middleware))
+            .with_state(state);
+        let req = Request::builder()
+            .uri("/v1/wallets")
+            .method("GET")
+            .header("x-session-token", &session_id)
+            .body(Body::empty())
+            .unwrap();
+        let resp = protected.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "session token auth should work"
+        );
     }
 
     // ── Schema validation ─────────────────────────────────────────
