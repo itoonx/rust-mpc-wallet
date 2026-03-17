@@ -293,6 +293,14 @@ pub struct SignAuditRecord {
     pub duration_ms: Option<u64>,
 }
 
+/// Get current UNIX timestamp in seconds.
+pub fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 /// Get current UNIX timestamp in milliseconds.
 pub fn unix_now_ms() -> u64 {
     std::time::SystemTime::now()

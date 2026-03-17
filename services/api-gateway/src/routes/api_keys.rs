@@ -75,15 +75,14 @@ pub async fn create_api_key(
 > {
     require_admin(&ctx)?;
 
-    // Validate role.
-    let valid_roles = ["admin", "initiator", "approver", "viewer"];
-    if !valid_roles.contains(&req.role.as_str()) {
+    // Validate role against known variants.
+    if !crate::auth::types::VALID_ROLES.contains(&req.role.as_str()) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::err(format!(
                 "invalid role '{}' — must be one of: {}",
                 req.role,
-                valid_roles.join(", ")
+                crate::auth::types::VALID_ROLES.join(", ")
             ))),
         ));
     }

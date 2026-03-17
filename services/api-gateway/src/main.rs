@@ -71,19 +71,22 @@ mod tests {
     use mpc_wallet_api::middleware::hmac::compute_signature;
     use mpc_wallet_api::routes;
 
-    fn test_state() -> AppState {
-        AppState::from_config(&AppConfig::for_test())
+    async fn test_state() -> AppState {
+        let config = AppConfig::for_test();
+        let state = AppState::from_config(&config);
+        state.api_key_store.load_static_keys(&config.api_keys).await;
+        state
     }
 
-    fn test_router() -> Router {
-        build_router(test_state(), &[])
+    async fn test_router() -> Router {
+        build_router(test_state().await, &[])
     }
 
     // ── Public endpoints ──────────────────────────────────────────
 
     #[tokio::test]
     async fn test_health_endpoint() {
-        let app = test_router();
+        let app = test_router().await;
         let req = Request::builder()
             .uri("/v1/health")
             .body(Body::empty())
@@ -94,7 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chains_endpoint() {
-        let app = test_router();
+        let app = test_router().await;
         let req = Request::builder()
             .uri("/v1/chains")
             .body(Body::empty())
@@ -114,7 +117,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_protected_endpoint_requires_auth() {
-        let app = test_router();
+        let app = test_router().await;
         let req = Request::builder()
             .uri("/v1/wallets")
             .method("GET")
@@ -126,7 +129,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_api_key_rejected() {
-        let app = test_router();
+        let app = test_router().await;
         let req = Request::builder()
             .uri("/v1/wallets")
             .method("GET")
@@ -139,7 +142,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_error_message_is_sanitized() {
-        let app = test_router();
+        let app = test_router().await;
         let req = Request::builder()
             .uri("/v1/wallets")
             .method("GET")
@@ -158,7 +161,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_admin_key_can_list_wallets() {
-        let app = test_router();
+        let app = test_router().await;
         let req = Request::builder()
             .uri("/v1/wallets")
             .method("GET")
@@ -171,7 +174,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_viewer_key_can_list_wallets() {
-        let app = test_router();
+        let app = test_router().await;
         let req = Request::builder()
             .uri("/v1/wallets")
             .method("GET")
@@ -186,7 +189,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_viewer_key_cannot_create_wallet() {
-        let app = test_router();
+        let app = test_router().await;
         let body = serde_json::to_string(&serde_json::json!({
             "label": "test", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
         }))
@@ -217,7 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_viewer_key_cannot_sign() {
-        let app = test_router();
+        let app = test_router().await;
         let body = serde_json::to_string(&serde_json::json!({
             "message": "deadbeef"
         }))
@@ -248,7 +251,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_initiator_key_can_sign_attempt() {
-        let app = test_router();
+        let app = test_router().await;
         let body = serde_json::to_string(&serde_json::json!({
             "message": "deadbeef"
         }))
@@ -281,7 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_without_hmac_rejected() {
-        let app = test_router();
+        let app = test_router().await;
         let body = serde_json::to_string(&serde_json::json!({
             "label": "test", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
         }))
@@ -299,7 +302,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_post_with_wrong_hmac_rejected() {
-        let app = test_router();
+        let app = test_router().await;
         let body = serde_json::to_string(&serde_json::json!({
             "label": "test", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
         }))
@@ -328,7 +331,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics_requires_auth() {
-        let app = test_router();
+        let app = test_router().await;
         let req = Request::builder()
             .uri("/v1/metrics")
             .body(Body::empty())
@@ -339,7 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_metrics_with_auth() {
-        let app = test_router();
+        let app = test_router().await;
         let req = Request::builder()
             .uri("/v1/metrics")
             .header("x-api-key", "test-viewer-key")
@@ -353,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_hello_endpoint() {
-        let app = test_router();
+        let app = test_router().await;
         let client_eph = x25519_dalek::StaticSecret::random_from_rng(rand::rngs::OsRng);
         let client_eph_pub = x25519_dalek::PublicKey::from(&client_eph);
         let mut nonce = [0u8; 32];
@@ -404,7 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_hello_wrong_version_rejected() {
-        let app = test_router();
+        let app = test_router().await;
         let body = serde_json::to_string(&serde_json::json!({
             "protocol_version": "wrong-v999",
             "supported_kex": ["x25519"],
@@ -429,7 +432,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_revoked_keys_endpoint() {
-        let app = test_router();
+        let app = test_router().await;
         let req = Request::builder()
             .uri("/v1/auth/revoked-keys")
             .body(Body::empty())
@@ -440,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handshake_then_session_token_auth() {
-        let state = test_state();
+        let state = test_state().await;
 
         let mut key_bytes = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key_bytes);
@@ -522,7 +525,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simulate_invalid_chain() {
-        let app = test_router();
+        let app = test_router().await;
         let body = serde_json::to_string(&serde_json::json!({
             "chain": "invalid-chain", "to": "0x1234", "value": "0"
         }))

@@ -152,10 +152,7 @@ impl SignAuthorization {
             })?;
 
         // 3. Check freshness (not expired).
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = super::request_context::unix_now_secs();
         if now.abs_diff(self.payload.timestamp) > MAX_AUTHORIZATION_AGE_SECS {
             return Err(CoreError::Protocol(format!(
                 "sign authorization expired: age {}s > max {}s",

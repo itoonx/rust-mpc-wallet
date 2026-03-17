@@ -9,17 +9,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use hmac::{Hmac, Mac};
 use serde::Serialize;
-use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 
 use mpc_wallet_core::rbac::{AbacAttributes, ApiRole, AuthContext};
 
-use super::types::{parse_role, unix_now};
-
-type HmacSha256 = Hmac<Sha256>;
+use super::types::{compute_hmac_sha256, parse_role, unix_now};
 
 /// Origin of an API key.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -216,10 +212,7 @@ impl ApiKeyStore {
     }
 
     fn compute_hash(&self, raw_key: &str) -> [u8; 32] {
-        let mut mac =
-            HmacSha256::new_from_slice(&self.hmac_key).expect("HMAC can take key of any size");
-        mac.update(raw_key.as_bytes());
-        mac.finalize().into_bytes().into()
+        compute_hmac_sha256(&self.hmac_key, raw_key)
     }
 }
 

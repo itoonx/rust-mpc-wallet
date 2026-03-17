@@ -41,15 +41,16 @@ mod helpers {
     use super::*;
 
     /// Create AppState + Router for integration testing.
-    pub fn test_app() -> (axum::Router, mpc_wallet_api::state::AppState) {
+    pub async fn test_app() -> (axum::Router, mpc_wallet_api::state::AppState) {
         let config = mpc_wallet_api::config::AppConfig::for_test();
         let state = mpc_wallet_api::state::AppState::from_config(&config);
+        state.api_key_store.load_static_keys(&config.api_keys).await;
         let router = build_router(state.clone(), &[]);
         (router, state)
     }
 
-    pub fn test_router() -> axum::Router {
-        test_app().0
+    pub async fn test_router() -> axum::Router {
+        test_app().await.0
     }
 
     /// Perform a full valid handshake via HTTP and return the session token.
@@ -138,7 +139,7 @@ use helpers::*;
 
 #[tokio::test]
 async fn test_e2e_handshake_then_protected_access() {
-    let (router, state) = test_app();
+    let (router, state) = test_app().await;
     let (session_token, _client_key) = handshake_via_http(&state).await;
 
     let req = Request::builder()
@@ -193,7 +194,7 @@ async fn test_e2e_client_server_key_agreement() {
 
 #[tokio::test]
 async fn test_e2e_full_http_hello_verify_flow() {
-    let app = test_router();
+    let app = test_router().await;
 
     let client_key = gen_ed25519_key();
     let client_eph = X25519Secret::random_from_rng(rand::rngs::OsRng);
@@ -219,7 +220,7 @@ async fn test_e2e_full_http_hello_verify_flow() {
 #[tokio::test]
 async fn test_e2e_full_http_hello_verify_session_protected() {
     // Complete E2E flow via HTTP: hello → verify → use session token on protected route.
-    let (app, _state) = test_app();
+    let (app, _state) = test_app().await;
 
     let client_key = gen_ed25519_key();
     let client = HandshakeClient::new(client_key.clone(), None);
@@ -300,7 +301,7 @@ async fn test_e2e_full_http_hello_verify_session_protected() {
 
 #[tokio::test]
 async fn test_rate_limit_on_handshake() {
-    let (app, _state) = test_app();
+    let (app, _state) = test_app().await;
 
     let client_key = gen_ed25519_key();
     let eph_pub = X25519Public::from(&X25519Secret::random_from_rng(rand::rngs::OsRng));
@@ -324,7 +325,7 @@ async fn test_rate_limit_on_handshake() {
 
 #[tokio::test]
 async fn test_dynamic_key_revocation() {
-    let (app, _state) = test_app();
+    let (app, _state) = test_app().await;
 
     // Revoke a key dynamically.
     let body = serde_json::to_string(&serde_json::json!({
@@ -380,7 +381,7 @@ async fn test_session_store_capacity_limit() {
 
 #[tokio::test]
 async fn test_replay_same_nonce_rejected() {
-    let (router, _state) = test_app();
+    let (router, _state) = test_app().await;
 
     let client_key = gen_ed25519_key();
     let eph = X25519Secret::random_from_rng(rand::rngs::OsRng);
@@ -409,7 +410,7 @@ async fn test_replay_same_nonce_rejected() {
 async fn test_replay_verify_with_consumed_challenge() {
     // After a verify completes, the challenge is consumed.
     // ATTACK: Try to re-use the same challenge to establish another session.
-    let (_router, state) = test_app();
+    let (_router, state) = test_app().await;
 
     let client_key = gen_ed25519_key();
     let client = HandshakeClient::new(client_key.clone(), None);
@@ -485,7 +486,7 @@ async fn test_replay_verify_with_consumed_challenge() {
 
 #[tokio::test]
 async fn test_hmac_replay_same_signature_stale_timestamp() {
-    let app = test_router();
+    let app = test_router().await;
 
     let body = serde_json::to_string(&serde_json::json!({
         "label": "test", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
@@ -521,7 +522,7 @@ async fn test_hmac_replay_same_signature_stale_timestamp() {
 
 #[tokio::test]
 async fn test_hmac_replay_future_timestamp() {
-    let app = test_router();
+    let app = test_router().await;
 
     let body = serde_json::to_string(&serde_json::json!({
         "label": "test", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
@@ -561,7 +562,7 @@ async fn test_hmac_replay_future_timestamp() {
 
 #[tokio::test]
 async fn test_handshake_timestamp_31s_in_past_rejected() {
-    let app = test_router();
+    let app = test_router().await;
 
     let client_key = gen_ed25519_key();
     let eph = X25519Secret::random_from_rng(rand::rngs::OsRng);
@@ -580,7 +581,7 @@ async fn test_handshake_timestamp_31s_in_past_rejected() {
 
 #[tokio::test]
 async fn test_handshake_timestamp_30s_in_past_accepted() {
-    let app = test_router();
+    let app = test_router().await;
 
     let client_key = gen_ed25519_key();
     let eph = X25519Secret::random_from_rng(rand::rngs::OsRng);
@@ -600,7 +601,7 @@ async fn test_handshake_timestamp_30s_in_past_accepted() {
 
 #[tokio::test]
 async fn test_handshake_timestamp_zero_rejected() {
-    let app = test_router();
+    let app = test_router().await;
 
     let client_key = gen_ed25519_key();
     let eph = X25519Secret::random_from_rng(rand::rngs::OsRng);
@@ -624,7 +625,7 @@ async fn test_handshake_timestamp_zero_rejected() {
 
 #[tokio::test]
 async fn test_verify_with_forged_signature() {
-    let app = test_router();
+    let app = test_router().await;
 
     let client_key = gen_ed25519_key();
     let client = HandshakeClient::new(client_key.clone(), None);
@@ -661,7 +662,7 @@ async fn test_verify_with_forged_signature() {
 async fn test_verify_with_different_key_signature() {
     // ATTACK: Sign the transcript with a DIFFERENT Ed25519 key than the one
     // claimed in client_static_pubkey.
-    let app = test_router();
+    let app = test_router().await;
 
     let legitimate_key = gen_ed25519_key();
     let attacker_key = gen_ed25519_key();
@@ -706,7 +707,7 @@ async fn test_verify_with_different_key_signature() {
 async fn test_verify_with_wrong_pubkey_but_correct_sig() {
     // ATTACK: Provide a valid signature from attacker_key, but claim
     // the pubkey is the attacker's (key_id won't match the original hello).
-    let app = test_router();
+    let app = test_router().await;
 
     let original_key = gen_ed25519_key();
     let attacker_key = gen_ed25519_key();
@@ -748,7 +749,7 @@ async fn test_verify_with_wrong_pubkey_but_correct_sig() {
 
 #[tokio::test]
 async fn test_verify_truncated_signature() {
-    let app = test_router();
+    let app = test_router().await;
 
     let client_key = gen_ed25519_key();
     let client = HandshakeClient::new(client_key.clone(), None);
@@ -782,7 +783,7 @@ async fn test_verify_truncated_signature() {
 
 #[tokio::test]
 async fn test_verify_all_zeros_signature() {
-    let app = test_router();
+    let app = test_router().await;
 
     let client_key = gen_ed25519_key();
     let client = HandshakeClient::new(client_key.clone(), None);
@@ -885,7 +886,7 @@ async fn test_key_id_spoofing_rejected() {
 #[tokio::test]
 async fn test_forward_secrecy_unique_keys_per_session() {
     // Different sessions with the same client key must produce different session keys.
-    let (_router, state) = test_app();
+    let (_router, state) = test_app().await;
     let client_key = gen_ed25519_key();
 
     let token1 = handshake_via_http_with_key(&state, &client_key).await;
@@ -907,7 +908,7 @@ async fn test_forward_secrecy_unique_keys_per_session() {
 #[tokio::test]
 async fn test_all_zeros_ephemeral_pubkey_handled() {
     // ATTACK: Use all-zeros ephemeral pubkey (low-order point).
-    let app = test_router();
+    let app = test_router().await;
 
     let client_key = gen_ed25519_key();
     let nonce = random_nonce();
@@ -943,7 +944,7 @@ async fn test_all_zeros_ephemeral_pubkey_handled() {
 
 #[tokio::test]
 async fn test_expired_session_rejected() {
-    let (router, state) = test_app();
+    let (router, state) = test_app().await;
 
     // Create a session that's already expired.
     let session = AuthenticatedSession {
@@ -973,7 +974,7 @@ async fn test_expired_session_rejected() {
 
 #[tokio::test]
 async fn test_nonexistent_session_token_rejected() {
-    let app = test_router();
+    let app = test_router().await;
 
     let req = Request::builder()
         .uri("/v1/wallets")
@@ -991,7 +992,7 @@ async fn test_nonexistent_session_token_rejected() {
 
 #[tokio::test]
 async fn test_session_revocation() {
-    let (router, state) = test_app();
+    let (router, state) = test_app().await;
     let (session_token, _) = handshake_via_http(&state).await;
 
     // Verify it works before revocation.
@@ -1024,7 +1025,7 @@ async fn test_session_revocation() {
 
 #[tokio::test]
 async fn test_refresh_expired_session_fails() {
-    let app = test_router();
+    let app = test_router().await;
 
     let body = serde_json::to_string(&serde_json::json!({
         "session_token": "does-not-exist-12345"
@@ -1074,7 +1075,7 @@ async fn test_refresh_valid_session_extends_ttl() {
 #[tokio::test]
 async fn test_session_token_is_opaque() {
     // Session tokens should not contain exploitable structure.
-    let (_router, state) = test_app();
+    let (_router, state) = test_app().await;
     let (token, _) = handshake_via_http(&state).await;
 
     // Token should be hex-encoded (no special chars).
@@ -1091,7 +1092,7 @@ async fn test_session_token_is_opaque() {
 
 #[tokio::test]
 async fn test_unsupported_kex_algorithm_rejected() {
-    let app = test_router();
+    let app = test_router().await;
 
     let client_key = gen_ed25519_key();
     let eph_pub = X25519Public::from(&X25519Secret::random_from_rng(rand::rngs::OsRng));
@@ -1124,7 +1125,7 @@ async fn test_unsupported_kex_algorithm_rejected() {
 
 #[tokio::test]
 async fn test_wrong_protocol_version_rejected() {
-    let app = test_router();
+    let app = test_router().await;
 
     let body = serde_json::to_string(&serde_json::json!({
         "protocol_version": "mpc-wallet-auth-v0",  // Old/wrong version
@@ -1148,7 +1149,7 @@ async fn test_wrong_protocol_version_rejected() {
 
 #[tokio::test]
 async fn test_hello_empty_body_rejected() {
-    let app = test_router();
+    let app = test_router().await;
 
     let req = Request::builder()
         .uri("/v1/auth/hello")
@@ -1162,7 +1163,7 @@ async fn test_hello_empty_body_rejected() {
 
 #[tokio::test]
 async fn test_hello_invalid_json_rejected() {
-    let app = test_router();
+    let app = test_router().await;
 
     let req = Request::builder()
         .uri("/v1/auth/hello")
@@ -1179,7 +1180,7 @@ async fn test_hello_invalid_json_rejected() {
 
 #[tokio::test]
 async fn test_hello_oversized_nonce_rejected() {
-    let app = test_router();
+    let app = test_router().await;
 
     let client_key = gen_ed25519_key();
     let eph_pub = X25519Public::from(&X25519Secret::random_from_rng(rand::rngs::OsRng));
@@ -1208,7 +1209,7 @@ async fn test_hello_oversized_nonce_rejected() {
 
 #[tokio::test]
 async fn test_hello_short_ephemeral_key_rejected() {
-    let app = test_router();
+    let app = test_router().await;
 
     let client_key = gen_ed25519_key();
     let client_key_id = hex::encode(&client_key.verifying_key().to_bytes()[..8]);
@@ -1236,7 +1237,7 @@ async fn test_hello_short_ephemeral_key_rejected() {
 
 #[tokio::test]
 async fn test_hello_invalid_hex_in_pubkey() {
-    let app = test_router();
+    let app = test_router().await;
 
     let client_key = gen_ed25519_key();
     let client_key_id = hex::encode(&client_key.verifying_key().to_bytes()[..8]);
@@ -1264,7 +1265,7 @@ async fn test_hello_invalid_hex_in_pubkey() {
 
 #[tokio::test]
 async fn test_verify_nonexistent_challenge() {
-    let app = test_router();
+    let app = test_router().await;
 
     let verify_body = serde_json::to_string(&serde_json::json!({
         "server_challenge": "ff".repeat(32),  // Random, not from any hello
@@ -1289,7 +1290,7 @@ async fn test_verify_nonexistent_challenge() {
 #[tokio::test]
 async fn test_hmac_not_required_for_get() {
     // GET requests should NOT require HMAC (no mutation).
-    let app = test_router();
+    let app = test_router().await;
 
     let req = Request::builder()
         .uri("/v1/wallets")
@@ -1303,7 +1304,7 @@ async fn test_hmac_not_required_for_get() {
 
 #[tokio::test]
 async fn test_hmac_required_for_post_with_api_key() {
-    let app = test_router();
+    let app = test_router().await;
 
     let body = serde_json::to_string(&serde_json::json!({
         "label": "test", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
@@ -1328,7 +1329,7 @@ async fn test_hmac_required_for_post_with_api_key() {
 #[tokio::test]
 async fn test_hmac_body_tamper_detected() {
     // ATTACK: Sign one body, send a different body.
-    let app = test_router();
+    let app = test_router().await;
 
     let original_body = serde_json::to_string(&serde_json::json!({
         "label": "legit", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
@@ -1369,7 +1370,7 @@ async fn test_hmac_body_tamper_detected() {
 #[tokio::test]
 async fn test_hmac_path_tamper_detected() {
     // ATTACK: Sign for /v1/wallets but send to /v1/wallets/abc/freeze.
-    let app = test_router();
+    let app = test_router().await;
 
     let body = serde_json::to_string(&serde_json::json!({})).unwrap();
     let timestamp = unix_now();
@@ -1404,7 +1405,7 @@ async fn test_hmac_path_tamper_detected() {
 #[tokio::test]
 async fn test_hmac_wrong_api_key() {
     // ATTACK: Compute HMAC with one key, send with another.
-    let app = test_router();
+    let app = test_router().await;
 
     let body = serde_json::to_string(&serde_json::json!({
         "label": "test", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
@@ -1444,7 +1445,7 @@ async fn test_hmac_wrong_api_key() {
 #[tokio::test]
 async fn test_session_token_takes_priority_over_api_key() {
     // If both headers are present, session token should be checked first.
-    let (router, state) = test_app();
+    let (router, state) = test_app().await;
     let (session_token, _) = handshake_via_http(&state).await;
 
     // Send both a valid session token AND a bogus API key.
@@ -1467,7 +1468,7 @@ async fn test_session_token_takes_priority_over_api_key() {
 async fn test_invalid_session_does_not_fall_through_to_api_key() {
     // SECURITY: If session token is present but invalid, it should NOT fall
     // through to try API key auth. This prevents auth confusion attacks.
-    let app = test_router();
+    let app = test_router().await;
 
     let req = Request::builder()
         .uri("/v1/wallets")
@@ -1486,7 +1487,7 @@ async fn test_invalid_session_does_not_fall_through_to_api_key() {
 
 #[tokio::test]
 async fn test_empty_auth_headers_rejected() {
-    let app = test_router();
+    let app = test_router().await;
 
     let req = Request::builder()
         .uri("/v1/wallets")
@@ -1508,7 +1509,7 @@ async fn test_empty_auth_headers_rejected() {
 
 #[tokio::test]
 async fn test_revoked_keys_endpoint_public() {
-    let app = test_router();
+    let app = test_router().await;
 
     let req = Request::builder()
         .uri("/v1/auth/revoked-keys")
@@ -1661,7 +1662,7 @@ async fn test_expired_session_pruning() {
 
 #[tokio::test]
 async fn test_error_messages_are_generic() {
-    let app = test_router();
+    let app = test_router().await;
 
     // Different auth failures should all return the same error message.
     let scenarios = vec![
@@ -1709,7 +1710,7 @@ async fn test_error_messages_are_generic() {
 
 #[tokio::test]
 async fn test_handshake_errors_are_generic() {
-    let app = test_router();
+    let app = test_router().await;
 
     // Wrong version.
     let body = serde_json::to_string(&serde_json::json!({
@@ -1736,7 +1737,7 @@ async fn test_handshake_errors_are_generic() {
 #[tokio::test]
 async fn test_api_key_prefix_does_not_leak_valid_key() {
     // When an API key fails, the error should not reflect anything about valid keys.
-    let app = test_router();
+    let app = test_router().await;
 
     // Send a key that starts the same as a valid key.
     let req = Request::builder()
@@ -1764,7 +1765,7 @@ async fn test_api_key_prefix_does_not_leak_valid_key() {
 #[tokio::test]
 async fn test_concurrent_handshakes_independent() {
     // Multiple handshakes happening simultaneously should not interfere.
-    let (_router, state) = test_app();
+    let (_router, state) = test_app().await;
     let client1 = gen_ed25519_key();
     let client2 = gen_ed25519_key();
 
@@ -1784,7 +1785,7 @@ async fn test_concurrent_handshakes_independent() {
 #[tokio::test]
 async fn test_same_client_multiple_sessions() {
     // One client should be able to have multiple active sessions.
-    let (_router, state) = test_app();
+    let (_router, state) = test_app().await;
     let client_key = gen_ed25519_key();
 
     let t1 = handshake_via_http_with_key(&state, &client_key).await;
@@ -1808,25 +1809,26 @@ async fn test_same_client_multiple_sessions() {
 
 #[tokio::test]
 async fn test_api_key_constant_time_comparison() {
-    // Timing attack: similar keys should take the same time to reject.
-    // We can't measure timing precisely in tests, but we can verify
-    // the code path uses ct_eq (which it does — verified by code review).
     let config = mpc_wallet_api::config::AppConfig::for_test();
     let state = mpc_wallet_api::state::AppState::from_config(&config);
+    state.api_key_store.load_static_keys(&config.api_keys).await;
 
     // All of these should fail identically.
-    assert!(state.verify_api_key("").is_none());
-    assert!(state.verify_api_key("test-admin-ke").is_none()); // Off by one
-    assert!(state.verify_api_key("test-admin-key ").is_none()); // Extra space
-    assert!(state.verify_api_key("TEST-ADMIN-KEY").is_none()); // Wrong case
+    assert!(state.api_key_store.verify("").await.is_none());
+    assert!(state.api_key_store.verify("test-admin-ke").await.is_none());
+    assert!(state
+        .api_key_store
+        .verify("test-admin-key ")
+        .await
+        .is_none());
+    assert!(state.api_key_store.verify("TEST-ADMIN-KEY").await.is_none());
 
     // Valid key should work.
-    assert!(state.verify_api_key("test-admin-key").is_some());
+    assert!(state.api_key_store.verify("test-admin-key").await.is_some());
 }
 
 #[tokio::test]
 async fn test_api_key_with_expired_entry() {
-    // An API key that has expired should be rejected.
     let mut config = mpc_wallet_api::config::AppConfig::for_test();
     config.api_keys.push(mpc_wallet_api::config::ApiKeyConfig {
         key: "expired-key-123".into(),
@@ -1837,9 +1839,14 @@ async fn test_api_key_with_expired_entry() {
         expires_at: Some(1000), // Long expired
     });
     let state = mpc_wallet_api::state::AppState::from_config(&config);
+    state.api_key_store.load_static_keys(&config.api_keys).await;
 
     assert!(
-        state.verify_api_key("expired-key-123").is_none(),
+        state
+            .api_key_store
+            .verify("expired-key-123")
+            .await
+            .is_none(),
         "expired API key must be rejected"
     );
 }

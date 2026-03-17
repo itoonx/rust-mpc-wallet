@@ -4,59 +4,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 
 use mpc_wallet_chains::registry::ChainRegistry;
 use mpc_wallet_core::identity::JwtValidator;
-use mpc_wallet_core::rbac::{AbacAttributes, ApiRole, AuthContext};
+use mpc_wallet_core::rbac::ApiRole;
 
 use crate::auth::api_keys::ApiKeyStore;
 use crate::auth::session::SessionStore;
-use crate::config::{ApiKeyConfig, AppConfig};
+use crate::config::AppConfig;
 use crate::middleware::rate_limit::RateLimiter;
-
-type HmacSha256 = Hmac<Sha256>;
-
-/// A hashed, scoped API key entry stored in AppState.
-#[derive(Clone)]
-pub struct ApiKeyEntry {
-    /// HMAC-SHA256 hash of the raw key.
-    pub key_hash: [u8; 32],
-    /// Human-readable label for audit logging.
-    pub label: String,
-    /// Maximum role this key can assume.
-    pub role: ApiRole,
-    /// Optional: restrict to specific wallet IDs.
-    pub allowed_wallets: Option<Vec<String>>,
-    /// Optional: restrict to specific chains.
-    pub allowed_chains: Option<Vec<String>>,
-    /// Expiration timestamp (UNIX seconds), None = no expiry.
-    pub expires_at: Option<u64>,
-}
-
-impl ApiKeyEntry {
-    /// Check whether this key has expired.
-    pub fn is_expired(&self) -> bool {
-        if let Some(exp) = self.expires_at {
-            crate::auth::types::unix_now() > exp
-        } else {
-            false
-        }
-    }
-
-    /// Build an `AuthContext` from this key's metadata.
-    pub fn auth_context(&self) -> AuthContext {
-        AuthContext::with_attributes(
-            format!("api-key:{}", self.label),
-            vec![self.role.clone()],
-            AbacAttributes::default(),
-            false, // API keys don't have MFA
-        )
-    }
-}
 
 /// Trusted client public key entry.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -166,8 +123,6 @@ pub struct AppState {
     pub jwt_validator: Arc<JwtValidator>,
     /// HMAC key for API key hashing (derived from JWT secret).
     pub hmac_key: Arc<Vec<u8>>,
-    /// Legacy hashed API keys (static, from config).
-    pub api_keys: Vec<ApiKeyEntry>,
     /// Unified API key store (static + dynamic keys).
     pub api_key_store: ApiKeyStore,
     /// Server Ed25519 signing key for handshake auth.
@@ -280,13 +235,8 @@ impl AppState {
         );
 
         let hmac_key = config.jwt_secret.as_bytes().to_vec();
-        let api_keys = config
-            .api_keys
-            .iter()
-            .map(|k| Self::hash_api_key(&hmac_key, k))
-            .collect();
 
-        // Create unified API key store and load static keys.
+        // Unified API key store (static keys loaded at main.rs startup).
         let api_key_store = ApiKeyStore::new(hmac_key.clone());
 
         // Load or generate server signing key.
@@ -343,7 +293,6 @@ impl AppState {
             chain_registry: Arc::new(chain_registry),
             jwt_validator: Arc::new(jwt_validator),
             hmac_key: Arc::new(hmac_key),
-            api_keys,
             api_key_store,
             server_signing_key: Arc::new(server_signing_key),
             session_store: SessionStore::new(),
@@ -353,41 +302,6 @@ impl AppState {
             handshake_limiter: RateLimiter::new(10), // 10 req/sec per key
             metrics: Arc::new(metrics),
         }
-    }
-
-    /// Hash a raw API key config into an `ApiKeyEntry` with HMAC-SHA256 digest.
-    fn hash_api_key(hmac_key: &[u8], config: &ApiKeyConfig) -> ApiKeyEntry {
-        let mut mac = HmacSha256::new_from_slice(hmac_key).expect("HMAC can take key of any size");
-        mac.update(config.key.as_bytes());
-        let result = mac.finalize();
-        let hash: [u8; 32] = result.into_bytes().into();
-
-        ApiKeyEntry {
-            key_hash: hash,
-            label: config.label.clone(),
-            role: config.api_role(),
-            allowed_wallets: config.allowed_wallets.clone(),
-            allowed_chains: config.allowed_chains.clone(),
-            expires_at: config.expires_at,
-        }
-    }
-
-    /// Verify an incoming API key against stored hashes using constant-time comparison.
-    pub fn verify_api_key(&self, raw_key: &str) -> Option<&ApiKeyEntry> {
-        let mut mac =
-            HmacSha256::new_from_slice(&self.hmac_key).expect("HMAC can take key of any size");
-        mac.update(raw_key.as_bytes());
-        let incoming_hash: [u8; 32] = mac.finalize().into_bytes().into();
-
-        for entry in &self.api_keys {
-            if incoming_hash.ct_eq(&entry.key_hash).into() {
-                if entry.is_expired() {
-                    return None;
-                }
-                return Some(entry);
-            }
-        }
-        None
     }
 
     /// Check if a key_id is revoked.

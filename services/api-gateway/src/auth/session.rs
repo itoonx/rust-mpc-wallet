@@ -53,17 +53,9 @@ impl SessionStore {
     }
 
     /// Store an authenticated session. Returns false if at capacity (DoS protection).
+    /// Expired sessions are cleaned up by the background prune task (every 60s).
     pub async fn store(&self, session: AuthenticatedSession) -> bool {
         let mut sessions = self.sessions.write().await;
-
-        // Lazy prune when approaching capacity.
-        if sessions.len() >= MAX_SESSIONS / 2 {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            sessions.retain(|_, s| s.expires_at > now);
-        }
 
         if sessions.len() >= MAX_SESSIONS {
             tracing::warn!(
