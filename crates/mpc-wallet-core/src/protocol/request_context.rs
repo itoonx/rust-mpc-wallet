@@ -126,29 +126,262 @@ impl EncryptedRequestContext {
     }
 }
 
-/// Audit record for a sign operation — includes encrypted context for tracing.
+// ── Sign Timeline ─────────────────────────────────────────────────
+
+/// A timestamped event in the signing lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineEvent {
+    /// What happened.
+    pub step: SignStep,
+    /// UNIX timestamp (milliseconds) when this step occurred.
+    pub timestamp_ms: u64,
+    /// Who performed this step (user ID, party ID, or system).
+    pub actor: String,
+    /// Additional details (step-specific).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Steps in the signing lifecycle — every step is recorded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SignStep {
+    /// Sign request received at gateway.
+    RequestReceived,
+    /// Authentication validated (which method: session/api-key/jwt).
+    AuthValidated,
+    /// RBAC/ABAC permission check passed.
+    PermissionChecked,
+    /// Policy evaluation completed.
+    PolicyEvaluated,
+    /// Single approval submitted by an approver.
+    ApprovalSubmitted,
+    /// Approval quorum reached (M-of-N met).
+    QuorumReached,
+    /// SignAuthorization created and signed by gateway.
+    AuthorizationCreated,
+    /// MPC party received sign request + authorization.
+    PartyReceived,
+    /// MPC party verified SignAuthorization independently.
+    PartyVerifiedAuth,
+    /// MPC protocol round started (round number in detail).
+    ProtocolRoundStarted,
+    /// MPC protocol round completed (round number in detail).
+    ProtocolRoundCompleted,
+    /// MPC party produced its partial signature.
+    PartialSignatureProduced,
+    /// Final signature assembled from partial signatures.
+    SignatureAssembled,
+    /// Signature verified against group public key.
+    SignatureVerified,
+    /// Transaction broadcast to chain (if applicable).
+    TransactionBroadcast,
+    /// Audit record committed to ledger.
+    AuditCommitted,
+    /// Signing failed at this step.
+    Failed,
+}
+
+/// Record of a single approver's participation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApproverRecord {
+    /// Approver's user ID.
+    pub approver_id: String,
+    /// Approver's role (e.g., "approver", "admin").
+    pub role: String,
+    /// UNIX timestamp (ms) when approval was submitted.
+    pub approved_at_ms: u64,
+    /// SHA-256 of the approval signature (hex) — not the full signature.
+    pub signature_hash: String,
+}
+
+/// Record of a single MPC party's participation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartyRecord {
+    /// Party ID (1-indexed).
+    pub party_id: u16,
+    /// UNIX timestamp (ms) when party received the request.
+    pub received_at_ms: u64,
+    /// UNIX timestamp (ms) when party verified the authorization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_at_ms: Option<u64>,
+    /// UNIX timestamp (ms) when party produced its partial signature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_at_ms: Option<u64>,
+    /// Whether the party completed successfully.
+    pub success: bool,
+    /// Error message if the party failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Complete audit record for a single sign operation.
+///
+/// Captures **every participant** and **every step** with millisecond timestamps.
+/// This is the primary artifact for compliance, incident investigation, and monitoring.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignAuditRecord {
-    /// Session ID for correlation.
+    // ── Identity ─────────────────────────────────────
+    /// Unique session ID for this sign operation.
     pub session_id: String,
     /// Wallet being signed.
     pub wallet_id: String,
+    /// MPC signing scheme used (e.g., "gg20-ecdsa").
+    pub scheme: String,
+    /// Threshold config (e.g., "2-of-3").
+    pub threshold: String,
+
+    // ── Message ──────────────────────────────────────
     /// SHA-256 of the message that was signed (hex).
     pub message_hash: String,
+    /// Chain (if applicable, e.g., "ethereum").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain: Option<String>,
+
+    // ── Requester ────────────────────────────────────
     /// Who requested the sign (from AuthContext).
     pub requester_id: String,
+    /// Auth method used (session_token, api_key, jwt).
+    pub auth_method: String,
     /// Encrypted request context (IP, device, fingerprint).
     pub encrypted_context: EncryptedRequestContext,
-    /// Number of approvals collected.
-    pub approval_count: u32,
-    /// Policy hash that was evaluated.
+
+    // ── Policy ───────────────────────────────────────
+    /// SHA-256 of the policy that was evaluated (hex).
     pub policy_hash: String,
-    /// UNIX timestamp of the sign operation.
-    pub signed_at: u64,
-    /// MPC signing scheme used.
-    pub scheme: String,
-    /// Parties that participated in signing.
-    pub signers: Vec<u16>,
+    /// Whether policy check passed.
+    pub policy_passed: bool,
+    /// Policy evaluation details (e.g., "allowlist: pass, velocity: 3/10 daily").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_detail: Option<String>,
+
+    // ── Approvals ────────────────────────────────────
+    /// Required approval count (quorum).
+    pub approval_required: u32,
+    /// Record of every approver who participated.
+    pub approvers: Vec<ApproverRecord>,
+
+    // ── MPC Parties ──────────────────────────────────
+    /// Record of every MPC party that participated.
+    pub parties: Vec<PartyRecord>,
+
+    // ── Result ───────────────────────────────────────
+    /// Whether the overall sign operation succeeded.
+    pub success: bool,
+    /// Error message if signing failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// SHA-256 of the final signature (hex) — for correlation, not the actual sig.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_hash: Option<String>,
+    /// Transaction hash if broadcast (hex).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_hash: Option<String>,
+
+    // ── Timeline ─────────────────────────────────────
+    /// Ordered list of every step with timestamps.
+    pub timeline: Vec<TimelineEvent>,
+
+    // ── Timestamps (summary) ─────────────────────────
+    /// When the sign request was first received (ms).
+    pub started_at_ms: u64,
+    /// When the sign operation completed or failed (ms).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<u64>,
+    /// Total duration in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+/// Get current UNIX timestamp in milliseconds.
+pub fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+impl SignAuditRecord {
+    /// Add a timeline event.
+    pub fn record(&mut self, step: SignStep, actor: &str, detail: Option<String>) {
+        self.timeline.push(TimelineEvent {
+            step,
+            timestamp_ms: unix_now_ms(),
+            actor: actor.into(),
+            detail,
+        });
+    }
+
+    /// Add an approver record.
+    pub fn record_approval(&mut self, approver: ApproverRecord) {
+        self.record(
+            SignStep::ApprovalSubmitted,
+            &approver.approver_id.clone(),
+            Some(format!("role={}", approver.role)),
+        );
+        self.approvers.push(approver);
+    }
+
+    /// Add an MPC party record (initial — received request).
+    pub fn record_party_received(&mut self, party_id: u16) {
+        let now = unix_now_ms();
+        self.record(SignStep::PartyReceived, &format!("party_{party_id}"), None);
+        self.parties.push(PartyRecord {
+            party_id,
+            received_at_ms: now,
+            verified_at_ms: None,
+            signed_at_ms: None,
+            success: false,
+            error: None,
+        });
+    }
+
+    /// Update a party record — authorization verified.
+    pub fn record_party_verified(&mut self, party_id: u16) {
+        let now = unix_now_ms();
+        self.record(
+            SignStep::PartyVerifiedAuth,
+            &format!("party_{party_id}"),
+            None,
+        );
+        if let Some(p) = self.parties.iter_mut().find(|p| p.party_id == party_id) {
+            p.verified_at_ms = Some(now);
+        }
+    }
+
+    /// Update a party record — partial signature produced.
+    pub fn record_party_signed(&mut self, party_id: u16) {
+        let now = unix_now_ms();
+        self.record(
+            SignStep::PartialSignatureProduced,
+            &format!("party_{party_id}"),
+            None,
+        );
+        if let Some(p) = self.parties.iter_mut().find(|p| p.party_id == party_id) {
+            p.signed_at_ms = Some(now);
+            p.success = true;
+        }
+    }
+
+    /// Mark the sign operation as completed.
+    pub fn complete(&mut self, signature_hash: String) {
+        let now = unix_now_ms();
+        self.success = true;
+        self.signature_hash = Some(signature_hash);
+        self.completed_at_ms = Some(now);
+        self.duration_ms = Some(now.saturating_sub(self.started_at_ms));
+        self.record(SignStep::SignatureAssembled, "system", None);
+    }
+
+    /// Mark the sign operation as failed.
+    pub fn fail(&mut self, error: String) {
+        let now = unix_now_ms();
+        self.success = false;
+        self.error = Some(error.clone());
+        self.completed_at_ms = Some(now);
+        self.duration_ms = Some(now.saturating_sub(self.started_at_ms));
+        self.record(SignStep::Failed, "system", Some(error));
+    }
 }
 
 #[cfg(test)]
@@ -248,26 +481,182 @@ mod tests {
     }
 
     #[test]
-    fn test_audit_record_serialization() {
+    fn test_full_sign_timeline() {
+        let ctx = test_context();
+        let key = test_key();
+        let encrypted = EncryptedRequestContext::encrypt(&ctx, &key).unwrap();
+        let now = unix_now_ms();
+
+        let mut record = SignAuditRecord {
+            session_id: "sess_123".into(),
+            wallet_id: "wallet_abc".into(),
+            scheme: "gg20-ecdsa".into(),
+            threshold: "2-of-3".into(),
+            message_hash: "deadbeef".into(),
+            chain: Some("ethereum".into()),
+            requester_id: "user_42".into(),
+            auth_method: "session_token".into(),
+            encrypted_context: encrypted,
+            policy_hash: "cafebabe".into(),
+            policy_passed: true,
+            policy_detail: Some("allowlist: pass, velocity: 3/10".into()),
+            approval_required: 2,
+            approvers: vec![],
+            parties: vec![],
+            success: false,
+            error: None,
+            signature_hash: None,
+            tx_hash: None,
+            timeline: vec![],
+            started_at_ms: now,
+            completed_at_ms: None,
+            duration_ms: None,
+        };
+
+        // Step 1: Request received
+        record.record(SignStep::RequestReceived, "gateway", None);
+
+        // Step 2: Auth validated
+        record.record(
+            SignStep::AuthValidated,
+            "gateway",
+            Some("session_token".into()),
+        );
+
+        // Step 3: Policy evaluated
+        record.record(SignStep::PolicyEvaluated, "gateway", Some("pass".into()));
+
+        // Step 4: Approvals
+        record.record_approval(ApproverRecord {
+            approver_id: "approver_A".into(),
+            role: "approver".into(),
+            approved_at_ms: unix_now_ms(),
+            signature_hash: "aabb".into(),
+        });
+        record.record_approval(ApproverRecord {
+            approver_id: "approver_B".into(),
+            role: "admin".into(),
+            approved_at_ms: unix_now_ms(),
+            signature_hash: "ccdd".into(),
+        });
+        record.record(SignStep::QuorumReached, "gateway", Some("2/2".into()));
+
+        // Step 5: MPC parties
+        record.record_party_received(1);
+        record.record_party_received(3);
+        record.record_party_received(5);
+
+        record.record_party_verified(1);
+        record.record_party_verified(3);
+        record.record_party_verified(5);
+
+        record.record(
+            SignStep::ProtocolRoundStarted,
+            "party_1",
+            Some("round=1".into()),
+        );
+        record.record(
+            SignStep::ProtocolRoundCompleted,
+            "party_1",
+            Some("round=1".into()),
+        );
+        record.record(
+            SignStep::ProtocolRoundStarted,
+            "party_1",
+            Some("round=2".into()),
+        );
+        record.record(
+            SignStep::ProtocolRoundCompleted,
+            "party_1",
+            Some("round=2".into()),
+        );
+
+        record.record_party_signed(1);
+        record.record_party_signed(3);
+        record.record_party_signed(5);
+
+        // Step 6: Complete
+        record.complete("sig_hash_abcdef".into());
+
+        // Verify the record
+        assert!(record.success);
+        assert_eq!(record.approvers.len(), 2);
+        assert_eq!(record.parties.len(), 3);
+        assert!(record.duration_ms.is_some());
+        assert!(
+            record.timeline.len() >= 15,
+            "should have many timeline events"
+        );
+
+        // All parties should be successful
+        for party in &record.parties {
+            assert!(party.success);
+            assert!(party.verified_at_ms.is_some());
+            assert!(party.signed_at_ms.is_some());
+        }
+
+        // Serialize and verify no plaintext IP leaked
+        let json = serde_json::to_string_pretty(&record).unwrap();
+        assert!(json.contains("sess_123"));
+        assert!(json.contains("request_received"));
+        assert!(json.contains("party_verified_auth"));
+        assert!(json.contains("signature_assembled"));
+        assert!(!json.contains("203.0.113.42")); // IP encrypted
+
+        // Verify timeline is ordered
+        for window in record.timeline.windows(2) {
+            assert!(
+                window[1].timestamp_ms >= window[0].timestamp_ms,
+                "timeline should be ordered"
+            );
+        }
+    }
+
+    #[test]
+    fn test_failed_sign_timeline() {
         let ctx = test_context();
         let key = test_key();
         let encrypted = EncryptedRequestContext::encrypt(&ctx, &key).unwrap();
 
-        let record = SignAuditRecord {
-            session_id: "sess_123".into(),
-            wallet_id: "wallet_abc".into(),
+        let mut record = SignAuditRecord {
+            session_id: "sess_fail".into(),
+            wallet_id: "wallet_xyz".into(),
+            scheme: "frost-ed25519".into(),
+            threshold: "3-of-5".into(),
             message_hash: "deadbeef".into(),
-            requester_id: "user_42".into(),
+            chain: Some("solana".into()),
+            requester_id: "user_99".into(),
+            auth_method: "api_key".into(),
             encrypted_context: encrypted,
-            approval_count: 2,
             policy_hash: "cafebabe".into(),
-            signed_at: 1710768000,
-            scheme: "gg20-ecdsa".into(),
-            signers: vec![1, 3, 5],
+            policy_passed: true,
+            policy_detail: None,
+            approval_required: 0,
+            approvers: vec![],
+            parties: vec![],
+            success: false,
+            error: None,
+            signature_hash: None,
+            tx_hash: None,
+            timeline: vec![],
+            started_at_ms: unix_now_ms(),
+            completed_at_ms: None,
+            duration_ms: None,
         };
 
-        let json = serde_json::to_string(&record).unwrap();
-        assert!(json.contains("sess_123"));
-        assert!(!json.contains("203.0.113.42")); // IP should be encrypted, not in JSON
+        record.record(SignStep::RequestReceived, "gateway", None);
+        record.record_party_received(1);
+        record.record_party_received(2);
+
+        // Party 2 fails verification
+        record.fail("party 2: authorization expired".into());
+
+        assert!(!record.success);
+        assert_eq!(
+            record.error.as_deref(),
+            Some("party 2: authorization expired")
+        );
+        assert!(record.duration_ms.is_some());
+        assert!(record.timeline.iter().any(|e| e.step == SignStep::Failed));
     }
 }
