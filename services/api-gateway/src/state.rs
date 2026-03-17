@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::SigningKey;
 use hmac::{Hmac, Mac};
@@ -40,11 +39,7 @@ impl ApiKeyEntry {
     /// Check whether this key has expired.
     pub fn is_expired(&self) -> bool {
         if let Some(exp) = self.expires_at {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            now > exp
+            crate::auth::types::unix_now() > exp
         } else {
             false
         }
@@ -76,12 +71,7 @@ pub struct ClientKeyEntry {
 
 impl ClientKeyEntry {
     pub fn api_role(&self) -> ApiRole {
-        match self.role.as_str() {
-            "admin" => ApiRole::Admin,
-            "initiator" => ApiRole::Initiator,
-            "approver" => ApiRole::Approver,
-            _ => ApiRole::Viewer,
-        }
+        crate::auth::types::parse_role(&self.role)
     }
 }
 
@@ -138,19 +128,24 @@ impl ReplayCache {
 
     /// Check if a nonce has been seen. If not, record it with TTL.
     /// Returns true if replay detected (nonce already seen).
+    /// Capped at MAX_CACHE_ENTRIES to prevent DoS.
     pub async fn check_and_record(&self, nonce: &str, ttl_secs: u64) -> bool {
         let mut cache = self.cache.write().await;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        // Prune expired entries.
-        cache.retain(|_, expiry| *expiry > now);
+        let now = crate::auth::types::unix_now();
 
         if cache.contains_key(nonce) {
             return true; // replay detected
         }
+
+        // Prune only when approaching capacity (avoid O(n) on every request).
+        if cache.len() >= crate::auth::types::MAX_CACHE_ENTRIES / 2 {
+            cache.retain(|_, expiry| *expiry > now);
+        }
+
+        if cache.len() >= crate::auth::types::MAX_CACHE_ENTRIES {
+            return false; // capacity exceeded — silently drop (rate limiter catches abuse)
+        }
+
         cache.insert(nonce.to_string(), now + ttl_secs);
         false
     }

@@ -53,12 +53,7 @@ pub struct ApiKeyConfig {
 impl ApiKeyConfig {
     /// Parse the role string into an `ApiRole`.
     pub fn api_role(&self) -> ApiRole {
-        match self.role.as_str() {
-            "admin" => ApiRole::Admin,
-            "initiator" => ApiRole::Initiator,
-            "approver" => ApiRole::Approver,
-            _ => ApiRole::Viewer,
-        }
+        crate::auth::types::parse_role(&self.role)
     }
 }
 

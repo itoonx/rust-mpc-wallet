@@ -1,21 +1,14 @@
 //! Authentication middleware: JWT, API key, and session token validation.
-//!
-//! Three auth paths (checked in order):
-//! 1. `X-Session-Token: <session_id>` — key-exchange handshake session
-//! 2. `X-API-Key: <key>` — service-to-service, scoped by role
-//! 3. `Authorization: Bearer <jwt>` — user-facing, full RBAC + ABAC
 
 use axum::{
     extract::{Request, State},
-    http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 
 use mpc_wallet_core::rbac::{AbacAttributes, ApiRole, AuthContext};
 
-use crate::models::response::ApiResponse;
+use crate::auth::types::auth_failed;
 use crate::state::AppState;
 
 pub async fn auth_middleware(
@@ -29,13 +22,11 @@ pub async fn auth_middleware(
     if let Some(session_id) = headers.get("x-session-token").and_then(|v| v.to_str().ok()) {
         match state.session_store.get(session_id).await {
             Some(session) => {
-                tracing::info!(
+                tracing::debug!(
                     session_id = %session.session_id,
                     client_key_id = %session.client_key_id,
                     "session token auth success"
                 );
-                // Build AuthContext from session.
-                // If client is in registry, use registered role; otherwise Viewer.
                 let role = state
                     .client_registry
                     .keys
@@ -54,11 +45,7 @@ pub async fn auth_middleware(
             None => {
                 state.metrics.auth_failures.inc();
                 tracing::warn!("session token auth failed: invalid or expired");
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(ApiResponse::<()>::err("authentication failed")),
-                )
-                    .into_response();
+                return auth_failed().into_response();
             }
         }
     }
@@ -67,7 +54,7 @@ pub async fn auth_middleware(
     if let Some(api_key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
         match state.verify_api_key(api_key) {
             Some(entry) => {
-                tracing::info!(
+                tracing::debug!(
                     key_label = %entry.label,
                     role = ?entry.role,
                     "API key auth success"
@@ -80,13 +67,9 @@ pub async fn auth_middleware(
                 state.metrics.auth_failures.inc();
                 tracing::warn!(
                     key_prefix = &api_key[..api_key.len().min(8)],
-                    "API key auth failed: invalid or expired"
+                    "API key auth failed"
                 );
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(ApiResponse::<()>::err("authentication failed")),
-                )
-                    .into_response();
+                return auth_failed().into_response();
             }
         }
     }
@@ -96,31 +79,19 @@ pub async fn auth_middleware(
         if let Some(token) = auth_header.strip_prefix("Bearer ") {
             match state.jwt_validator.validate(token) {
                 Ok(ctx) => {
-                    tracing::info!(
-                        user_id = %ctx.user_id,
-                        roles = ?ctx.roles,
-                        "JWT auth success"
-                    );
+                    tracing::debug!(user_id = %ctx.user_id, "JWT auth success");
                     request.extensions_mut().insert(ctx);
                     return next.run(request).await;
                 }
                 Err(e) => {
                     state.metrics.auth_failures.inc();
                     tracing::warn!("JWT auth failed: {e}");
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        Json(ApiResponse::<()>::err("authentication failed")),
-                    )
-                        .into_response();
+                    return auth_failed().into_response();
                 }
             }
         }
     }
 
     state.metrics.auth_failures.inc();
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(ApiResponse::<()>::err("authentication failed")),
-    )
-        .into_response()
+    auth_failed().into_response()
 }
