@@ -4,4 +4,5 @@ ignore = [
     "RUSTSEC-2023-0089",  # atomic-polyfill unmaintained — transitive dep via heapless/frost-core
     "RUSTSEC-2024-0388",  # derivative unmaintained — transitive dep via ark-ff/ruint/alloy
     "RUSTSEC-2024-0436",  # paste unmaintained — transitive dep via ark-ff/syn-solidity/alloy
+    "RUSTSEC-2024-0437",  # protobuf recursion — transitive dep via prometheus 0.13 (no prometheus 0.14 with fix yet)
 ]

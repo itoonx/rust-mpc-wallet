@@ -4,6 +4,7 @@ members = [
     "crates/mpc-wallet-core",
     "crates/mpc-wallet-chains",
     "crates/mpc-wallet-cli",
+    "services/api-gateway",
 ]
 
 [workspace.package]

@@ -1,0 +1,11 @@
+# MPC Wallet ConfigMap — non-secret configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mpc-config
+  namespace: mpc-wallet
+data:
+  network: "mainnet"
+  nats_url: "nats://nats.mpc-wallet.svc:4222"
+  rate_limit_rps: "100"
+  log_level: "info"

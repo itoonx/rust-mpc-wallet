@@ -1,0 +1,34 @@
+# API Gateway Service — external access point
+apiVersion: v1
+kind: Service
+metadata:
+  name: mpc-api-gateway
+  namespace: mpc-wallet
+  labels:
+    app: mpc-node
+spec:
+  type: ClusterIP
+  selector:
+    app: mpc-node
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+---
+# Headless service for StatefulSet DNS resolution (mpc-node-0.mpc-node.mpc-wallet.svc)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mpc-node
+  namespace: mpc-wallet
+  labels:
+    app: mpc-node
+spec:
+  clusterIP: None
+  selector:
+    app: mpc-node
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

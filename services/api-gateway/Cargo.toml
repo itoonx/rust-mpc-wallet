@@ -1,0 +1,43 @@
+[package]
+name = "mpc-wallet-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MPC Wallet REST API Gateway (Axum)"
+
+[[bin]]
+name = "mpc-wallet-api"
+path = "src/main.rs"
+
+[dependencies]
+mpc-wallet-core = { path = "../../crates/mpc-wallet-core" }
+mpc-wallet-chains = { path = "../../crates/mpc-wallet-chains" }
+
+# Web framework
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace"] }
+tower = { version = "0.5", features = ["util"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Auth
+jsonwebtoken = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus = "0.13"
+
+# Utilities
+uuid = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+reqwest = { workspace = true }

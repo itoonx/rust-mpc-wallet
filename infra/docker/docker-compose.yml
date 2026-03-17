@@ -1,0 +1,90 @@
+# MPC Wallet — Local 3-node cluster + NATS
+# Usage: docker compose -f infra/docker/docker-compose.yml up -d
+
+services:
+  # NATS server for MPC inter-party transport
+  nats:
+    image: nats:2.10-alpine
+    ports:
+      - "4222:4222"   # client
+      - "8222:8222"   # monitoring
+    command: >
+      -js
+      --http_port 8222
+      --max_payload 1048576
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # MPC Node 1 (party_id=1)
+  mpc-node-1:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    environment:
+      PORT: "3001"
+      PARTY_ID: "1"
+      NATS_URL: "nats://nats:4222"
+      NETWORK: "testnet"
+      JWT_SECRET: "${JWT_SECRET:-dev-secret-change-in-production}"
+      API_KEYS: "${API_KEYS:-dev-api-key}"
+    ports:
+      - "3001:3001"
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  # MPC Node 2 (party_id=2)
+  mpc-node-2:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    environment:
+      PORT: "3002"
+      PARTY_ID: "2"
+      NATS_URL: "nats://nats:4222"
+      NETWORK: "testnet"
+      JWT_SECRET: "${JWT_SECRET:-dev-secret-change-in-production}"
+      API_KEYS: "${API_KEYS:-dev-api-key}"
+    ports:
+      - "3002:3002"
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  # MPC Node 3 (party_id=3)
+  mpc-node-3:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    environment:
+      PORT: "3003"
+      PARTY_ID: "3"
+      NATS_URL: "nats://nats:4222"
+      NETWORK: "testnet"
+      JWT_SECRET: "${JWT_SECRET:-dev-secret-change-in-production}"
+      API_KEYS: "${API_KEYS:-dev-api-key}"
+    ports:
+      - "3003:3003"
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  # API Gateway (load balancer front-end)
+  api-gateway:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+    environment:
+      PORT: "3000"
+      NETWORK: "testnet"
+      JWT_SECRET: "${JWT_SECRET:-dev-secret-change-in-production}"
+      API_KEYS: "${API_KEYS:-dev-api-key}"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - mpc-node-1
+      - mpc-node-2
+      - mpc-node-3

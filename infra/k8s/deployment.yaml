@@ -1,0 +1,92 @@
+# MPC Node StatefulSet — 3-5 replicas with stable network identities
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mpc-node
+  namespace: mpc-wallet
+  labels:
+    app: mpc-node
+spec:
+  serviceName: mpc-node
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mpc-node
+  template:
+    metadata:
+      labels:
+        app: mpc-node
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/v1/metrics"
+    spec:
+      serviceAccountName: mpc-node
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: mpc-node
+          image: mpc-wallet-api:latest
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: PORT
+              value: "3000"
+            - name: NETWORK
+              valueFrom:
+                configMapKeyRef:
+                  name: mpc-config
+                  key: network
+            - name: NATS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: mpc-config
+                  key: nats_url
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: mpc-secrets
+                  key: jwt_secret
+            - name: API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: mpc-secrets
+                  key: api_keys
+            - name: PARTY_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          volumeMounts:
+            - name: key-store
+              mountPath: /data/keys
+  volumeClaimTemplates:
+    - metadata:
+        name: key-store
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: encrypted-ssd
+        resources:
+          requests:
+            storage: 10Gi
