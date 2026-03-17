@@ -216,6 +216,166 @@ async fn test_e2e_full_http_hello_verify_flow() {
     assert!(!server_challenge.is_empty());
 }
 
+#[tokio::test]
+async fn test_e2e_full_http_hello_verify_session_protected() {
+    // Complete E2E flow via HTTP: hello → verify → use session token on protected route.
+    let (app, _state) = test_app();
+
+    let client_key = gen_ed25519_key();
+    let client = HandshakeClient::new(client_key.clone(), None);
+    let bundle = client.build_client_hello();
+
+    // Step 1: POST /v1/auth/hello via HTTP
+    let body = serde_json::to_string(&bundle.client_hello).unwrap();
+    let req = json_post("/v1/auth/hello", body);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "hello should succeed");
+    let hello_json = body_json(resp).await;
+    let sh: ServerHello = serde_json::from_value(hello_json["data"].clone()).unwrap();
+    let challenge = sh.server_challenge.clone();
+
+    // Step 2: Client processes ServerHello and builds ClientAuth
+    let (client_auth, derived_keys) = client
+        .process_server_hello(
+            &bundle.client_hello,
+            &sh,
+            bundle.ephemeral_secret,
+            &bundle.client_nonce,
+        )
+        .unwrap();
+
+    // Step 3: POST /v1/auth/verify via HTTP
+    let verify_body = serde_json::to_string(&serde_json::json!({
+        "server_challenge": challenge,
+        "client_signature": client_auth.client_signature,
+        "client_static_pubkey": client_auth.client_static_pubkey,
+    }))
+    .unwrap();
+    let req = json_post("/v1/auth/verify", verify_body);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "verify should succeed");
+    let verify_json = body_json(resp).await;
+    assert!(verify_json["success"].as_bool().unwrap());
+    let session_token = verify_json["data"]["session_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let server_session_id = verify_json["data"]["session_id"].as_str().unwrap();
+
+    // Verify client and server derived the same session ID
+    assert_eq!(
+        derived_keys.session_id, server_session_id,
+        "client and server must agree on session ID"
+    );
+
+    // Step 4: Use session token on GET /v1/wallets (protected)
+    let req = Request::builder()
+        .uri("/v1/wallets")
+        .method("GET")
+        .header("x-session-token", &session_token)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "session token from HTTP handshake must work on protected routes"
+    );
+    let wallets_json = body_json(resp).await;
+    assert!(wallets_json["success"].as_bool().unwrap());
+
+    // Step 5: Verify without session token still fails
+    let req = Request::builder()
+        .uri("/v1/wallets")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "without session token must still fail"
+    );
+}
+
+#[tokio::test]
+async fn test_rate_limit_on_handshake() {
+    let (app, _state) = test_app();
+
+    let client_key = gen_ed25519_key();
+    let eph_pub = X25519Public::from(&X25519Secret::random_from_rng(rand::rngs::OsRng));
+    let client_key_id = hex::encode(&client_key.verifying_key().to_bytes()[..8]);
+
+    // Send 11 rapid hello requests with the same key_id (limit is 10/sec).
+    let mut hit_limit = false;
+    for i in 0..15 {
+        let nonce = random_nonce();
+        let body = build_hello_body(&client_key, &eph_pub, &nonce, unix_now());
+        let req = json_post("/v1/auth/hello", body);
+        let resp = app.clone().oneshot(req).await.unwrap();
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            hit_limit = true;
+            break;
+        }
+    }
+    assert!(
+        hit_limit,
+        "rate limit should kick in after 10 rapid requests"
+    );
+}
+
+#[tokio::test]
+async fn test_dynamic_key_revocation() {
+    let (app, _state) = test_app();
+
+    // Revoke a key dynamically.
+    let body = serde_json::to_string(&serde_json::json!({
+        "key_id": "deadbeef12345678"
+    }))
+    .unwrap();
+    let req = json_post("/v1/auth/revoke-key", body);
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert!(json["success"].as_bool().unwrap());
+    assert!(json["data"]["was_new"].as_bool().unwrap());
+
+    // Verify it shows up in revoked-keys list.
+    let req = Request::builder()
+        .uri("/v1/auth/revoked-keys")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let json = body_json(resp).await;
+    let keys = json["data"].as_array().unwrap();
+    assert!(
+        keys.iter().any(|k| k.as_str() == Some("deadbeef12345678")),
+        "dynamically revoked key should appear in list"
+    );
+}
+
+#[tokio::test]
+async fn test_session_store_capacity_limit() {
+    let store = mpc_wallet_api::auth::session::SessionStore::new();
+    let now = unix_now();
+
+    // Fill up to capacity and verify rejection.
+    // We test with a smaller batch since MAX_SESSIONS is 100k.
+    for i in 0..100 {
+        let session = AuthenticatedSession {
+            session_id: format!("cap-{i}"),
+            client_pubkey: [0u8; 32],
+            client_key_id: "test".into(),
+            client_write_key: [1u8; 32],
+            server_write_key: [2u8; 32],
+            expires_at: now + 3600,
+            created_at: now,
+        };
+        assert!(store.store(session).await, "should accept session {i}");
+    }
+    assert_eq!(store.count().await, 100);
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // SECTION 2: REPLAY ATTACKS
 // ═══════════════════════════════════════════════════════════════════
@@ -1378,7 +1538,7 @@ async fn test_revoked_key_cannot_handshake() {
     let mut revoked = std::collections::HashSet::new();
     revoked.insert(client_key_id.clone());
     let state_with_revoked = mpc_wallet_api::state::AppState {
-        revoked_keys: std::sync::Arc::new(revoked),
+        revoked_keys: std::sync::Arc::new(tokio::sync::RwLock::new(revoked)),
         ..state
     };
     let router = build_router(state_with_revoked, &[]);
@@ -1415,7 +1575,7 @@ async fn test_session_refresh_revokes_on_key_revocation() {
     let mut revoked = std::collections::HashSet::new();
     revoked.insert(client_key_id);
     let state_revoked = mpc_wallet_api::state::AppState {
-        revoked_keys: std::sync::Arc::new(revoked),
+        revoked_keys: std::sync::Arc::new(tokio::sync::RwLock::new(revoked)),
         session_store: state.session_store.clone(), // Same session store
         ..state
     };

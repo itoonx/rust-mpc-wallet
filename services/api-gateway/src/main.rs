@@ -27,6 +27,9 @@ async fn main() {
     let config = AppConfig::from_env();
     let state = AppState::from_config(&config);
 
+    // Start background session pruning (every 60s).
+    state.session_store.spawn_prune_task();
+
     let app = build_router(state, &config.cors_origins);
 
     let addr = format!("0.0.0.0:{}", config.port);

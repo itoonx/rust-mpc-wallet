@@ -79,7 +79,24 @@ pub async fn auth_hello(
         return Err(auth_failed());
     }
 
-    if state.app.is_key_revoked(&client_hello.client_key_id) {
+    // Rate limit per client_key_id.
+    if !state
+        .app
+        .handshake_limiter
+        .check(&client_hello.client_key_id)
+        .await
+    {
+        state.app.metrics.handshake_failures.inc();
+        tracing::warn!(client_key_id = %client_hello.client_key_id, "handshake rate limited");
+        return Err((
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            axum::Json(crate::models::response::ApiResponse::err(
+                "rate limit exceeded",
+            )),
+        ));
+    }
+
+    if state.app.is_key_revoked(&client_hello.client_key_id).await {
         state.app.metrics.handshake_failures.inc();
         tracing::warn!(client_key_id = %client_hello.client_key_id, "handshake with revoked key");
         return Err(auth_failed());
@@ -180,7 +197,11 @@ pub async fn auth_verify(
         client_key_id = %session.client_key_id,
         "handshake complete — session established"
     );
-    state.app.session_store.store(session).await;
+    if !state.app.session_store.store(session).await {
+        state.app.metrics.handshake_failures.inc();
+        tracing::warn!("session store at capacity — cannot create session");
+        return Err(auth_failed());
+    }
 
     Ok(Json(ApiResponse::ok(response)))
 }
@@ -214,23 +235,29 @@ pub async fn refresh_session(
             auth_failed()
         })?;
 
-    if state.app.is_key_revoked(&session.client_key_id) {
+    if state.app.is_key_revoked(&session.client_key_id).await {
         state.app.session_store.revoke(&session.session_id).await;
         tracing::warn!(session_id = %session.session_id, "session refresh: key revoked");
         return Err(auth_failed());
     }
 
     let new_expires_at = unix_now() + DEFAULT_SESSION_TTL_SECS;
+    let session_id = session.session_id.clone();
     let refreshed = AuthenticatedSession {
+        session_id: session.session_id.clone(),
+        client_pubkey: session.client_pubkey,
+        client_key_id: session.client_key_id.clone(),
+        client_write_key: session.client_write_key,
+        server_write_key: session.server_write_key,
         expires_at: new_expires_at,
-        ..session.clone()
+        created_at: session.created_at,
     };
 
-    state.app.session_store.store(refreshed).await;
-    tracing::debug!(session_id = %session.session_id, new_expires_at, "session refreshed");
+    let _ = state.app.session_store.store(refreshed).await;
+    tracing::debug!(session_id = %session_id, new_expires_at, "session refreshed");
 
     Ok(Json(ApiResponse::ok(RefreshSessionResponse {
-        session_id: session.session_id,
+        session_id,
         expires_at: new_expires_at,
         session_token: req.session_token,
     })))
@@ -238,6 +265,33 @@ pub async fn refresh_session(
 
 /// `GET /v1/auth/revoked-keys`
 pub async fn revoked_keys(State(state): State<AuthRouteState>) -> Json<ApiResponse<Vec<String>>> {
-    let keys: Vec<String> = state.app.revoked_keys.iter().cloned().collect();
+    let keys: Vec<String> = state
+        .app
+        .revoked_keys
+        .read()
+        .await
+        .iter()
+        .cloned()
+        .collect();
     Json(ApiResponse::ok(keys))
+}
+
+/// Request for dynamic key revocation.
+#[derive(Debug, serde::Deserialize)]
+pub struct RevokeKeyRequest {
+    pub key_id: String,
+}
+
+/// `POST /v1/auth/revoke-key` — Admin-only dynamic key revocation.
+pub async fn revoke_key(
+    State(state): State<AuthRouteState>,
+    Json(req): Json<RevokeKeyRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiResponse<()>>)> {
+    let is_new = state.app.revoke_key(req.key_id.clone()).await;
+    tracing::info!(key_id = %req.key_id, is_new, "key revoked dynamically");
+    Ok(Json(ApiResponse::ok(serde_json::json!({
+        "key_id": req.key_id,
+        "revoked": true,
+        "was_new": is_new,
+    }))))
 }

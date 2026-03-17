@@ -15,6 +15,7 @@ use mpc_wallet_core::rbac::{AbacAttributes, ApiRole, AuthContext};
 
 use crate::auth::session::SessionStore;
 use crate::config::{ApiKeyConfig, AppConfig};
+use crate::middleware::rate_limit::RateLimiter;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -172,10 +173,12 @@ pub struct AppState {
     pub session_store: SessionStore,
     /// Trusted client key registry.
     pub client_registry: Arc<ClientKeyRegistry>,
-    /// Revoked key IDs.
-    pub revoked_keys: Arc<HashSet<String>>,
+    /// Revoked key IDs (mutable for dynamic revocation).
+    pub revoked_keys: Arc<RwLock<HashSet<String>>>,
     /// Replay cache for handshake nonces.
     pub replay_cache: ReplayCache,
+    /// Rate limiter for handshake endpoints.
+    pub handshake_limiter: RateLimiter,
     /// Prometheus metrics registry.
     pub metrics: Arc<Metrics>,
 }
@@ -323,6 +326,13 @@ impl AppState {
         let metrics = Metrics::new();
         metrics.register();
 
+        // Warn if client registry is empty on mainnet.
+        if config.network == "mainnet" && client_registry.keys.is_empty() {
+            tracing::warn!(
+                "CLIENT_KEYS_FILE not set on mainnet — open enrollment mode (any Ed25519 key can authenticate)"
+            );
+        }
+
         Self {
             chain_registry: Arc::new(chain_registry),
             jwt_validator: Arc::new(jwt_validator),
@@ -331,8 +341,9 @@ impl AppState {
             server_signing_key: Arc::new(server_signing_key),
             session_store: SessionStore::new(),
             client_registry: Arc::new(client_registry),
-            revoked_keys: Arc::new(revoked_keys),
+            revoked_keys: Arc::new(RwLock::new(revoked_keys)),
             replay_cache: ReplayCache::new(),
+            handshake_limiter: RateLimiter::new(10), // 10 req/sec per key
             metrics: Arc::new(metrics),
         }
     }
@@ -373,7 +384,13 @@ impl AppState {
     }
 
     /// Check if a key_id is revoked.
-    pub fn is_key_revoked(&self, key_id: &str) -> bool {
-        self.revoked_keys.contains(key_id)
+    pub async fn is_key_revoked(&self, key_id: &str) -> bool {
+        self.revoked_keys.read().await.contains(key_id)
+    }
+
+    /// Dynamically revoke a key (adds to the revoked set).
+    pub async fn revoke_key(&self, key_id: String) -> bool {
+        let mut revoked = self.revoked_keys.write().await;
+        revoked.insert(key_id)
     }
 }

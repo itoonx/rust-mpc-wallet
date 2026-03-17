@@ -35,6 +35,7 @@ pub fn build_router(state: AppState, cors_origins: &[String]) -> Router {
             post(routes::auth::refresh_session),
         )
         .route("/v1/auth/revoked-keys", get(routes::auth::revoked_keys))
+        .route("/v1/auth/revoke-key", post(routes::auth::revoke_key))
         .with_state(auth_state);
 
     // Public routes (no auth required) — health, chains, and auth handshake.
@@ -95,6 +96,7 @@ pub fn build_router(state: AppState, cors_origins: &[String]) -> Router {
                 HeaderName::from_static("x-api-key"),
                 HeaderName::from_static("x-signature"),
                 HeaderName::from_static("x-timestamp"),
+                HeaderName::from_static("x-session-token"),
             ])
             .max_age(std::time::Duration::from_secs(3600))
     };
