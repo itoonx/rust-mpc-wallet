@@ -138,7 +138,7 @@ impl AppConfig {
     }
 
     /// Create a test configuration (bypasses env var requirements).
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn for_test() -> Self {
         Self {
             port: 3000,

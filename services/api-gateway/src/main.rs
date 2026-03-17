@@ -7,27 +7,11 @@
 //! 4. RBAC enforcement per route handler
 //! 5. Audit logging of all auth events
 
-pub mod auth;
-mod config;
-mod middleware;
-mod models;
-mod routes;
-mod state;
+use mpc_wallet_api::build_router;
+use mpc_wallet_api::config::AppConfig;
+use mpc_wallet_api::state::AppState;
 
-use axum::{
-    http::{header, HeaderName, Method},
-    middleware as axum_mw,
-    routing::{get, post},
-    Router,
-};
-use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-use crate::config::AppConfig;
-use crate::middleware::auth::auth_middleware;
-use crate::middleware::hmac::hmac_middleware;
-use crate::routes::auth::AuthRouteState;
-use crate::state::AppState;
 
 #[tokio::main]
 async fn main() {
@@ -58,95 +42,6 @@ async fn main() {
     .unwrap();
 }
 
-/// Build the Axum router with all routes and security layers.
-pub fn build_router(state: AppState, cors_origins: &[String]) -> Router {
-    // Auth handshake routes (no auth required — this IS the auth flow).
-    let auth_state = AuthRouteState {
-        app: state.clone(),
-        pending: crate::routes::auth::PendingHandshakes::new(),
-    };
-    let auth_routes = Router::new()
-        .route("/v1/auth/hello", post(routes::auth::auth_hello))
-        .route("/v1/auth/verify", post(routes::auth::auth_verify))
-        .route(
-            "/v1/auth/refresh-session",
-            post(routes::auth::refresh_session),
-        )
-        .route("/v1/auth/revoked-keys", get(routes::auth::revoked_keys))
-        .with_state(auth_state);
-
-    // Public routes (no auth required) — health, chains, and auth handshake.
-    let public_routes = Router::new()
-        .route("/v1/health", get(routes::health::health))
-        .route("/v1/chains", get(routes::chains::list_chains));
-
-    // Protected routes (auth + RBAC + HMAC signing).
-    let protected_routes = Router::new()
-        .route("/v1/metrics", get(routes::health::metrics))
-        .route("/v1/wallets", post(routes::wallets::create_wallet))
-        .route("/v1/wallets", get(routes::wallets::list_wallets))
-        .route("/v1/wallets/{id}", get(routes::wallets::get_wallet))
-        .route("/v1/wallets/{id}/sign", post(routes::wallets::sign_message))
-        .route(
-            "/v1/wallets/{id}/transactions",
-            post(routes::transactions::create_transaction),
-        )
-        .route(
-            "/v1/wallets/{id}/simulate",
-            post(routes::transactions::simulate_transaction),
-        )
-        .route(
-            "/v1/wallets/{id}/refresh",
-            post(routes::wallets::refresh_wallet),
-        )
-        .route(
-            "/v1/wallets/{id}/freeze",
-            post(routes::wallets::freeze_wallet),
-        )
-        .route(
-            "/v1/wallets/{id}/unfreeze",
-            post(routes::wallets::unfreeze_wallet),
-        )
-        .route(
-            "/v1/chains/{chain}/address/{id}",
-            get(routes::chains::derive_address),
-        )
-        .layer(axum_mw::from_fn(hmac_middleware))
-        .layer(axum_mw::from_fn_with_state(state.clone(), auth_middleware));
-
-    // CORS configuration — restricted in production.
-    let cors = if cors_origins.is_empty() {
-        // No origins configured: allow all (dev mode).
-        CorsLayer::permissive()
-    } else {
-        CorsLayer::new()
-            .allow_origin(
-                cors_origins
-                    .iter()
-                    .filter_map(|o| o.parse().ok())
-                    .collect::<Vec<_>>(),
-            )
-            .allow_methods([Method::GET, Method::POST])
-            .allow_headers([
-                header::AUTHORIZATION,
-                header::CONTENT_TYPE,
-                HeaderName::from_static("x-api-key"),
-                HeaderName::from_static("x-signature"),
-                HeaderName::from_static("x-timestamp"),
-            ])
-            .max_age(std::time::Duration::from_secs(3600))
-    };
-
-    Router::new()
-        .merge(auth_routes)
-        .merge(public_routes)
-        .merge(protected_routes)
-        .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
-        .layer(cors)
-        .with_state(state)
-}
-
 async fn shutdown_signal() {
     tokio::signal::ctrl_c()
         .await
@@ -159,7 +54,16 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use axum::middleware as axum_mw;
+    use axum::routing::get;
+    use axum::Router;
     use tower::ServiceExt;
+
+    use mpc_wallet_api::auth::handshake::ServerHandshake;
+    use mpc_wallet_api::auth::types::*;
+    use mpc_wallet_api::middleware::auth::auth_middleware;
+    use mpc_wallet_api::middleware::hmac::compute_signature;
+    use mpc_wallet_api::routes;
 
     fn test_state() -> AppState {
         AppState::from_config(&AppConfig::for_test())
@@ -241,7 +145,6 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        // Error should NOT leak "invalid API key" or specific auth details.
         assert_eq!(json["error"].as_str().unwrap(), "authentication failed");
     }
 
@@ -286,7 +189,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let sig = crate::middleware::hmac::compute_signature(
+        let sig = compute_signature(
             "test-viewer-key",
             timestamp,
             "POST",
@@ -303,7 +206,6 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        // Viewer cannot keygen → 403
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
@@ -318,7 +220,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let sig = crate::middleware::hmac::compute_signature(
+        let sig = compute_signature(
             "test-viewer-key",
             timestamp,
             "POST",
@@ -349,7 +251,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let sig = crate::middleware::hmac::compute_signature(
+        let sig = compute_signature(
             "test-initiator-key",
             timestamp,
             "POST",
@@ -366,7 +268,6 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        // Initiator can sign → gets 404 (wallet not found, not 403)
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
@@ -387,7 +288,6 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        // Missing X-Signature → 401
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -518,7 +418,6 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        // Wrong version → auth_failed() returns 401
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -535,12 +434,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handshake_then_session_token_auth() {
-        use crate::auth::handshake::ServerHandshake;
-        use crate::auth::types::*;
-
         let state = test_state();
 
-        // Run handshake directly (tested in handshake.rs unit tests).
         let mut key_bytes = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key_bytes);
         let client_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
@@ -568,7 +463,6 @@ mod tests {
         let mut hs = ServerHandshake::new(state.server_signing_key.as_ref().clone());
         let server_hello = hs.process_client_hello(&client_hello).unwrap();
 
-        // Build client auth (same transcript logic as handshake unit tests).
         use sha2::{Digest, Sha256};
         let mut transcript = Sha256::new();
         transcript.update(serde_json::to_vec(&client_hello).unwrap());
@@ -598,10 +492,8 @@ mod tests {
         let session_id = session.session_id.clone();
         assert_eq!(session.client_key_id, client_key_id);
 
-        // Store session.
         state.session_store.store(session).await;
 
-        // Verify session token works in auth middleware.
         let protected = Router::new()
             .route("/v1/wallets", get(routes::wallets::list_wallets))
             .layer(axum_mw::from_fn_with_state(state.clone(), auth_middleware))
@@ -633,7 +525,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let sig = crate::middleware::hmac::compute_signature(
+        let sig = compute_signature(
             "test-admin-key",
             timestamp,
             "POST",

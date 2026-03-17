@@ -76,16 +76,14 @@ impl ClientKeyEntry {
 }
 
 /// Trusted client key registry.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ClientKeyRegistry {
     pub keys: HashMap<String, ClientKeyEntry>,
 }
 
 impl ClientKeyRegistry {
     pub fn new() -> Self {
-        Self {
-            keys: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn from_entries(entries: Vec<ClientKeyEntry>) -> Self {
@@ -119,11 +117,17 @@ pub struct ReplayCache {
     cache: Arc<RwLock<HashMap<String, u64>>>,
 }
 
-impl ReplayCache {
-    pub fn new() -> Self {
+impl Default for ReplayCache {
+    fn default() -> Self {
         Self {
             cache: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+}
+
+impl ReplayCache {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Check if a nonce has been seen. If not, record it with TTL.
@@ -159,7 +163,7 @@ pub struct AppState {
     /// JWT validator for Bearer token auth.
     pub jwt_validator: Arc<JwtValidator>,
     /// HMAC key for API key hashing (derived from JWT secret).
-    hmac_key: Arc<Vec<u8>>,
+    pub hmac_key: Arc<Vec<u8>>,
     /// Hashed, scoped API keys.
     pub api_keys: Vec<ApiKeyEntry>,
     /// Server Ed25519 signing key for handshake auth.
@@ -186,6 +190,12 @@ pub struct Metrics {
     pub auth_failures: prometheus::IntCounter,
     pub handshake_total: prometheus::IntCounter,
     pub handshake_failures: prometheus::IntCounter,
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Metrics {

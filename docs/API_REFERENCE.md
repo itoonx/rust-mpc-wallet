@@ -15,20 +15,163 @@ All responses follow the format:
 
 ## Authentication
 
-Two methods supported — middleware selects based on header present:
+Three methods supported — middleware checks in order, uses first match:
 
-### API Key (service-to-service)
+### 1. Session Token (key-exchange handshake)
 ```
-X-API-Key: your-api-key
+X-Session-Token: <session_token>
+```
+Obtained via the `/v1/auth/hello` → `/v1/auth/verify` handshake flow (see below).
+Provides mutual authentication with forward secrecy (X25519 ECDH + Ed25519).
+
+### 2. API Key (service-to-service)
+```
+X-API-Key: sk_prod_abcdef1234567890
 ```
 
-### JWT Bearer Token (user-facing)
+### 3. JWT Bearer Token (user-facing)
 ```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
+Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
 ```
-
-JWT claims must include: `sub`, `exp`, `iat`, `iss`.
+Supports RS256/ES256/HS256. JWT claims must include: `sub`, `exp`, `iat`, `iss`.
 Optional: `roles` (array), `dept`, `cost_center`, `risk_tier`, `mfa_verified`.
+
+**Middleware priority:** `X-Session-Token` → `X-API-Key` → `Authorization: Bearer` → 401.
+
+> Full protocol specification: `specs/AUTH_SPEC.md` (28 sections, 1,067 lines)
+
+---
+
+## Auth Endpoints (no auth required)
+
+### POST /v1/auth/hello
+
+Initiate key-exchange handshake. Client sends ephemeral X25519 pubkey + Ed25519 key ID.
+
+**Request:**
+```json
+{
+  "protocol_version": "mpc-wallet-auth-v1",
+  "supported_kex": ["x25519"],
+  "supported_sig": ["ed25519"],
+  "client_ephemeral_pubkey": "c8a1c6b3...a4f2e1d9",
+  "client_nonce": "5f3a2e9c...1b7d4a8f",
+  "timestamp": 1710768000,
+  "client_key_id": "a1b2c3d4e5f6g7h8"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `protocol_version` | string | Must be `"mpc-wallet-auth-v1"` |
+| `supported_kex` | array | ECDH algorithms, must include `"x25519"` |
+| `supported_sig` | array | Signature algorithms, must include `"ed25519"` |
+| `client_ephemeral_pubkey` | hex | X25519 public key (32 bytes) |
+| `client_nonce` | hex | Random nonce (32 bytes) |
+| `timestamp` | u64 | UNIX seconds, server enforces ±30s drift |
+| `client_key_id` | hex | First 8 bytes of client's Ed25519 pubkey |
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "data": {
+    "protocol_version": "mpc-wallet-auth-v1",
+    "selected_kex": "x25519",
+    "selected_sig": "ed25519",
+    "selected_aead": "chacha20-poly1305",
+    "server_ephemeral_pubkey": "3f7a1e2b...9c4d5f6a",
+    "server_nonce": "8e2c4d7a...1f3b5c9e",
+    "server_challenge": "1a2b3c4d...5e6f7a8b",
+    "timestamp": 1710768001,
+    "server_key_id": "b2c3d4e5f6g7h8i9",
+    "server_signature": "ea3f1c9b...2d7e5a4f"
+  }
+}
+```
+
+### POST /v1/auth/verify
+
+Complete handshake — client proves identity via Ed25519 signature over transcript hash.
+
+**Request:**
+```json
+{
+  "server_challenge": "1a2b3c4d...5e6f7a8b",
+  "client_signature": "f3e8c1a9...2b7d4e6c",
+  "client_static_pubkey": "d5e6f7a8...b1c2d3e4"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `server_challenge` | hex | Echo of server's challenge from `/hello` |
+| `client_signature` | hex | Ed25519 signature over transcript hash (64 bytes) |
+| `client_static_pubkey` | hex | Client's long-lived Ed25519 public key (32 bytes) |
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "data": {
+    "session_id": "a1b2c3d4e5f6g7h8",
+    "expires_at": 1710771600,
+    "session_token": "a1b2c3d4e5f6g7h8",
+    "key_fingerprint": "4a5b6c7d8e9f0a1b"
+  }
+}
+```
+
+Use the returned `session_token` in subsequent requests via `X-Session-Token` header.
+Default TTL: 3600 seconds (1 hour).
+
+### POST /v1/auth/refresh-session
+
+Extend session TTL before expiry.
+
+**Request:**
+```json
+{
+  "session_token": "a1b2c3d4e5f6g7h8"
+}
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "data": {
+    "session_id": "a1b2c3d4e5f6g7h8",
+    "expires_at": 1710775200,
+    "session_token": "a1b2c3d4e5f6g7h8"
+  }
+}
+```
+
+### GET /v1/auth/revoked-keys
+
+List revoked key IDs (clients should check before handshake).
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "data": ["key_id_1", "key_id_2"]
+}
+```
+
+### Auth Error Handling
+
+All auth errors return generic `"authentication failed"` — no details leaked to prevent enumeration.
+
+| Status | Cause |
+|--------|-------|
+| 400 | Malformed message |
+| 401 | Invalid/expired session, signature failure, timestamp drift, revoked key |
+| 429 | Rate limit (handshake: 10/min per IP, 5/min per key_id) |
+| 503 | Pending handshakes cache full |
+
+**Abuse controls:** 5 failed handshakes per IP in 5 min → 15 min block. 3 failures per key_id in 5 min → 30 min block.
 
 ---
 

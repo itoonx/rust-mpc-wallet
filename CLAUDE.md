@@ -18,6 +18,8 @@ crates/
   mpc-wallet-core/    ← MPC protocols, transport, key store (traits + impls)
   mpc-wallet-chains/  ← Chain providers: EVM, Bitcoin, Solana, Sui
   mpc-wallet-cli/     ← CLI binary (demo only)
+services/
+  api-gateway/        ← REST API server, auth middleware, route handlers
 docs/
   AGENTS.md           ← Agent roles, ownership, instructions (READ THIS NEXT)
   SPRINT.md           ← Current sprint tasks + Gate Status table
@@ -25,6 +27,13 @@ docs/
   PRD.md              ← Product requirements
   EPICS.md            ← Epic A–J breakdown
   DECISIONS.md        ← DEC-001..N decision log
+specs/
+  AUTH_SPEC.md        ← Key-exchange auth protocol spec (28 sections)
+retro/
+  RETRO.md            ← Retrospective index (decisions, lessons, security)
+  decisions/          ← DEC-001..010 architectural decision records
+  lessons/            ← L-001..006 bugs, root causes, fixes
+  security/           ← AUTH-AUDIT-001 security audit reports
 LESSONS.md            ← Bugs found, root causes, fixes, key insights (READ BEFORE CODING)
 ```
 
@@ -85,6 +94,27 @@ git commit -m "[R{N}] complete: {task summary}"
 ---
 
 ## Current State (as of Sprint 14 — all epics complete, CI green)
+
+### Auth System (key-exchange handshake)
+
+Three auth methods — middleware checks in order: `X-Session-Token` → `X-API-Key` → `Authorization: Bearer`.
+
+**Key-exchange handshake** (primary method for SDK clients):
+- `POST /v1/auth/hello` — ClientHello (X25519 ephemeral key + Ed25519 key ID)
+- `POST /v1/auth/verify` — ClientAuth (Ed25519 signature over transcript) → returns session token
+- `POST /v1/auth/refresh-session` — extend session TTL
+- `GET /v1/auth/revoked-keys` — key revocation list
+
+Properties: mutual auth, forward secrecy (per-session X25519 ECDH), ChaCha20-Poly1305 AEAD, HKDF-SHA256 KDF.
+
+**Key files:**
+- `services/api-gateway/src/auth/` — types, handshake state machine, client SDK, session store
+- `services/api-gateway/src/routes/auth.rs` — endpoint handlers
+- `services/api-gateway/src/middleware/auth.rs` — 3-method auth middleware
+- `specs/AUTH_SPEC.md` — full specification (28 sections, 1,067 lines)
+
+**Security audit (2026-03-17):** 53 attack tests in `tests/auth_security_audit.rs`, report at `docs/SECURITY_AUDIT_AUTH.md`.
+Open findings: 2 HIGH (no rate limiting, unbounded session store), 3 MEDIUM (open enrollment, static revocation, UTF-8 edge case).
 
 ### Tests on `main`
 ```
