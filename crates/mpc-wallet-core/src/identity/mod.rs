@@ -47,12 +47,31 @@ pub struct JwtValidator {
 }
 
 impl JwtValidator {
-    /// Create a validator using an HMAC-SHA256 secret.
+    /// Create a validator using an HMAC-SHA256 secret (permissive mode).
+    ///
+    /// Does NOT validate issuer or audience claims. Suitable for tests and
+    /// backward-compatible usage. For production, use [`from_hmac_secret_strict`].
     pub fn from_hmac_secret(secret: &[u8]) -> Self {
         let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
         // Disable issuer/audience checks by default; callers can refine.
         validation.validate_aud = false;
         validation.required_spec_claims.clear();
+        Self {
+            decoding_key: DecodingKey::from_secret(secret),
+            validation,
+        }
+    }
+
+    /// Create a strict validator that enforces issuer and audience claims.
+    ///
+    /// Requires `exp`, `sub`, `iss`, and `aud` claims. Rejects tokens that
+    /// don't match the expected issuer and audience. Use this for production.
+    pub fn from_hmac_secret_strict(secret: &[u8], issuer: &str, audience: &str) -> Self {
+        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+        validation.validate_aud = true;
+        validation.set_audience(&[audience]);
+        validation.set_issuer(&[issuer]);
+        validation.set_required_spec_claims(&["exp", "sub", "iss", "aud"]);
         Self {
             decoding_key: DecodingKey::from_secret(secret),
             validation,
@@ -175,6 +194,87 @@ mod tests {
         let validator = JwtValidator::from_hmac_secret(secret);
         let result = validator.validate(&token);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_strict_validator_accepts_correct_iss_aud() {
+        let secret = b"test-secret-key-for-hmac-256-validation";
+        let claims = TokenClaims {
+            sub: "alice".into(),
+            exp: future_exp(),
+            iat: 0,
+            iss: "my-issuer".into(),
+            aud: Some("my-audience".into()),
+            roles: vec!["admin".into()],
+            dept: None,
+            cost_center: None,
+            risk_tier: None,
+            mfa_verified: false,
+        };
+        let token = make_token(&claims, secret);
+        let validator = JwtValidator::from_hmac_secret_strict(secret, "my-issuer", "my-audience");
+        let ctx = validator.validate(&token).unwrap();
+        assert_eq!(ctx.user_id, "alice");
+    }
+
+    #[test]
+    fn test_strict_validator_rejects_wrong_issuer() {
+        let secret = b"test-secret-key-for-hmac-256-validation";
+        let claims = TokenClaims {
+            sub: "alice".into(),
+            exp: future_exp(),
+            iat: 0,
+            iss: "wrong-issuer".into(),
+            aud: Some("my-audience".into()),
+            roles: vec![],
+            dept: None,
+            cost_center: None,
+            risk_tier: None,
+            mfa_verified: false,
+        };
+        let token = make_token(&claims, secret);
+        let validator = JwtValidator::from_hmac_secret_strict(secret, "my-issuer", "my-audience");
+        assert!(validator.validate(&token).is_err());
+    }
+
+    #[test]
+    fn test_strict_validator_rejects_wrong_audience() {
+        let secret = b"test-secret-key-for-hmac-256-validation";
+        let claims = TokenClaims {
+            sub: "alice".into(),
+            exp: future_exp(),
+            iat: 0,
+            iss: "my-issuer".into(),
+            aud: Some("wrong-audience".into()),
+            roles: vec![],
+            dept: None,
+            cost_center: None,
+            risk_tier: None,
+            mfa_verified: false,
+        };
+        let token = make_token(&claims, secret);
+        let validator = JwtValidator::from_hmac_secret_strict(secret, "my-issuer", "my-audience");
+        assert!(validator.validate(&token).is_err());
+    }
+
+    #[test]
+    fn test_strict_validator_rejects_missing_aud() {
+        let secret = b"test-secret-key-for-hmac-256-validation";
+        let claims = TokenClaims {
+            sub: "alice".into(),
+            exp: future_exp(),
+            iat: 0,
+            iss: "my-issuer".into(),
+            aud: None,
+            roles: vec![],
+            dept: None,
+            cost_center: None,
+            risk_tier: None,
+            mfa_verified: false,
+        };
+        let token = make_token(&claims, secret);
+        let validator = JwtValidator::from_hmac_secret_strict(secret, "my-issuer", "my-audience");
+        assert!(validator.validate(&token).is_err());
     }
 
     #[test]

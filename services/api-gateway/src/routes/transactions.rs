@@ -1,12 +1,13 @@
-//! Transaction and simulation endpoints.
+//! Transaction and simulation endpoints with RBAC enforcement.
 
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
 
 use mpc_wallet_chains::provider::{Chain, TransactionParams};
+use mpc_wallet_core::rbac::{ApiRole, AuthContext, Permissions};
 
 use crate::models::request::{SimulateRequest, TransactionRequest};
 use crate::models::response::{ApiResponse, SimulationResponse, TransactionResponse};
@@ -32,17 +33,27 @@ fn explorer_url(chain: Chain, tx_hash: &str) -> Option<String> {
 }
 
 /// `POST /v1/wallets/:id/transactions` — build + sign + broadcast.
+/// Requires: Initiator or Admin + risk tier check
 pub async fn create_transaction(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(wallet_id): Path<String>,
     Json(req): Json<TransactionRequest>,
 ) -> Result<Json<ApiResponse<TransactionResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    Permissions::require_role(&ctx, &[ApiRole::Initiator, ApiRole::Admin]).map_err(|_| {
+        (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse::err("insufficient permissions")),
+        )
+    })?;
+    Permissions::check_risk_tier_for_signing(&ctx)
+        .map_err(|e| (StatusCode::FORBIDDEN, Json(ApiResponse::err(e.to_string()))))?;
+
     let chain: Chain = req
         .chain
         .parse()
         .map_err(|e: String| (StatusCode::BAD_REQUEST, Json(ApiResponse::err(e))))?;
 
-    // Verify chain provider exists.
     let _provider = state.chain_registry.provider(chain).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -50,7 +61,6 @@ pub async fn create_transaction(
         )
     })?;
 
-    // Parse optional calldata.
     let data = req
         .data
         .as_deref()
@@ -74,13 +84,6 @@ pub async fn create_transaction(
 
     state.metrics.sign_total.inc();
 
-    // In production:
-    // 1. Load key share from key store by wallet_id
-    // 2. Build unsigned tx: provider.build_transaction(params)
-    // 3. MPC sign: protocol.sign(key_share, signers, sign_payload, transport)
-    // 4. Finalize: provider.finalize_transaction(unsigned, signature)
-    // 5. Broadcast: chain_registry.broadcast(signed)
-
     Err((
         StatusCode::NOT_FOUND,
         Json(ApiResponse::err(format!(
@@ -90,11 +93,29 @@ pub async fn create_transaction(
 }
 
 /// `POST /v1/wallets/:id/simulate` — simulate transaction risk.
+/// Requires: Viewer+
 pub async fn simulate_transaction(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(_wallet_id): Path<String>,
     Json(req): Json<SimulateRequest>,
 ) -> Result<Json<ApiResponse<SimulationResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    Permissions::require_role(
+        &ctx,
+        &[
+            ApiRole::Viewer,
+            ApiRole::Initiator,
+            ApiRole::Approver,
+            ApiRole::Admin,
+        ],
+    )
+    .map_err(|_| {
+        (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse::err("insufficient permissions")),
+        )
+    })?;
+
     let chain: Chain = req
         .chain
         .parse()
@@ -142,7 +163,6 @@ pub async fn simulate_transaction(
     }
 }
 
-// Re-export explorer_url for use in tests
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,7 +179,6 @@ mod tests {
         let url = explorer_url(Chain::Solana, "sig123").unwrap();
         assert!(url.contains("explorer.solana.com"));
 
-        // Unknown chain returns None
         assert!(explorer_url(Chain::Monero, "x").is_none());
     }
 }

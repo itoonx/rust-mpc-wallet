@@ -3363,6 +3363,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "hex",
+ "hmac",
  "jsonwebtoken",
  "mpc-wallet-chains",
  "mpc-wallet-core",
@@ -3370,6 +3371,8 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tower",

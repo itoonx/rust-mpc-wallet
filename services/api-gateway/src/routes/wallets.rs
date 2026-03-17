@@ -1,10 +1,15 @@
 //! Wallet management endpoints: create, list, get, freeze, unfreeze, refresh.
+//!
+//! Every handler extracts `AuthContext` from request extensions and enforces
+//! RBAC permissions before processing the request.
 
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    Json,
+    Extension, Json,
 };
+
+use mpc_wallet_core::rbac::{ApiRole, AuthContext, Permissions};
 
 use crate::models::request::{CreateWalletRequest, SignRequest};
 use crate::models::response::{
@@ -12,14 +17,49 @@ use crate::models::response::{
 };
 use crate::state::AppState;
 
+/// Helper: extract AuthContext and check required roles.
+fn require_roles(
+    ctx: &AuthContext,
+    roles: &[ApiRole],
+) -> Result<(), (StatusCode, Json<ApiResponse<()>>)> {
+    Permissions::require_role(ctx, roles).map_err(|e| {
+        tracing::warn!(
+            user_id = %ctx.user_id,
+            required = ?roles,
+            actual = ?ctx.roles,
+            "RBAC denied: {e}"
+        );
+        (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse::err("insufficient permissions")),
+        )
+    })
+}
+
+/// Helper: require Admin + MFA.
+fn require_admin_mfa(ctx: &AuthContext) -> Result<(), (StatusCode, Json<ApiResponse<()>>)> {
+    Permissions::can_freeze_key_mfa(ctx).map_err(|e| {
+        tracing::warn!(
+            user_id = %ctx.user_id,
+            mfa = ctx.mfa_verified,
+            "RBAC denied (admin+MFA): {e}"
+        );
+        (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse::err("insufficient permissions")),
+        )
+    })
+}
+
 /// `POST /v1/wallets` — create a new MPC wallet (keygen).
-///
-/// In production this triggers a distributed keygen ceremony across MPC nodes.
-/// This stub validates the request and returns a wallet ID.
+/// Requires: Admin + MFA
 pub async fn create_wallet(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Json(req): Json<CreateWalletRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<WalletResponse>>), (StatusCode, Json<ApiResponse<()>>)> {
+    require_admin_mfa(&ctx)?;
+
     // Validate scheme.
     let _scheme: mpc_wallet_core::types::CryptoScheme = req
         .scheme
@@ -44,8 +84,6 @@ pub async fn create_wallet(
         .unwrap_or_default()
         .as_secs();
 
-    // In production: initiate MPC keygen ceremony via transport layer,
-    // store resulting key shares, and return the group ID.
     Ok((
         StatusCode::CREATED,
         Json(ApiResponse::ok(WalletResponse {
@@ -60,19 +98,41 @@ pub async fn create_wallet(
 }
 
 /// `GET /v1/wallets` — list all wallets.
-///
-/// In production this reads from the key store.
-pub async fn list_wallets(State(_state): State<AppState>) -> Json<ApiResponse<WalletListResponse>> {
-    // In production: call key_store.list() and map to WalletResponse.
-    Json(ApiResponse::ok(WalletListResponse { wallets: vec![] }))
+/// Requires: Viewer+
+pub async fn list_wallets(
+    State(_state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> Result<Json<ApiResponse<WalletListResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+    require_roles(
+        &ctx,
+        &[
+            ApiRole::Viewer,
+            ApiRole::Initiator,
+            ApiRole::Approver,
+            ApiRole::Admin,
+        ],
+    )?;
+    Ok(Json(ApiResponse::ok(WalletListResponse {
+        wallets: vec![],
+    })))
 }
 
 /// `GET /v1/wallets/:id` — get wallet details.
+/// Requires: Viewer+
 pub async fn get_wallet(
     State(_state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(wallet_id): Path<String>,
 ) -> Result<Json<ApiResponse<WalletDetailResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
-    // In production: load from key store, derive addresses for compatible chains.
+    require_roles(
+        &ctx,
+        &[
+            ApiRole::Viewer,
+            ApiRole::Initiator,
+            ApiRole::Approver,
+            ApiRole::Admin,
+        ],
+    )?;
     Err((
         StatusCode::NOT_FOUND,
         Json(ApiResponse::err(format!("wallet {wallet_id} not found"))),
@@ -80,12 +140,17 @@ pub async fn get_wallet(
 }
 
 /// `POST /v1/wallets/:id/sign` — sign a message.
+/// Requires: Initiator or Admin + risk tier check
 pub async fn sign_message(
     State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(wallet_id): Path<String>,
     Json(req): Json<SignRequest>,
 ) -> Result<Json<ApiResponse<SignResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
-    // Validate hex-encoded message.
+    require_roles(&ctx, &[ApiRole::Initiator, ApiRole::Admin])?;
+    Permissions::check_risk_tier_for_signing(&ctx)
+        .map_err(|e| (StatusCode::FORBIDDEN, Json(ApiResponse::err(e.to_string()))))?;
+
     let _message_bytes = hex::decode(&req.message).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -95,7 +160,6 @@ pub async fn sign_message(
 
     state.metrics.sign_total.inc();
 
-    // In production: load key share, initiate MPC signing ceremony.
     Err((
         StatusCode::NOT_FOUND,
         Json(ApiResponse::err(format!(
@@ -105,11 +169,13 @@ pub async fn sign_message(
 }
 
 /// `POST /v1/wallets/:id/refresh` — proactive key refresh.
+/// Requires: Admin + MFA
 pub async fn refresh_wallet(
     State(_state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(wallet_id): Path<String>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiResponse<()>>)> {
-    // In production: load key share, initiate refresh ceremony.
+    require_admin_mfa(&ctx)?;
     Err((
         StatusCode::NOT_FOUND,
         Json(ApiResponse::err(format!(
@@ -119,11 +185,13 @@ pub async fn refresh_wallet(
 }
 
 /// `POST /v1/wallets/:id/freeze` — freeze wallet.
+/// Requires: Admin + MFA
 pub async fn freeze_wallet(
     State(_state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(wallet_id): Path<String>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiResponse<()>>)> {
-    // In production: call key_store.freeze(group_id).
+    require_admin_mfa(&ctx)?;
     Err((
         StatusCode::NOT_FOUND,
         Json(ApiResponse::err(format!(
@@ -133,11 +201,13 @@ pub async fn freeze_wallet(
 }
 
 /// `POST /v1/wallets/:id/unfreeze` — unfreeze wallet.
+/// Requires: Admin + MFA
 pub async fn unfreeze_wallet(
     State(_state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
     Path(wallet_id): Path<String>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiResponse<()>>)> {
-    // In production: call key_store.unfreeze(group_id).
+    require_admin_mfa(&ctx)?;
     Err((
         StatusCode::NOT_FOUND,
         Json(ApiResponse::err(format!(
