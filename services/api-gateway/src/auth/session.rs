@@ -1,6 +1,7 @@
 //! Session store for authenticated sessions.
 //!
-//! Provides an in-memory session store with automatic expiration.
+//! Provides an in-memory session store with automatic expiration,
+//! size cap, and background pruning.
 //! Production deployments should back this with Redis or a distributed store.
 
 use std::collections::HashMap;
@@ -11,7 +12,13 @@ use tokio::sync::RwLock;
 
 use super::types::AuthenticatedSession;
 
-/// In-memory session store.
+/// Maximum number of sessions stored before rejecting new ones.
+pub const MAX_SESSIONS: usize = 100_000;
+
+/// Background prune interval (seconds).
+const PRUNE_INTERVAL_SECS: u64 = 60;
+
+/// In-memory session store with size cap and background pruning.
 #[derive(Clone)]
 pub struct SessionStore {
     sessions: Arc<RwLock<HashMap<String, AuthenticatedSession>>>,
@@ -30,10 +37,36 @@ impl SessionStore {
         }
     }
 
-    /// Store an authenticated session.
-    pub async fn store(&self, session: AuthenticatedSession) {
+    /// Spawn a background task that prunes expired sessions every 60 seconds.
+    pub fn spawn_prune_task(&self) {
+        let store = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(PRUNE_INTERVAL_SECS)).await;
+                let pruned = store.prune_expired().await;
+                if pruned > 0 {
+                    let remaining = store.count().await;
+                    tracing::info!(pruned, remaining, "session store pruned");
+                }
+            }
+        });
+    }
+
+    /// Store an authenticated session. Returns false if at capacity (DoS protection).
+    /// Expired sessions are cleaned up by the background prune task (every 60s).
+    pub async fn store(&self, session: AuthenticatedSession) -> bool {
         let mut sessions = self.sessions.write().await;
+
+        if sessions.len() >= MAX_SESSIONS {
+            tracing::warn!(
+                count = sessions.len(),
+                "session store at capacity — rejecting new session"
+            );
+            return false;
+        }
+
         sessions.insert(session.session_id.clone(), session);
+        true
     }
 
     /// Retrieve a session by ID. Returns None if not found or expired.

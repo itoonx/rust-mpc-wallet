@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "MPC Wallet REST API Gateway (Axum)"
 
+[lib]
+name = "mpc_wallet_api"
+path = "src/lib.rs"
+
 [[bin]]
 name = "mpc-wallet-api"
 path = "src/main.rs"

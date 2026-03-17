@@ -18,6 +18,8 @@ crates/
   mpc-wallet-core/    ← MPC protocols, transport, key store (traits + impls)
   mpc-wallet-chains/  ← Chain providers: EVM, Bitcoin, Solana, Sui
   mpc-wallet-cli/     ← CLI binary (demo only)
+services/
+  api-gateway/        ← REST API server, auth middleware, route handlers
 docs/
   AGENTS.md           ← Agent roles, ownership, instructions (READ THIS NEXT)
   SPRINT.md           ← Current sprint tasks + Gate Status table
@@ -25,6 +27,14 @@ docs/
   PRD.md              ← Product requirements
   EPICS.md            ← Epic A–J breakdown
   DECISIONS.md        ← DEC-001..N decision log
+specs/
+  AUTH_SPEC.md        ← Key-exchange auth protocol spec (28 sections)
+  SIGN_AUTHORIZATION_SPEC.md ← MPC node independent verification spec
+retro/
+  RETRO.md            ← Retrospective index (decisions, lessons, security)
+  decisions/          ← DEC-001..010 architectural decision records
+  lessons/            ← L-001..006 bugs, root causes, fixes
+  security/           ← AUTH-AUDIT-001 security audit reports
 LESSONS.md            ← Bugs found, root causes, fixes, key insights (READ BEFORE CODING)
 ```
 
@@ -85,6 +95,66 @@ git commit -m "[R{N}] complete: {task summary}"
 ---
 
 ## Current State (as of Sprint 14 — all epics complete, CI green)
+
+### Auth System (key-exchange handshake)
+
+Three auth methods — middleware checks in order: `X-Session-Token` → `X-API-Key` → `Authorization: Bearer`.
+If a header is **present** but invalid, auth fails immediately — no fall-through to the next method.
+
+**Key-exchange handshake** (primary method for SDK clients):
+- `POST /v1/auth/hello` — ClientHello (X25519 ephemeral key + Ed25519 key ID), rate-limited (10 req/sec per key_id)
+- `POST /v1/auth/verify` — ClientAuth (Ed25519 signature over transcript) → returns session token
+- `POST /v1/auth/refresh-session` — extend session TTL
+- `GET /v1/auth/revoked-keys` — key revocation list
+- `POST /v1/auth/revoke-key` — dynamic key revocation (admin)
+
+Properties: mutual auth, forward secrecy (per-session X25519 ECDH), ChaCha20-Poly1305 AEAD, HKDF-SHA256 KDF.
+
+**Architecture (`services/api-gateway/`):**
+```
+src/
+  lib.rs              ← Library crate (public modules, build_router())
+  main.rs             ← Binary entry point (uses lib, starts prune task)
+  auth/
+    types.rs          ← Message types, AuthenticatedSession (Zeroize+ZeroizeOnDrop), transcript hashing
+    handshake.rs      ← Server-side handshake state machine
+    client.rs         ← Client SDK (HandshakeClient)
+    session.rs        ← SessionStore (100k cap, lazy prune, background prune every 60s)
+  routes/
+    auth.rs           ← Handshake endpoints + dynamic revoke-key
+  middleware/
+    auth.rs           ← 3-method auth middleware (presence-based, no fall-through)
+    hmac.rs           ← HMAC request signing for POST mutations
+    rate_limit.rs     ← Token-bucket rate limiter (per-key)
+  state.rs            ← AppState, API key HMAC hashing, RwLock revoked keys, client registry
+  config.rs           ← AppConfig, env loading, for_test()
+tests/
+  auth_security_audit.rs ← 57 security-focused integration tests
+```
+
+**Security audit (2026-03-17):** 57 attack tests, report at `docs/SECURITY_AUDIT_AUTH.md`.
+All HIGH/MEDIUM findings resolved: rate limiting wired, session store capped + pruned, dynamic revocation added, non-UTF8 fall-through fixed, session keys zeroized on drop.
+Remaining LOW/INFO: HMAC 30s replay window (accepted), all-zeros X25519 key (accepted), hardcoded session TTL, 422 vs 401 on downgrade.
+
+Full spec: `specs/AUTH_SPEC.md` (28 sections, 1,067 lines)
+
+### Sign Authorization (MPC node independent verification)
+
+**Problem:** Gateway is a single point of trust. If compromised, attacker can sign any transaction.
+**Solution:** `SignAuthorization` — Ed25519-signed proof that gateway produces after auth + policy + approvals.
+Each MPC node **independently verifies** before participating in signing (DEC-012).
+
+```
+Gateway (creates proof)    →    MPC Node (verifies before sign)
+  - requester_id                  ✓ gateway signature valid
+  - message_hash (binding)        ✓ message hash matches
+  - policy_passed                 ✓ policy check passed
+  - approval_count/required       ✓ approval quorum met
+  - timestamp (2-min TTL)         ✓ not expired
+```
+
+**File:** `crates/mpc-wallet-core/src/protocol/sign_authorization.rs` (9 tests)
+**Spec:** `specs/SIGN_AUTHORIZATION_SPEC.md`
 
 ### Tests on `main`
 ```
@@ -214,8 +284,11 @@ Full findings log → `docs/SECURITY_FINDINGS.md`
 | DEC-007 | ChainRegistry: unified provider factory pattern — single entry point for all chain providers |
 | DEC-008 | FROST reshare = fresh DKG (new group key); GG20 reshare preserves group key via additive re-sharing |
 | DEC-009 | Work on `dev` branch; PR to `main` only after CI green |
+| DEC-010 | Split api-gateway into lib.rs + main.rs for integration test access |
+| DEC-011 | Session keys use `Zeroize + ZeroizeOnDrop`; revoked_keys behind `RwLock` for dynamic revocation |
+| DEC-012 | Sign Authorization: MPC nodes independently verify gateway proof before signing |
 
-Full decision log → `docs/DECISIONS.md`
+Full decision log → `docs/DECISIONS.md` and `retro/decisions/`
 
 ---
 

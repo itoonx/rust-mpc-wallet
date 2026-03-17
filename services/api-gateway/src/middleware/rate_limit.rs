@@ -1,26 +1,15 @@
-//! Per-IP rate limiting middleware using a token bucket.
-#![allow(dead_code)]
+//! Per-key rate limiting for handshake endpoints using a token bucket.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::{
-    extract::{ConnectInfo, Request, State},
-    http::StatusCode,
-    middleware::Next,
-    response::{IntoResponse, Response},
-    Json,
-};
 use tokio::sync::Mutex;
-
-use crate::models::response::ApiResponse;
 
 /// Shared rate limiter state.
 #[derive(Clone)]
 pub struct RateLimiter {
-    buckets: Arc<Mutex<HashMap<IpAddr, TokenBucket>>>,
+    buckets: Arc<Mutex<HashMap<String, TokenBucket>>>,
     max_tokens: u32,
     refill_rate: u32,
 }
@@ -30,9 +19,15 @@ struct TokenBucket {
     last_refill: Instant,
 }
 
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new(10) // 10 requests/sec default
+    }
+}
+
 impl RateLimiter {
     /// Create a new rate limiter.
-    /// `max_rps` = maximum requests per second per IP.
+    /// `max_rps` = maximum requests per second per key.
     pub fn new(max_rps: u32) -> Self {
         Self {
             buckets: Arc::new(Mutex::new(HashMap::new())),
@@ -41,11 +36,13 @@ impl RateLimiter {
         }
     }
 
-    async fn check(&self, ip: IpAddr) -> bool {
+    /// Check if a request is allowed for the given key.
+    /// Returns `true` if allowed, `false` if rate limited.
+    pub async fn check(&self, key: &str) -> bool {
         let mut buckets = self.buckets.lock().await;
         let now = Instant::now();
 
-        let bucket = buckets.entry(ip).or_insert(TokenBucket {
+        let bucket = buckets.entry(key.to_string()).or_insert(TokenBucket {
             tokens: self.max_tokens as f64,
             last_refill: now,
         });
@@ -63,21 +60,4 @@ impl RateLimiter {
             false
         }
     }
-}
-
-/// Rate limiting middleware.
-pub async fn rate_limit_middleware(
-    State(limiter): State<RateLimiter>,
-    ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
-    request: Request,
-    next: Next,
-) -> Response {
-    if !limiter.check(addr.ip()).await {
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(ApiResponse::<()>::err("rate limit exceeded")),
-        )
-            .into_response();
-    }
-    next.run(request).await
 }

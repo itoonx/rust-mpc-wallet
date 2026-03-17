@@ -3,6 +3,7 @@
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use mpc_wallet_core::rbac::ApiRole;
 
@@ -49,6 +50,18 @@ pub fn parse_role(s: &str) -> ApiRole {
         _ => ApiRole::Viewer,
     }
 }
+
+/// Compute HMAC-SHA256 hash of a raw key. Shared utility for API key hashing.
+pub fn compute_hmac_sha256(hmac_key: &[u8], data: &str) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(hmac_key).expect("HMAC can take key of any size");
+    mac.update(data.as_bytes());
+    mac.finalize().into_bytes().into()
+}
+
+/// Valid role names for API key creation.
+pub const VALID_ROLES: &[&str] = &["admin", "initiator", "approver", "viewer"];
 
 /// Auth failure response tuple for route handlers.
 pub fn auth_failed() -> (
@@ -215,7 +228,9 @@ pub struct SessionEstablished {
 }
 
 /// An active authenticated session.
-#[derive(Debug, Clone)]
+///
+/// Session keys are zeroized on drop to prevent key material lingering in memory.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct AuthenticatedSession {
     pub session_id: String,
     pub client_pubkey: [u8; 32],
@@ -224,4 +239,17 @@ pub struct AuthenticatedSession {
     pub server_write_key: [u8; 32],
     pub expires_at: u64,
     pub created_at: u64,
+}
+
+impl std::fmt::Debug for AuthenticatedSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthenticatedSession")
+            .field("session_id", &self.session_id)
+            .field("client_key_id", &self.client_key_id)
+            .field("client_write_key", &"[REDACTED]")
+            .field("server_write_key", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
 }

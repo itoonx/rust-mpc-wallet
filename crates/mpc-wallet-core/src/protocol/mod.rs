@@ -6,6 +6,10 @@ pub mod frost_ed25519;
 pub mod frost_secp256k1;
 /// GG20 threshold ECDSA protocol implementation for secp256k1 (EVM chains).
 pub mod gg20;
+/// Encrypted request context — IP, device, fingerprint for sign audit trail.
+pub mod request_context;
+/// Sign authorization proof — MPC nodes independently verify gateway decisions.
+pub mod sign_authorization;
 /// Threshold Sr25519 protocol on Ristretto255 (Substrate/Polkadot).
 pub mod sr25519;
 /// Threshold signing on Stark curve (StarkNet).

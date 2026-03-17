@@ -1,4 +1,7 @@
 //! Authentication middleware: JWT, API key, and session token validation.
+//!
+//! Priority order: X-Session-Token → X-API-Key → Authorization: Bearer.
+//! If a header is PRESENT but invalid, auth fails immediately — no fall-through.
 
 use axum::{
     extract::{Request, State},
@@ -19,7 +22,19 @@ pub async fn auth_middleware(
     let headers = request.headers();
 
     // Path 1: X-Session-Token (key-exchange handshake session).
-    if let Some(session_id) = headers.get("x-session-token").and_then(|v| v.to_str().ok()) {
+    // If the header is PRESENT (even if malformed), we must resolve here — no fall-through.
+    if headers.contains_key("x-session-token") {
+        let session_id = headers
+            .get("x-session-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if session_id.is_empty() {
+            state.metrics.auth_failures.inc();
+            tracing::warn!("session token auth failed: empty or non-UTF8 header");
+            return auth_failed().into_response();
+        }
+
         match state.session_store.get(session_id).await {
             Some(session) => {
                 tracing::debug!(
@@ -50,16 +65,18 @@ pub async fn auth_middleware(
         }
     }
 
-    // Path 2: X-API-Key (service-to-service).
+    // Path 2: X-API-Key (service-to-service or user-created).
     if let Some(api_key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
-        match state.verify_api_key(api_key) {
-            Some(entry) => {
+        match state.api_key_store.verify(api_key).await {
+            Some(meta) => {
                 tracing::debug!(
-                    key_label = %entry.label,
-                    role = ?entry.role,
+                    key_label = %meta.label,
+                    key_id = %meta.key_id,
+                    role = ?meta.role,
+                    origin = ?meta.origin,
                     "API key auth success"
                 );
-                let ctx = entry.auth_context();
+                let ctx = meta.auth_context();
                 request.extensions_mut().insert(ctx);
                 return next.run(request).await;
             }
