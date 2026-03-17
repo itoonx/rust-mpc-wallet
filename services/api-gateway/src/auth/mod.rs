@@ -19,9 +19,9 @@
 //! - **Transcript binding**: all handshake messages hashed into auth proof
 //! - **Key exchange alone is NOT authentication** — identity is bound via signatures
 
-pub mod api_keys;
 pub mod client;
 pub mod handshake;
+pub mod mtls;
 pub mod session;
 pub mod session_jwt;
 pub mod types;

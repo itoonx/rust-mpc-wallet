@@ -51,18 +51,6 @@ pub fn parse_role(s: &str) -> ApiRole {
     }
 }
 
-/// Compute HMAC-SHA256 hash of a raw key. Shared utility for API key hashing.
-pub fn compute_hmac_sha256(hmac_key: &[u8], data: &str) -> [u8; 32] {
-    use hmac::{Hmac, Mac};
-    type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(hmac_key).expect("HMAC can take key of any size");
-    mac.update(data.as_bytes());
-    mac.finalize().into_bytes().into()
-}
-
-/// Valid role names for API key creation.
-pub const VALID_ROLES: &[&str] = &["admin", "initiator", "approver", "viewer"];
-
 /// Auth failure response tuple for route handlers.
 pub fn auth_failed() -> (
     axum::http::StatusCode,

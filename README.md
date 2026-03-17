@@ -62,6 +62,9 @@ Vaultex is a **Rust workspace** for building enterprise-grade **threshold multi-
 | **[Changelog](CHANGELOG.md)** | Version history and release notes |
 | **[Chain Roadmap](docs/CHAIN_ROADMAP.md)** | 54-chain expansion plan: EVM L2s, Move, Substrate, TON, Cosmos |
 | **[Standards & References](docs/STANDARDS.md)** | All cryptographic standards, RFCs, EIPs, BIPs implemented |
+| **[API Reference](docs/API_REFERENCE.md)** | REST API endpoints, auth methods |
+| **[Auth Spec](specs/AUTH_SPEC.md)** | Key-exchange handshake protocol (28 sections) |
+| **[Security Audit](docs/SECURITY_AUDIT_AUTH.md)** | Auth security audit (57 tests, all findings resolved) |
 | **[Security Findings](docs/SECURITY_FINDINGS.md)** | Full audit trail (0 CRITICAL/HIGH open) |
 
 ---
@@ -91,6 +94,238 @@ cargo test --workspace     # 325 tests, ~4 seconds
 | **Enterprise** | RBAC, ABAC, MFA, policy engine, approval workflows, audit ledger |
 | **Simulation** | Pre-sign risk scoring for all chains |
 | **Operations** | Multi-cloud constraints, RPC failover, chaos framework, DR |
+
+---
+
+## Authentication & API Gateway
+
+Three auth methods — each serves a different purpose at a different layer:
+
+```
+mTLS          =  Machine → Machine   ("I am a trusted service")
+Session JWT   =  App → Server        ("I completed the key-exchange handshake")
+Bearer JWT    =  Human → System      ("I am a user verified by the IdP")
+```
+
+```
+Service (mTLS)              SDK Client (Session JWT)         User (Bearer JWT)
+┌──────────┐               ┌──────────┐                    ┌──────────┐
+│ TLS cert │               │ Ed25519 + │                    │ Auth0 /  │
+│ issued   │               │ X25519   │                    │ Okta     │
+│ by CA    │               │ handshake │                    │ issues   │
+└────┬─────┘               └────┬─────┘                    └────┬─────┘
+     │                          │                               │
+     │  X-Client-Cert-CN       │  X-Session-Token: <jwt>      │  Authorization: Bearer <jwt>
+     ▼                          ▼                               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                         API Gateway                                   │
+│  Priority: mTLS (0) → Session JWT (1) → Bearer JWT (2) → 401         │
+│                                                                       │
+│  If header is PRESENT but invalid → fail immediately (no fall-through)│
+└──────────────────────────────────────┬───────────────────────────────┘
+                                       │
+                                       ▼
+                              ┌─────────────────┐
+                              │   MPC Nodes      │
+                              │   (verify        │
+                              │   SignAuthorization│
+                              │   before signing) │
+                              └─────────────────┘
+```
+
+All three can be used simultaneously in the same deployment — for example, mTLS between internal services, Session JWT for SDK clients, and Bearer JWT for the admin web UI.
+
+### Three Auth Methods (priority order)
+
+#### 1. Session JWT (`X-Session-Token`) — App talks to Server
+
+**Who uses it:** SDK clients, native apps, mobile apps, desktop wallets.
+**Purpose:** Application-level identity — "this client completed the key-exchange handshake and this request is genuinely from them."
+
+**How it works:**
+
+```
+Step 1: Key Exchange (once per session)
+  Client                              Server
+  ──────                              ──────
+  Generate ephemeral X25519 key  ───► Validate, generate server ephemeral key
+  Ed25519 key ID                      Sign transcript with Ed25519
+                                 ◄─── ServerHello (challenge + signature)
+  Sign transcript with Ed25519   ───► Verify client signature
+  ClientAuth                          Derive shared key via ECDH + HKDF
+                                 ◄─── SessionEstablished (session_id)
+  Both sides now have:
+    client_write_key (32 bytes) ← for signing JWTs
+    server_write_key (32 bytes) ← for future encrypted responses
+
+Step 2: Per-Request JWT (every API call)
+  Client builds JWT:
+    { "sid": "session_id",
+      "ip": "203.0.113.42",       ← request context for audit
+      "fp": "device_fingerprint",
+      "ua": "SDK/1.0",
+      "rid": "req_unique_id",
+      "iat": 1710768000,
+      "exp": 1710768120 }         ← short-lived (2 min)
+  Signs with HS256(client_write_key)
+  Sends: X-Session-Token: eyJhbG...
+
+  Server:
+    1. Decode JWT → extract session_id (no signature check yet)
+    2. Look up session → retrieve stored client_write_key
+    3. Verify HS256 signature with that key
+       → Wrong key? 401. Tampered payload? 401. Expired? 401.
+    4. Extract request context for audit trail
+```
+
+```bash
+# Handshake
+POST /v1/auth/hello   # → ServerHello
+POST /v1/auth/verify  # → { session_id, session_token }
+
+# Authenticated request
+curl -H "X-Session-Token: eyJhbGciOiJIUzI1NiJ9.eyJzaWQiOi..." \
+     https://api.example.com/v1/wallets
+```
+
+**Security:** forward secrecy (ephemeral keys), mutual auth (both sides sign), replay protection (short-lived JWT + nonce), request context binding (IP/device in signed claims).
+
+---
+
+#### 2. mTLS (Mutual TLS) — Machine talks to Machine
+
+**Who uses it:** Backend services, microservices, MPC nodes.
+**Purpose:** Infrastructure-level identity — "this machine is a service we trust." No secrets in code or headers — identity comes from TLS certificates issued by your organization's CA. Kubernetes/Istio manage certs automatically.
+
+**How it works:**
+
+```
+Service A                   TLS Terminator (nginx/envoy)        Gateway
+┌──────────┐  presents     ┌──────────────────────────┐       ┌─────────┐
+│ client   │──────────────│ 1. Verify cert against CA │──────│ Extract │
+│ cert +   │  TLS handshk │ 2. Extract CN + fingerprint│      │ identity│
+│ key      │              │ 3. Set X-Client-Cert-* hdrs│      │ Map role│
+└──────────┘              └──────────────────────────┘       └─────────┘
+```
+
+**No shared secrets, no tokens in headers.** The TLS terminator handles certificate verification and passes identity to the gateway via headers:
+
+- `X-Client-Cert-Verified: SUCCESS` — cert was verified against the CA
+- `X-Client-Cert-CN: trading-service.internal` — Common Name
+- `X-Client-Cert-Fingerprint: sha256:abcdef...` — certificate fingerprint
+
+The gateway maps CN → service identity + RBAC role via `MTLS_SERVICES_FILE`:
+
+```json
+[
+  {
+    "cn": "trading-service.internal",
+    "fingerprint": "sha256:abcdef1234567890",
+    "role": "initiator",
+    "label": "Trading Service"
+  },
+  {
+    "cn": "monitoring.internal",
+    "role": "viewer",
+    "label": "Monitoring Dashboard"
+  }
+]
+```
+
+**Security:** No secrets to rotate (just certs). Identity at transport level. Certificate pinning via fingerprint. Standard infrastructure (Kubernetes, Istio, Consul all support mTLS).
+
+---
+
+#### 3. Bearer JWT (`Authorization: Bearer`) — Human talks to System
+
+**Who uses it:** End users via web apps, admin dashboards.
+**Purpose:** User-level identity — "this person is who they claim to be and has these permissions." JWTs are issued by an Identity Provider (Auth0, Okta, Firebase) — the gateway doesn't manage passwords.
+
+**How it works:**
+
+```
+Identity Provider (Auth0, Okta, etc.)
+  ↓ issues JWT with claims:
+  { "sub": "user_123", "roles": ["initiator"], "iss": "mpc-wallet",
+    "aud": "mpc-wallet-api", "exp": 1710771600,
+    "dept": "trading", "risk_tier": "standard", "mfa_verified": true }
+  ↓
+Client sends: Authorization: Bearer eyJhbGciOiJSUzI1NiJ9...
+  ↓
+Server validates:
+  1. Signature (RS256/ES256/HS256) against configured secret/key
+  2. Issuer (iss) matches JWT_ISSUER config
+  3. Audience (aud) matches JWT_AUDIENCE config
+  4. Not expired (exp > now)
+  5. Extract roles → map to RBAC permissions
+  6. Extract ABAC attributes (dept, risk_tier, mfa_verified)
+```
+
+```bash
+curl -H "Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOi..." \
+     https://api.example.com/v1/wallets
+```
+
+**No HMAC signing needed** — the JWT itself has integrity guarantees from its signature.
+
+---
+
+#### Real-World Deployment Example
+
+A typical enterprise deployment uses all three methods simultaneously:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Production Environment                        │
+│                                                                  │
+│  ┌──────────────┐  mTLS    ┌──────────┐  mTLS   ┌────────────┐ │
+│  │ Trading      │─────────│          │────────│ MPC Node 1  │ │
+│  │ Service      │  cert    │   API    │  cert   │ (party 1)  │ │
+│  └──────────────┘         │ Gateway  │        ├────────────┤ │
+│                            │          │        │ MPC Node 2  │ │
+│  ┌──────────────┐ Session │          │        │ (party 2)  │ │
+│  │ Mobile App   │──JWT───│          │        ├────────────┤ │
+│  │ (Vaultex SDK)│ (HS256) │          │        │ MPC Node 3  │ │
+│  └──────────────┘         │          │        │ (party 3)  │ │
+│                            │          │        └────────────┘ │
+│  ┌──────────────┐ Bearer  │          │                        │
+│  │ Admin Web UI │──JWT───│          │                        │
+│  │ (Auth0 SSO)  │ (RS256) │          │                        │
+│  └──────────────┘         └──────────┘                        │
+│                                                                  │
+│  Each layer has its own purpose:                                 │
+│  • mTLS: "Is this a trusted service?"                           │
+│  • Session JWT: "Did this client pass the handshake?"           │
+│  • Bearer JWT: "Which user is this and what can they do?"       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Which method should I use?
+
+| Scenario | Recommended Method | Why |
+|----------|--------------------|-----|
+| Backend microservice | **mTLS** | Best practice: no shared secrets, transport-level identity, cert rotation |
+| Kubernetes / service mesh | **mTLS** | Native support in Istio, Linkerd, Consul Connect |
+| SDK / native app | **Session JWT** | Forward secrecy, mutual auth, per-request context binding |
+| Mobile app | **Session JWT** | Device fingerprint in JWT claims for audit trail |
+| Web app with IdP | **Bearer JWT** | Users authenticate via Auth0/Okta, no key management needed |
+| Admin dashboard | **Bearer JWT + MFA** | User identity + MFA step-up for sensitive operations |
+
+### Security Features
+
+| Feature | Implementation |
+|---------|---------------|
+| **Forward secrecy** | Per-session ephemeral X25519 keys |
+| **Mutual authentication** | Ed25519 transcript signatures (both sides) |
+| **Rate limiting** | 10 req/sec per client_key_id on handshake |
+| **Session store** | 100k cap + background prune (60s) |
+| **Key zeroization** | `Zeroize + ZeroizeOnDrop` on all session keys |
+| **Dynamic revocation** | `POST /v1/auth/revoke-key` (admin, no restart) |
+| **Sign authorization** | MPC nodes independently verify gateway proof before signing |
+| **Audit trail** | Encrypted request context (ChaCha20-Poly1305) + millisecond timeline |
+| **Mainnet safety** | `SERVER_SIGNING_KEY` + `CLIENT_KEYS_FILE` required on mainnet |
+
+> Full API reference: [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | Protocol spec: [`specs/AUTH_SPEC.md`](specs/AUTH_SPEC.md)
 
 ---
 
@@ -230,11 +465,13 @@ Run benchmarks: `cargo bench -p mpc-wallet-core --bench mpc_benchmarks`
 ```
 crates/
   mpc-wallet-core/     ← MPC protocols, transport, key store, policy, identity
-  mpc-wallet-chains/   ← Chain adapters: 50 chains (EVM, Bitcoin, Substrate, Move, Cosmos, UTXO, TON, TRON, Starknet, Monero)
+  mpc-wallet-chains/   ← Chain adapters: 50 chains across 8 ecosystems
   mpc-wallet-cli/      ← CLI binary
-scripts/
-  demo.sh              ← Interactive local demo (no external services)
-docs/                  ← Architecture, security, CLI guide, sprint history
+services/
+  api-gateway/         ← REST API server, auth (key exchange + JWT + mTLS), RBAC
+specs/                 ← AUTH_SPEC.md, SIGN_AUTHORIZATION_SPEC.md
+retro/                 ← Decision records, lessons learned, security audits
+docs/                  ← Architecture, security, CLI guide, API reference
 ```
 
 ---
@@ -242,7 +479,7 @@ docs/                  ← Architecture, security, CLI guide, sprint history
 ## Metrics
 
 ```
-  Chains:    50          Tests:     325 pass
+  Chains:    50          Tests:     ~450 pass
   Protocols: 6           CI:        fmt + clippy + test + audit
   Sprints:   20          Findings:  0 CRITICAL | 0 HIGH open
 ```

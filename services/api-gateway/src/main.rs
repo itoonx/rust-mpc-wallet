@@ -2,10 +2,9 @@
 //!
 //! Security layers:
 //! 1. CORS restriction (configurable allowed origins)
-//! 2. Auth middleware (JWT Bearer or scoped API key with HMAC hashing)
-//! 3. HMAC request signing for POST mutations (API key auth only)
-//! 4. RBAC enforcement per route handler
-//! 5. Audit logging of all auth events
+//! 2. Auth middleware (mTLS, session JWT, or Bearer JWT)
+//! 3. RBAC enforcement per route handler
+//! 4. Audit logging of all auth events
 
 use mpc_wallet_api::build_router;
 use mpc_wallet_api::config::AppConfig;
@@ -26,9 +25,6 @@ async fn main() {
 
     let config = AppConfig::from_env();
     let state = AppState::from_config(&config);
-
-    // Load static API keys into the unified store.
-    state.api_key_store.load_static_keys(&config.api_keys).await;
 
     // Start background session pruning (every 60s).
     state.session_store.spawn_prune_task();
@@ -68,14 +64,11 @@ mod tests {
     use mpc_wallet_api::auth::handshake::ServerHandshake;
     use mpc_wallet_api::auth::types::*;
     use mpc_wallet_api::middleware::auth::auth_middleware;
-    use mpc_wallet_api::middleware::hmac::compute_signature;
     use mpc_wallet_api::routes;
 
     async fn test_state() -> AppState {
         let config = AppConfig::for_test();
-        let state = AppState::from_config(&config);
-        state.api_key_store.load_static_keys(&config.api_keys).await;
-        state
+        AppState::from_config(&config)
     }
 
     async fn test_router() -> Router {
@@ -128,25 +121,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_invalid_api_key_rejected() {
-        let app = test_router().await;
-        let req = Request::builder()
-            .uri("/v1/wallets")
-            .method("GET")
-            .header("x-api-key", "wrong-key")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
     async fn test_error_message_is_sanitized() {
         let app = test_router().await;
         let req = Request::builder()
             .uri("/v1/wallets")
             .method("GET")
-            .header("x-api-key", "wrong-key")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
@@ -155,176 +134,6 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"].as_str().unwrap(), "authentication failed");
-    }
-
-    // ── API key auth (GET = no HMAC required) ─────────────────────
-
-    #[tokio::test]
-    async fn test_admin_key_can_list_wallets() {
-        let app = test_router().await;
-        let req = Request::builder()
-            .uri("/v1/wallets")
-            .method("GET")
-            .header("x-api-key", "test-admin-key")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn test_viewer_key_can_list_wallets() {
-        let app = test_router().await;
-        let req = Request::builder()
-            .uri("/v1/wallets")
-            .method("GET")
-            .header("x-api-key", "test-viewer-key")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    // ── RBAC enforcement ──────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_viewer_key_cannot_create_wallet() {
-        let app = test_router().await;
-        let body = serde_json::to_string(&serde_json::json!({
-            "label": "test", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
-        }))
-        .unwrap();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let sig = compute_signature(
-            "test-viewer-key",
-            timestamp,
-            "POST",
-            "/v1/wallets",
-            body.as_bytes(),
-        );
-        let req = Request::builder()
-            .uri("/v1/wallets")
-            .method("POST")
-            .header("x-api-key", "test-viewer-key")
-            .header("x-signature", &sig)
-            .header("x-timestamp", timestamp.to_string())
-            .header("content-type", "application/json")
-            .body(Body::from(body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn test_viewer_key_cannot_sign() {
-        let app = test_router().await;
-        let body = serde_json::to_string(&serde_json::json!({
-            "message": "deadbeef"
-        }))
-        .unwrap();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let sig = compute_signature(
-            "test-viewer-key",
-            timestamp,
-            "POST",
-            "/v1/wallets/abc/sign",
-            body.as_bytes(),
-        );
-        let req = Request::builder()
-            .uri("/v1/wallets/abc/sign")
-            .method("POST")
-            .header("x-api-key", "test-viewer-key")
-            .header("x-signature", &sig)
-            .header("x-timestamp", timestamp.to_string())
-            .header("content-type", "application/json")
-            .body(Body::from(body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn test_initiator_key_can_sign_attempt() {
-        let app = test_router().await;
-        let body = serde_json::to_string(&serde_json::json!({
-            "message": "deadbeef"
-        }))
-        .unwrap();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let sig = compute_signature(
-            "test-initiator-key",
-            timestamp,
-            "POST",
-            "/v1/wallets/abc/sign",
-            body.as_bytes(),
-        );
-        let req = Request::builder()
-            .uri("/v1/wallets/abc/sign")
-            .method("POST")
-            .header("x-api-key", "test-initiator-key")
-            .header("x-signature", &sig)
-            .header("x-timestamp", timestamp.to_string())
-            .header("content-type", "application/json")
-            .body(Body::from(body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    // ── HMAC enforcement ──────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_post_without_hmac_rejected() {
-        let app = test_router().await;
-        let body = serde_json::to_string(&serde_json::json!({
-            "label": "test", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
-        }))
-        .unwrap();
-        let req = Request::builder()
-            .uri("/v1/wallets")
-            .method("POST")
-            .header("x-api-key", "test-admin-key")
-            .header("content-type", "application/json")
-            .body(Body::from(body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn test_post_with_wrong_hmac_rejected() {
-        let app = test_router().await;
-        let body = serde_json::to_string(&serde_json::json!({
-            "label": "test", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
-        }))
-        .unwrap();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let req = Request::builder()
-            .uri("/v1/wallets")
-            .method("POST")
-            .header("x-api-key", "test-admin-key")
-            .header(
-                "x-signature",
-                "v1=0000000000000000000000000000000000000000000000000000000000000000",
-            )
-            .header("x-timestamp", timestamp.to_string())
-            .header("content-type", "application/json")
-            .body(Body::from(body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     // ── Metrics requires auth ─────────────────────────────────────
@@ -338,18 +147,6 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn test_metrics_with_auth() {
-        let app = test_router().await;
-        let req = Request::builder()
-            .uri("/v1/metrics")
-            .header("x-api-key", "test-viewer-key")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     // ── Handshake endpoints ─────────────────────────────────────────
@@ -521,38 +318,5 @@ mod tests {
             StatusCode::OK,
             "session token auth should work"
         );
-    }
-
-    // ── Schema validation ─────────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_simulate_invalid_chain() {
-        let app = test_router().await;
-        let body = serde_json::to_string(&serde_json::json!({
-            "chain": "invalid-chain", "to": "0x1234", "value": "0"
-        }))
-        .unwrap();
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let sig = compute_signature(
-            "test-admin-key",
-            timestamp,
-            "POST",
-            "/v1/wallets/test-id/simulate",
-            body.as_bytes(),
-        );
-        let req = Request::builder()
-            .uri("/v1/wallets/test-id/simulate")
-            .method("POST")
-            .header("x-api-key", "test-admin-key")
-            .header("x-signature", &sig)
-            .header("x-timestamp", timestamp.to_string())
-            .header("content-type", "application/json")
-            .body(Body::from(body))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

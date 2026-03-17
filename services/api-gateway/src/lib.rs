@@ -10,13 +10,12 @@ pub mod state;
 use axum::{
     http::{header, HeaderName, Method},
     middleware as axum_mw,
-    routing::{delete, get, post},
+    routing::{get, post},
     Router,
 };
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 
 use crate::middleware::auth::auth_middleware;
-use crate::middleware::hmac::hmac_middleware;
 use crate::routes::auth::AuthRouteState;
 use crate::state::AppState;
 
@@ -42,7 +41,7 @@ pub fn build_router(state: AppState, cors_origins: &[String]) -> Router {
         .route("/v1/health", get(routes::health::health))
         .route("/v1/chains", get(routes::chains::list_chains));
 
-    // Protected routes (auth + RBAC + HMAC signing).
+    // Protected routes (auth + RBAC).
     let protected_routes = Router::new()
         .route("/v1/metrics", get(routes::health::metrics))
         .route("/v1/wallets", post(routes::wallets::create_wallet))
@@ -73,17 +72,8 @@ pub fn build_router(state: AppState, cors_origins: &[String]) -> Router {
             "/v1/chains/{chain}/address/{id}",
             get(routes::chains::derive_address),
         )
-        // Admin operations (behind auth + HMAC).
+        // Admin operations (behind auth).
         .route("/v1/auth/revoke-key", post(routes::auth::revoke_key))
-        // API key management (admin only, behind auth + HMAC).
-        .route("/v1/api-keys", post(routes::api_keys::create_api_key))
-        .route("/v1/api-keys", get(routes::api_keys::list_api_keys))
-        .route("/v1/api-keys/{id}", get(routes::api_keys::get_api_key))
-        .route(
-            "/v1/api-keys/{id}",
-            delete(routes::api_keys::delete_api_key),
-        )
-        .layer(axum_mw::from_fn(hmac_middleware))
         .layer(axum_mw::from_fn_with_state(state.clone(), auth_middleware));
 
     // CORS configuration — restricted in production.
@@ -102,9 +92,6 @@ pub fn build_router(state: AppState, cors_origins: &[String]) -> Router {
             .allow_headers([
                 header::AUTHORIZATION,
                 header::CONTENT_TYPE,
-                HeaderName::from_static("x-api-key"),
-                HeaderName::from_static("x-signature"),
-                HeaderName::from_static("x-timestamp"),
                 HeaderName::from_static("x-session-token"),
             ])
             .max_age(std::time::Duration::from_secs(3600))
