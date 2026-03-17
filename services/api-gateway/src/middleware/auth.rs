@@ -1,11 +1,9 @@
-//! Authentication middleware: JWT Bearer tokens and scoped API key validation.
+//! Authentication middleware: JWT, API key, and session token validation.
 //!
-//! Security features:
-//! - API keys are HMAC-SHA256 hashed and compared in constant time
-//! - JWT tokens validate issuer, audience, and expiration
-//! - AuthContext is propagated to route handlers for RBAC enforcement
-//! - Error messages are sanitized (no auth details leaked to clients)
-//! - All auth events are logged for audit trail
+//! Three auth paths (checked in order):
+//! 1. `X-Session-Token: <session_id>` — key-exchange handshake session
+//! 2. `X-API-Key: <key>` — service-to-service, scoped by role
+//! 3. `Authorization: Bearer <jwt>` — user-facing, full RBAC + ABAC
 
 use axum::{
     extract::{Request, State},
@@ -15,15 +13,11 @@ use axum::{
     Json,
 };
 
+use mpc_wallet_core::rbac::{AbacAttributes, ApiRole, AuthContext};
+
 use crate::models::response::ApiResponse;
 use crate::state::AppState;
 
-/// Authentication middleware that checks for either:
-/// - `X-API-Key: <key>` header (service-to-service, scoped by role)
-/// - `Authorization: Bearer <jwt>` header (user-facing, full RBAC + ABAC)
-///
-/// On success, inserts an `AuthContext` into request extensions for downstream
-/// RBAC enforcement in route handlers.
 pub async fn auth_middleware(
     State(state): State<AppState>,
     mut request: Request,
@@ -31,7 +25,45 @@ pub async fn auth_middleware(
 ) -> Response {
     let headers = request.headers();
 
-    // Check X-API-Key first (service-to-service).
+    // Path 1: X-Session-Token (key-exchange handshake session).
+    if let Some(session_id) = headers.get("x-session-token").and_then(|v| v.to_str().ok()) {
+        match state.session_store.get(session_id).await {
+            Some(session) => {
+                tracing::info!(
+                    session_id = %session.session_id,
+                    client_key_id = %session.client_key_id,
+                    "session token auth success"
+                );
+                // Build AuthContext from session.
+                // If client is in registry, use registered role; otherwise Viewer.
+                let role = state
+                    .client_registry
+                    .keys
+                    .get(&session.client_key_id)
+                    .map(|e| e.api_role())
+                    .unwrap_or(ApiRole::Viewer);
+                let ctx = AuthContext::with_attributes(
+                    format!("session:{}", session.client_key_id),
+                    vec![role],
+                    AbacAttributes::default(),
+                    false,
+                );
+                request.extensions_mut().insert(ctx);
+                return next.run(request).await;
+            }
+            None => {
+                state.metrics.auth_failures.inc();
+                tracing::warn!("session token auth failed: invalid or expired");
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ApiResponse::<()>::err("authentication failed")),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Path 2: X-API-Key (service-to-service).
     if let Some(api_key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
         match state.verify_api_key(api_key) {
             Some(entry) => {
@@ -59,7 +91,7 @@ pub async fn auth_middleware(
         }
     }
 
-    // Check Authorization: Bearer <jwt>.
+    // Path 3: Authorization: Bearer <jwt>.
     if let Some(auth_header) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
         if let Some(token) = auth_header.strip_prefix("Bearer ") {
             match state.jwt_validator.validate(token) {

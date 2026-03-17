@@ -22,6 +22,12 @@ pub struct AppConfig {
     pub rate_limit_rps: u32,
     /// CORS allowed origins (comma-separated). Empty = block all cross-origin.
     pub cors_origins: Vec<String>,
+    /// Server Ed25519 signing key (hex-encoded 32-byte secret). Auto-generated for tests.
+    pub server_signing_key: Option<String>,
+    /// Trusted client public keys file (JSON array of ClientKeyEntry).
+    pub client_keys_file: Option<String>,
+    /// Revoked key IDs file (JSON array of hex key_id strings).
+    pub revoked_keys_file: Option<String>,
 }
 
 /// Configuration for a single scoped API key.
@@ -87,6 +93,9 @@ impl AppConfig {
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .collect(),
+            server_signing_key: std::env::var("SERVER_SIGNING_KEY").ok(),
+            client_keys_file: std::env::var("CLIENT_KEYS_FILE").ok(),
+            revoked_keys_file: std::env::var("REVOKED_KEYS_FILE").ok(),
         };
         config.validate();
         config
@@ -170,6 +179,9 @@ impl AppConfig {
             network: "testnet".into(),
             rate_limit_rps: 100,
             cors_origins: vec![],
+            server_signing_key: None, // auto-generated in AppState for tests
+            client_keys_file: None,
+            revoked_keys_file: None,
         }
     }
 }
