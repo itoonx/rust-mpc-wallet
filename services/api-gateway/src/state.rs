@@ -13,6 +13,7 @@ use mpc_wallet_chains::registry::ChainRegistry;
 use mpc_wallet_core::identity::JwtValidator;
 use mpc_wallet_core::rbac::{AbacAttributes, ApiRole, AuthContext};
 
+use crate::auth::api_keys::ApiKeyStore;
 use crate::auth::session::SessionStore;
 use crate::config::{ApiKeyConfig, AppConfig};
 use crate::middleware::rate_limit::RateLimiter;
@@ -165,8 +166,10 @@ pub struct AppState {
     pub jwt_validator: Arc<JwtValidator>,
     /// HMAC key for API key hashing (derived from JWT secret).
     pub hmac_key: Arc<Vec<u8>>,
-    /// Hashed, scoped API keys.
+    /// Legacy hashed API keys (static, from config).
     pub api_keys: Vec<ApiKeyEntry>,
+    /// Unified API key store (static + dynamic keys).
+    pub api_key_store: ApiKeyStore,
     /// Server Ed25519 signing key for handshake auth.
     pub server_signing_key: Arc<SigningKey>,
     /// Authenticated session store.
@@ -283,6 +286,9 @@ impl AppState {
             .map(|k| Self::hash_api_key(&hmac_key, k))
             .collect();
 
+        // Create unified API key store and load static keys.
+        let api_key_store = ApiKeyStore::new(hmac_key.clone());
+
         // Load or generate server signing key.
         let server_signing_key = if let Some(ref key_hex) = config.server_signing_key {
             let key_bytes = hex::decode(key_hex).expect("SERVER_SIGNING_KEY must be valid hex");
@@ -338,6 +344,7 @@ impl AppState {
             jwt_validator: Arc::new(jwt_validator),
             hmac_key: Arc::new(hmac_key),
             api_keys,
+            api_key_store,
             server_signing_key: Arc::new(server_signing_key),
             session_store: SessionStore::new(),
             client_registry: Arc::new(client_registry),

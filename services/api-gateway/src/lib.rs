@@ -10,7 +10,7 @@ pub mod state;
 use axum::{
     http::{header, HeaderName, Method},
     middleware as axum_mw,
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
@@ -73,6 +73,14 @@ pub fn build_router(state: AppState, cors_origins: &[String]) -> Router {
         .route(
             "/v1/chains/{chain}/address/{id}",
             get(routes::chains::derive_address),
+        )
+        // API key management (admin only, behind auth + HMAC).
+        .route("/v1/api-keys", post(routes::api_keys::create_api_key))
+        .route("/v1/api-keys", get(routes::api_keys::list_api_keys))
+        .route("/v1/api-keys/{id}", get(routes::api_keys::get_api_key))
+        .route(
+            "/v1/api-keys/{id}",
+            delete(routes::api_keys::delete_api_key),
         )
         .layer(axum_mw::from_fn(hmac_middleware))
         .layer(axum_mw::from_fn_with_state(state.clone(), auth_middleware));

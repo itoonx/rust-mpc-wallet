@@ -154,13 +154,101 @@ curl -X POST \
 
 The signature binds the timestamp, HTTP method, path, and body hash — preventing replay, path tampering, and body modification.
 
+### Self-Service API Key Management (user-facing)
+
+For user-facing applications, API keys can be created, listed, and deleted via REST endpoints.
+All endpoints require **admin** role.
+
+#### POST /v1/api-keys — Create a new key
+
+The raw key is returned **once** in the response. It is never stored — only the HMAC-SHA256 hash is kept. If the caller loses the key, they must create a new one.
+
+**Request:**
+```json
+{
+  "label": "my-trading-bot",
+  "role": "initiator",
+  "allowed_wallets": ["550e8400-e29b-41d4-a716-446655440000"],
+  "allowed_chains": ["ethereum", "polygon"],
+  "expires_at": 1742000000
+}
+```
+
+**Response (201 Created):**
+```json
+{
+  "success": true,
+  "data": {
+    "key_id": "vxk_a1b2c3d4e5f6g7h8",
+    "raw_key": "sk_initiator_7f3a9c2b1d4e5f6a8b0c9d7e2f1a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a",
+    "label": "my-trading-bot",
+    "role": "initiator",
+    "created_at": 1710768000,
+    "expires_at": 1742000000
+  }
+}
+```
+
+#### GET /v1/api-keys — List all keys (metadata only)
+
+Returns labels, roles, origins, and expiry — never raw keys or hashes.
+
+```json
+{
+  "success": true,
+  "data": {
+    "keys": [
+      {
+        "key_id": "vxk_static_0",
+        "label": "ops-admin",
+        "role": "Admin",
+        "origin": "static",
+        "created_by": "config",
+        "created_at": 1710768000,
+        "revoked": false
+      },
+      {
+        "key_id": "vxk_a1b2c3d4e5f6g7h8",
+        "label": "my-trading-bot",
+        "role": "Initiator",
+        "origin": "dynamic",
+        "created_by": "api-key:ops-admin",
+        "created_at": 1710768100,
+        "revoked": false
+      }
+    ],
+    "total": 2,
+    "active": 2
+  }
+}
+```
+
+#### GET /v1/api-keys/:id — Get a single key
+
+Returns metadata for a specific key by `key_id`.
+
+#### DELETE /v1/api-keys/:id — Delete a key
+
+Permanently removes the key. Returns 404 if the key doesn't exist.
+
+```json
+{
+  "success": true,
+  "data": {
+    "key_id": "vxk_a1b2c3d4e5f6g7h8",
+    "deleted": true
+  }
+}
+```
+
 ### Security Notes
 
-- Raw keys are **never stored** on the server — only HMAC-SHA256 hashes.
+- Raw keys are **never stored** on the server — only HMAC-SHA256 hashes (both static and dynamic).
 - Key verification uses **constant-time comparison** (`subtle::ConstantTimeEq`) to prevent timing attacks.
+- Dynamic keys show the raw key **once** at creation — it cannot be retrieved afterward.
 - Expired keys are **immediately rejected** — no grace period.
-- Rotate keys by adding a new key to the JSON file and removing the old one, then restart.
-- For zero-downtime rotation: add the new key first, migrate clients, then remove the old key in a second restart.
+- Static keys (service-to-service): rotate by updating the config file and restarting.
+- Dynamic keys (user-facing): create a new key via API, migrate clients, then delete the old key via API — **no restart needed**.
 - Keep `API_KEYS_FILE` with restrictive file permissions (`chmod 600`).
 
 ### Environment Variables Reference

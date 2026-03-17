@@ -27,6 +27,9 @@ async fn main() {
     let config = AppConfig::from_env();
     let state = AppState::from_config(&config);
 
+    // Load static API keys into the unified store.
+    state.api_key_store.load_static_keys(&config.api_keys).await;
+
     // Start background session pruning (every 60s).
     state.session_store.spawn_prune_task();
 

@@ -65,14 +65,28 @@ pub async fn auth_middleware(
         }
     }
 
-    // Path 2: X-API-Key (service-to-service).
+    // Path 2: X-API-Key (service-to-service or user-created).
     if let Some(api_key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+        // Try the new unified store first (covers both static + dynamic keys).
+        if let Some(meta) = state.api_key_store.verify(api_key).await {
+            tracing::debug!(
+                key_label = %meta.label,
+                key_id = %meta.key_id,
+                role = ?meta.role,
+                origin = ?meta.origin,
+                "API key auth success (store)"
+            );
+            let ctx = meta.auth_context();
+            request.extensions_mut().insert(ctx);
+            return next.run(request).await;
+        }
+        // Fallback: legacy static keys (for backward compatibility during migration).
         match state.verify_api_key(api_key) {
             Some(entry) => {
                 tracing::debug!(
                     key_label = %entry.label,
                     role = ?entry.role,
-                    "API key auth success"
+                    "API key auth success (legacy)"
                 );
                 let ctx = entry.auth_context();
                 request.extensions_mut().insert(ctx);
