@@ -1,29 +1,29 @@
-# L-004: Non-UTF8 Header Bypasses Auth Priority
+# L-004: Non-UTF8 Header Bypasses Auth Priority — FIXED
 
 - **Date:** 2026-03-17
 - **Category:** Security
 - **Severity:** Medium
 - **Found by:** Security audit (auth_security_audit.rs)
 - **Related finding:** SA-005
+- **Status:** **FIXED** (2026-03-17)
 
 ## What happened
 
-The auth middleware checks headers in priority order: `X-Session-Token` → `X-API-Key` → `Authorization: Bearer`. However, it uses `.and_then(|v| v.to_str().ok())` to extract the session token value. If the header contains non-UTF8 bytes, `to_str()` returns `None`, and the middleware silently falls through to try API key auth.
+The auth middleware checks headers in priority order: `X-Session-Token` → `X-API-Key` → `Authorization: Bearer`. However, it used `.and_then(|v| v.to_str().ok())` to extract the session token value. If the header contained non-UTF8 bytes, `to_str()` returned `None`, and the middleware silently fell through to try API key auth.
 
 ## Root cause
 
-The `if let Some(session_id) = headers.get("x-session-token").and_then(|v| v.to_str().ok())` pattern conflates "header not present" with "header present but unparseable".
+The `if let Some(session_id) = headers.get("x-session-token").and_then(|v| v.to_str().ok())` pattern conflated "header not present" with "header present but unparseable".
 
 ## Fix
 
-Not yet fixed. Recommended approach:
+Changed to presence-based check:
 ```rust
 if headers.contains_key("x-session-token") {
     let session_id = headers.get("x-session-token")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    // Must validate session — don't fall through to API key
-    match state.session_store.get(session_id).await { ... }
+    // Empty/unparseable → 401 immediately, no fall-through
 }
 ```
 

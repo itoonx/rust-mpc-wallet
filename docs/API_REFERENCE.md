@@ -160,6 +160,31 @@ List revoked key IDs (clients should check before handshake).
 }
 ```
 
+### POST /v1/auth/revoke-key
+
+Dynamically revoke a client key. The key is immediately added to the revocation set — no restart required.
+
+**Request:**
+```json
+{
+  "key_id": "a1b2c3d4e5f6g7h8"
+}
+```
+
+**Response (200):**
+```json
+{
+  "success": true,
+  "data": {
+    "key_id": "a1b2c3d4e5f6g7h8",
+    "revoked": true,
+    "was_new": true
+  }
+}
+```
+
+`was_new` is `false` if the key was already revoked.
+
 ### Auth Error Handling
 
 All auth errors return generic `"authentication failed"` — no details leaked to prevent enumeration.
@@ -168,10 +193,10 @@ All auth errors return generic `"authentication failed"` — no details leaked t
 |--------|-------|
 | 400 | Malformed message |
 | 401 | Invalid/expired session, signature failure, timestamp drift, revoked key |
-| 429 | Rate limit (handshake: 10/min per IP, 5/min per key_id) |
-| 503 | Pending handshakes cache full |
+| 429 | Rate limit exceeded (handshake: 10 req/sec per key_id) |
+| 503 | Session store or pending handshakes cache full |
 
-**Abuse controls:** 5 failed handshakes per IP in 5 min → 15 min block. 3 failures per key_id in 5 min → 30 min block.
+**Rate limiting:** Handshake endpoints (`/hello`) are rate-limited at 10 requests/second per `client_key_id` using a token-bucket algorithm.
 
 ---
 

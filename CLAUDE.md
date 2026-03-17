@@ -98,23 +98,44 @@ git commit -m "[R{N}] complete: {task summary}"
 ### Auth System (key-exchange handshake)
 
 Three auth methods — middleware checks in order: `X-Session-Token` → `X-API-Key` → `Authorization: Bearer`.
+If a header is **present** but invalid, auth fails immediately — no fall-through to the next method.
 
 **Key-exchange handshake** (primary method for SDK clients):
-- `POST /v1/auth/hello` — ClientHello (X25519 ephemeral key + Ed25519 key ID)
+- `POST /v1/auth/hello` — ClientHello (X25519 ephemeral key + Ed25519 key ID), rate-limited (10 req/sec per key_id)
 - `POST /v1/auth/verify` — ClientAuth (Ed25519 signature over transcript) → returns session token
 - `POST /v1/auth/refresh-session` — extend session TTL
 - `GET /v1/auth/revoked-keys` — key revocation list
+- `POST /v1/auth/revoke-key` — dynamic key revocation (admin)
 
 Properties: mutual auth, forward secrecy (per-session X25519 ECDH), ChaCha20-Poly1305 AEAD, HKDF-SHA256 KDF.
 
-**Key files:**
-- `services/api-gateway/src/auth/` — types, handshake state machine, client SDK, session store
-- `services/api-gateway/src/routes/auth.rs` — endpoint handlers
-- `services/api-gateway/src/middleware/auth.rs` — 3-method auth middleware
-- `specs/AUTH_SPEC.md` — full specification (28 sections, 1,067 lines)
+**Architecture (`services/api-gateway/`):**
+```
+src/
+  lib.rs              ← Library crate (public modules, build_router())
+  main.rs             ← Binary entry point (uses lib, starts prune task)
+  auth/
+    types.rs          ← Message types, AuthenticatedSession (Zeroize+ZeroizeOnDrop), transcript hashing
+    handshake.rs      ← Server-side handshake state machine
+    client.rs         ← Client SDK (HandshakeClient)
+    session.rs        ← SessionStore (100k cap, lazy prune, background prune every 60s)
+  routes/
+    auth.rs           ← Handshake endpoints + dynamic revoke-key
+  middleware/
+    auth.rs           ← 3-method auth middleware (presence-based, no fall-through)
+    hmac.rs           ← HMAC request signing for POST mutations
+    rate_limit.rs     ← Token-bucket rate limiter (per-key)
+  state.rs            ← AppState, API key HMAC hashing, RwLock revoked keys, client registry
+  config.rs           ← AppConfig, env loading, for_test()
+tests/
+  auth_security_audit.rs ← 57 security-focused integration tests
+```
 
-**Security audit (2026-03-17):** 53 attack tests in `tests/auth_security_audit.rs`, report at `docs/SECURITY_AUDIT_AUTH.md`.
-Open findings: 2 HIGH (no rate limiting, unbounded session store), 3 MEDIUM (open enrollment, static revocation, UTF-8 edge case).
+**Security audit (2026-03-17):** 57 attack tests, report at `docs/SECURITY_AUDIT_AUTH.md`.
+All HIGH/MEDIUM findings resolved: rate limiting wired, session store capped + pruned, dynamic revocation added, non-UTF8 fall-through fixed, session keys zeroized on drop.
+Remaining LOW/INFO: HMAC 30s replay window (accepted), all-zeros X25519 key (accepted), hardcoded session TTL, 422 vs 401 on downgrade.
+
+Full spec: `specs/AUTH_SPEC.md` (28 sections, 1,067 lines)
 
 ### Tests on `main`
 ```
@@ -244,8 +265,10 @@ Full findings log → `docs/SECURITY_FINDINGS.md`
 | DEC-007 | ChainRegistry: unified provider factory pattern — single entry point for all chain providers |
 | DEC-008 | FROST reshare = fresh DKG (new group key); GG20 reshare preserves group key via additive re-sharing |
 | DEC-009 | Work on `dev` branch; PR to `main` only after CI green |
+| DEC-010 | Split api-gateway into lib.rs + main.rs for integration test access |
+| DEC-011 | Session keys use `Zeroize + ZeroizeOnDrop`; revoked_keys behind `RwLock` for dynamic revocation |
 
-Full decision log → `docs/DECISIONS.md`
+Full decision log → `docs/DECISIONS.md` and `retro/decisions/`
 
 ---
 

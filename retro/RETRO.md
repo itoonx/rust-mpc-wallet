@@ -31,6 +31,7 @@ retro/
 | [DEC-008](decisions/DEC-008_frost-reshare.md) | 2026-03-15 | FROST reshare = fresh DKG | Decided: new group key |
 | [DEC-009](decisions/DEC-009_dev-branch.md) | 2026-03-15 | Work on dev branch, PR to main | Decided: enforced |
 | [DEC-010](decisions/DEC-010_auth-lib-split.md) | 2026-03-17 | Split api-gateway into lib+bin | Decided: for integration tests |
+| [DEC-011](decisions/DEC-011_auth-hardening.md) | 2026-03-17 | Auth production hardening architecture | Decided: rate limit + session cap + dynamic revoke + zeroize |
 
 ---
 
@@ -41,9 +42,10 @@ retro/
 | [L-001](lessons/L-001_gg20-trusted-dealer.md) | 2026-03-15 | Security | Critical | GG20 trusted-dealer = not real MPC |
 | [L-002](lessons/L-002_key-share-not-zeroized.md) | 2026-03-15 | Security | High | KeyShare.share_data Vec<u8> not zeroized |
 | [L-003](lessons/L-003_nats-unauthenticated.md) | 2026-03-15 | Security | High | ProtocolMessage.from unauthenticated |
-| [L-004](lessons/L-004_auth-method-confusion.md) | 2026-03-17 | Security | Medium | Non-UTF8 header bypasses auth priority |
-| [L-005](lessons/L-005_session-store-unbounded.md) | 2026-03-17 | Security | High | SessionStore has no size limit |
-| [L-006](lessons/L-006_no-rate-limit-auth.md) | 2026-03-17 | Security | High | No rate limiting on auth endpoints |
+| [L-004](lessons/L-004_auth-method-confusion.md) | 2026-03-17 | Security | Medium | Non-UTF8 header bypasses auth priority — **FIXED** |
+| [L-005](lessons/L-005_session-store-unbounded.md) | 2026-03-17 | Security | High | SessionStore has no size limit — **FIXED** |
+| [L-006](lessons/L-006_no-rate-limit-auth.md) | 2026-03-17 | Security | High | No rate limiting on auth endpoints — **FIXED** |
+| [L-007](lessons/L-007_session-keys-not-zeroized.md) | 2026-03-17 | Security | High | Session key material not zeroized on drop — **FIXED** |
 
 ---
 
@@ -51,7 +53,7 @@ retro/
 
 | Report | Date | Scope | Findings |
 |--------|------|-------|----------|
-| [AUTH-AUDIT-001](security/AUTH-AUDIT-001.md) | 2026-03-17 | Auth system (handshake, middleware, HMAC) | 2 HIGH, 3 MED, 3 LOW, 1 INFO |
+| [AUTH-AUDIT-001](security/AUTH-AUDIT-001.md) | 2026-03-17 | Auth system (handshake, middleware, HMAC) | 57 tests, all HIGH/MED fixed, 3 LOW + 1 INFO accepted |
 
 ---
 

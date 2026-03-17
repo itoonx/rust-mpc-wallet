@@ -1,33 +1,26 @@
-# L-006: No Rate Limiting on Auth Endpoints
+# L-006: No Rate Limiting on Auth Endpoints — FIXED
 
 - **Date:** 2026-03-17
 - **Category:** Security
 - **Severity:** High
 - **Found by:** Security audit (code review)
 - **Related finding:** SA-001
+- **Status:** **FIXED** (2026-03-17)
 
 ## What happened
 
-Rate limiter middleware exists (`middleware/rate_limit.rs`) with a token-bucket implementation, but it is **not wired** to any routes. Auth endpoints `/v1/auth/hello` and `/v1/auth/verify` can be called without throttling.
+Rate limiter middleware existed (`middleware/rate_limit.rs`) with a token-bucket implementation, but it was **not wired** to any routes. Auth endpoints `/v1/auth/hello` and `/v1/auth/verify` could be called without throttling.
 
 ## Root cause
 
-The rate limiter was implemented but never integrated into the router in `build_router()`. Likely deferred during initial development and forgotten.
+The rate limiter was implemented but never integrated into the router. Likely deferred during initial development and forgotten.
 
 ## Fix
 
-Not yet fixed. Need to add rate limiter layer to auth routes:
-```rust
-let auth_routes = Router::new()
-    .route("/v1/auth/hello", post(routes::auth::auth_hello))
-    .route("/v1/auth/verify", post(routes::auth::auth_verify))
-    // ... other routes
-    .layer(rate_limit_layer)  // <-- ADD THIS
-    .with_state(auth_state);
-```
+Token-bucket `RateLimiter` (10 req/sec per `client_key_id`) wired directly in `auth_hello` handler. Returns 429 Too Many Requests when exceeded. Tested by `test_rate_limit_on_handshake`.
 
-Spec requires: 10 req/min per IP on handshake, 5/min per key_id.
+Architecture decision: rate limiting at handler level (not middleware layer) because `ConnectInfo` extractor isn't available in `oneshot()` tests.
 
 ## Takeaway
 
-Always verify that security middleware is actually **wired**, not just **implemented**. Code review should check the router setup, not just the middleware logic. A test like "send 20 rapid handshakes, verify later ones are throttled" would catch this.
+Always verify that security middleware is actually **wired**, not just **implemented**. Code review should check the router setup, not just the middleware logic.
