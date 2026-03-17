@@ -304,11 +304,9 @@ async fn test_rate_limit_on_handshake() {
 
     let client_key = gen_ed25519_key();
     let eph_pub = X25519Public::from(&X25519Secret::random_from_rng(rand::rngs::OsRng));
-    let client_key_id = hex::encode(&client_key.verifying_key().to_bytes()[..8]);
-
-    // Send 11 rapid hello requests with the same key_id (limit is 10/sec).
+    // Send 15 rapid hello requests with the same key_id (limit is 10/sec).
     let mut hit_limit = false;
-    for i in 0..15 {
+    for _ in 0..15 {
         let nonce = random_nonce();
         let body = build_hello_body(&client_key, &eph_pub, &nonce, unix_now());
         let req = json_post("/v1/auth/hello", body);
