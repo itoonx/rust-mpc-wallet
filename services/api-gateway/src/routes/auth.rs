@@ -1,8 +1,4 @@
 //! Key-exchange handshake endpoints.
-//!
-//! `POST /v1/auth/hello`  — receive ClientHello, return ServerHello
-//! `POST /v1/auth/verify` — receive ClientAuth, return SessionEstablished
-//! `GET  /v1/auth/revoked-keys` — list revoked key IDs
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,8 +12,6 @@ use crate::auth::types::*;
 use crate::models::response::ApiResponse;
 use crate::state::AppState;
 
-/// Pending handshake: stores the ServerHandshake state machine + original ClientHello
-/// keyed by server_challenge (hex). Expires after 30 seconds.
 struct PendingHandshake {
     handshake: ServerHandshake,
     client_hello: ClientHello,
@@ -25,6 +19,7 @@ struct PendingHandshake {
 }
 
 /// In-memory store for pending handshakes (between hello and verify).
+/// Capped at MAX_CACHE_ENTRIES to prevent DoS.
 #[derive(Clone, Default)]
 pub struct PendingHandshakes {
     inner: Arc<RwLock<HashMap<String, PendingHandshake>>>,
@@ -35,46 +30,44 @@ impl PendingHandshakes {
         Self::default()
     }
 
-    async fn insert(&self, challenge: String, pending: PendingHandshake) {
+    async fn insert(&self, challenge: String, pending: PendingHandshake) -> bool {
         let mut map = self.inner.write().await;
-        // Prune expired entries.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        map.retain(|_, v| v.expires_at > now);
+        let now = unix_now();
+        // Prune expired only if approaching capacity (avoid O(n) on every insert).
+        if map.len() >= MAX_CACHE_ENTRIES / 2 {
+            map.retain(|_, v| v.expires_at > now);
+        }
+        if map.len() >= MAX_CACHE_ENTRIES {
+            return false; // capacity exceeded
+        }
         map.insert(challenge, pending);
+        true
     }
 
     async fn remove(&self, challenge: &str) -> Option<PendingHandshake> {
         let mut map = self.inner.write().await;
         let pending = map.remove(challenge)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        if pending.expires_at <= now {
-            return None; // expired
+        if pending.expires_at <= unix_now() {
+            return None;
         }
         Some(pending)
     }
 }
 
-/// Shared state for auth routes (includes pending handshakes).
+/// Shared state for auth routes.
 #[derive(Clone)]
 pub struct AuthRouteState {
     pub app: AppState,
     pub pending: PendingHandshakes,
 }
 
-/// `POST /v1/auth/hello` — Step 1: receive ClientHello, return ServerHello.
+/// `POST /v1/auth/hello`
 pub async fn auth_hello(
     State(state): State<AuthRouteState>,
     Json(client_hello): Json<ClientHello>,
 ) -> Result<Json<ApiResponse<ServerHello>>, (StatusCode, Json<ApiResponse<()>>)> {
     state.app.metrics.handshake_total.inc();
 
-    // Check replay: reject if client_nonce has been seen before.
     if state
         .app
         .replay_cache
@@ -82,79 +75,59 @@ pub async fn auth_hello(
         .await
     {
         state.app.metrics.handshake_failures.inc();
-        tracing::warn!(
-            client_key_id = %client_hello.client_key_id,
-            "handshake replay detected"
-        );
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(ApiResponse::err("authentication failed")),
-        ));
+        tracing::warn!(client_key_id = %client_hello.client_key_id, "handshake replay detected");
+        return Err(auth_failed());
     }
 
-    // Check if client_key_id is revoked.
     if state.app.is_key_revoked(&client_hello.client_key_id) {
         state.app.metrics.handshake_failures.inc();
-        tracing::warn!(
-            client_key_id = %client_hello.client_key_id,
-            "handshake with revoked key"
-        );
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(ApiResponse::err("authentication failed")),
-        ));
+        tracing::warn!(client_key_id = %client_hello.client_key_id, "handshake with revoked key");
+        return Err(auth_failed());
     }
 
-    // Create handshake state machine.
-    let mut handshake = ServerHandshake::new(state.app.server_signing_key.as_ref().clone());
+    // Use Arc to avoid cloning signing key material.
+    let mut handshake = ServerHandshake::new_arc(state.app.server_signing_key.clone());
 
     let server_hello = handshake.process_client_hello(&client_hello).map_err(|e| {
         state.app.metrics.handshake_failures.inc();
         tracing::warn!(error = %e, "handshake ClientHello failed");
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::err("authentication failed")),
-        )
+        auth_failed()
     })?;
 
-    // Store pending handshake keyed by server_challenge.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    state
+    let ok = state
         .pending
         .insert(
             server_hello.server_challenge.clone(),
             PendingHandshake {
                 handshake,
                 client_hello,
-                expires_at: now + MAX_TIMESTAMP_DRIFT_SECS,
+                expires_at: unix_now() + MAX_TIMESTAMP_DRIFT_SECS,
             },
         )
         .await;
+    if !ok {
+        state.app.metrics.handshake_failures.inc();
+        tracing::warn!("handshake: pending cache full (DoS protection)");
+        return Err(auth_failed());
+    }
 
-    tracing::info!("handshake ServerHello sent");
+    tracing::debug!("handshake ServerHello sent");
     Ok(Json(ApiResponse::ok(server_hello)))
 }
 
-/// Request body for `/v1/auth/verify`.
+/// Request for `/v1/auth/verify` — uses `#[serde(flatten)]` to embed ClientAuth.
 #[derive(Debug, serde::Deserialize)]
 pub struct AuthVerifyRequest {
-    /// The server_challenge from ServerHello (used to look up pending handshake).
     pub server_challenge: String,
-    /// Client's Ed25519 signature over transcript hash.
-    pub client_signature: String,
-    /// Client's static Ed25519 public key (hex).
-    pub client_static_pubkey: String,
+    #[serde(flatten)]
+    pub client_auth: ClientAuth,
 }
 
-/// `POST /v1/auth/verify` — Step 2: receive ClientAuth, return SessionEstablished.
+/// `POST /v1/auth/verify`
 pub async fn auth_verify(
     State(state): State<AuthRouteState>,
     Json(req): Json<AuthVerifyRequest>,
 ) -> Result<Json<ApiResponse<SessionEstablished>>, (StatusCode, Json<ApiResponse<()>>)> {
-    // Look up pending handshake.
     let mut pending = state
         .pending
         .remove(&req.server_challenge)
@@ -162,16 +135,8 @@ pub async fn auth_verify(
         .ok_or_else(|| {
             state.app.metrics.handshake_failures.inc();
             tracing::warn!("handshake verify: no pending handshake for challenge");
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(ApiResponse::err("authentication failed")),
-            )
+            auth_failed()
         })?;
-
-    let client_auth = ClientAuth {
-        client_signature: req.client_signature,
-        client_static_pubkey: req.client_static_pubkey.clone(),
-    };
 
     // Verify client is in trusted registry (only if registry has entries).
     if !state.app.client_registry.keys.is_empty()
@@ -180,7 +145,7 @@ pub async fn auth_verify(
             .client_registry
             .verify_trusted(
                 &pending.client_hello.client_key_id,
-                &req.client_static_pubkey,
+                &req.client_auth.client_static_pubkey,
             )
             .is_none()
     {
@@ -189,23 +154,16 @@ pub async fn auth_verify(
             client_key_id = %pending.client_hello.client_key_id,
             "handshake verify: untrusted client key"
         );
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(ApiResponse::err("authentication failed")),
-        ));
+        return Err(auth_failed());
     }
 
-    // Process ClientAuth — verify signature, derive session keys.
     let session = pending
         .handshake
-        .process_client_auth(&client_auth, &pending.client_hello)
+        .process_client_auth(&req.client_auth, &pending.client_hello)
         .map_err(|e| {
             state.app.metrics.handshake_failures.inc();
             tracing::warn!(error = %e, "handshake ClientAuth failed");
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(ApiResponse::err("authentication failed")),
-            )
+            auth_failed()
         })?;
 
     let key_fingerprint = hex::encode(&Sha256::digest(session.client_write_key)[..16]);
@@ -213,11 +171,10 @@ pub async fn auth_verify(
     let response = SessionEstablished {
         session_id: session.session_id.clone(),
         expires_at: session.expires_at,
-        session_token: session.session_id.clone(), // session_id IS the token
+        session_token: session.session_id.clone(),
         key_fingerprint,
     };
 
-    // Store session.
     tracing::info!(
         session_id = %session.session_id,
         client_key_id = %session.client_key_id,
@@ -228,33 +185,25 @@ pub async fn auth_verify(
     Ok(Json(ApiResponse::ok(response)))
 }
 
-/// Request body for session refresh.
+/// Request for session refresh.
 #[derive(Debug, serde::Deserialize)]
 pub struct RefreshSessionRequest {
-    /// Current session token.
     pub session_token: String,
 }
 
 /// Response for session refresh.
 #[derive(Debug, serde::Serialize)]
 pub struct RefreshSessionResponse {
-    /// New session ID (unchanged).
     pub session_id: String,
-    /// New expiration time (extended).
     pub expires_at: u64,
-    /// Session token (unchanged).
     pub session_token: String,
 }
 
-/// `POST /v1/auth/refresh-session` — extend session TTL.
-///
-/// Requires a valid, non-expired session token. Extends the expiration
-/// by another `DEFAULT_SESSION_TTL_SECS` from the current time.
+/// `POST /v1/auth/refresh-session`
 pub async fn refresh_session(
     State(state): State<AuthRouteState>,
     Json(req): Json<RefreshSessionRequest>,
 ) -> Result<Json<ApiResponse<RefreshSessionResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
-    // Retrieve and validate current session.
     let session = state
         .app
         .session_store
@@ -262,50 +211,23 @@ pub async fn refresh_session(
         .await
         .ok_or_else(|| {
             tracing::warn!("session refresh: invalid or expired session");
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(ApiResponse::err("authentication failed")),
-            )
+            auth_failed()
         })?;
 
-    // Check if client_key_id is revoked.
     if state.app.is_key_revoked(&session.client_key_id) {
         state.app.session_store.revoke(&session.session_id).await;
-        tracing::warn!(
-            session_id = %session.session_id,
-            "session refresh: key revoked"
-        );
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(ApiResponse::err("authentication failed")),
-        ));
+        tracing::warn!(session_id = %session.session_id, "session refresh: key revoked");
+        return Err(auth_failed());
     }
 
-    // Extend expiration.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let new_expires_at = now + crate::auth::types::DEFAULT_SESSION_TTL_SECS;
-
-    // Create refreshed session (same keys, new expiry).
-    let refreshed = crate::auth::types::AuthenticatedSession {
-        session_id: session.session_id.clone(),
-        client_pubkey: session.client_pubkey,
-        client_key_id: session.client_key_id.clone(),
-        client_write_key: session.client_write_key,
-        server_write_key: session.server_write_key,
+    let new_expires_at = unix_now() + DEFAULT_SESSION_TTL_SECS;
+    let refreshed = AuthenticatedSession {
         expires_at: new_expires_at,
-        created_at: session.created_at,
+        ..session.clone()
     };
 
     state.app.session_store.store(refreshed).await;
-
-    tracing::info!(
-        session_id = %session.session_id,
-        new_expires_at,
-        "session refreshed"
-    );
+    tracing::debug!(session_id = %session.session_id, new_expires_at, "session refreshed");
 
     Ok(Json(ApiResponse::ok(RefreshSessionResponse {
         session_id: session.session_id,
@@ -314,7 +236,7 @@ pub async fn refresh_session(
     })))
 }
 
-/// `GET /v1/auth/revoked-keys` — list revoked key IDs.
+/// `GET /v1/auth/revoked-keys`
 pub async fn revoked_keys(State(state): State<AuthRouteState>) -> Json<ApiResponse<Vec<String>>> {
     let keys: Vec<String> = state.app.revoked_keys.iter().cloned().collect();
     Json(ApiResponse::ok(keys))
