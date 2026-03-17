@@ -3362,12 +3362,15 @@ name = "mpc-wallet-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "ed25519-dalek",
  "hex",
+ "hkdf",
  "hmac",
  "jsonwebtoken",
  "mpc-wallet-chains",
  "mpc-wallet-core",
  "prometheus",
+ "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",
@@ -3380,6 +3383,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]

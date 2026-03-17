@@ -7,6 +7,7 @@
 //! 4. RBAC enforcement per route handler
 //! 5. Audit logging of all auth events
 
+pub mod auth;
 mod config;
 mod middleware;
 mod models;

@@ -28,10 +28,15 @@ tokio = { workspace = true }
 # Auth
 jsonwebtoken = { workspace = true }
 
-# Crypto — HMAC request signing + constant-time comparison
+# Crypto — HMAC request signing, key exchange, signatures
 hmac = "0.12"
 sha2 = { workspace = true }
 subtle = "2"
+ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
+hkdf = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
 
 # Observability
 tracing = { workspace = true }
