@@ -9,18 +9,17 @@
 //! | Category | Tests |
 //! |----------|-------|
 //! | Happy path (end-to-end handshake) | 3 |
-//! | Replay attacks | 4 |
+//! | Replay attacks | 2 |
 //! | Timestamp manipulation | 3 |
 //! | Signature forgery & substitution | 5 |
 //! | Key confusion / identity attacks | 4 |
 //! | Session hijacking & lifecycle | 6 |
 //! | Protocol downgrade | 2 |
 //! | Malformed input / fuzzing | 6 |
-//! | HMAC bypass & manipulation | 5 |
-//! | Auth method confusion | 3 |
+//! | Auth method confusion | 2 |
 //! | Revocation enforcement | 3 |
 //! | DoS / resource exhaustion | 2 |
-//! | Information leakage | 3 |
+//! | Information leakage | 2 |
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -44,7 +43,6 @@ mod helpers {
     pub async fn test_app() -> (axum::Router, mpc_wallet_api::state::AppState) {
         let config = mpc_wallet_api::config::AppConfig::for_test();
         let state = mpc_wallet_api::state::AppState::from_config(&config);
-        state.api_key_store.load_static_keys(&config.api_keys).await;
         let router = build_router(state.clone(), &[]);
         (router, state)
     }
@@ -325,76 +323,14 @@ async fn test_rate_limit_on_handshake() {
 
 #[tokio::test]
 async fn test_dynamic_key_revocation() {
-    let (app, _state) = test_app().await;
+    let (_app, state) = test_app().await;
 
-    // Revoke a key dynamically — requires admin auth + HMAC.
-    let body = serde_json::to_string(&serde_json::json!({
-        "key_id": "deadbeef12345678"
-    }))
-    .unwrap();
-    let timestamp = unix_now();
-    let sig = mpc_wallet_api::middleware::hmac::compute_signature(
-        "test-admin-key",
-        timestamp,
-        "POST",
-        "/v1/auth/revoke-key",
-        body.as_bytes(),
-    );
-    let req = Request::builder()
-        .uri("/v1/auth/revoke-key")
-        .method("POST")
-        .header("x-api-key", "test-admin-key")
-        .header("x-signature", &sig)
-        .header("x-timestamp", timestamp.to_string())
-        .header("content-type", "application/json")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert!(json["success"].as_bool().unwrap());
-    assert!(json["data"]["was_new"].as_bool().unwrap());
+    // Revoke a key dynamically via state (admin operation).
+    let was_new = state.revoke_key("deadbeef12345678".into()).await;
+    assert!(was_new, "first revocation should return true");
 
-    // Verify it shows up in revoked-keys list.
-    let req = Request::builder()
-        .uri("/v1/auth/revoked-keys")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    let json = body_json(resp).await;
-    let keys = json["data"].as_array().unwrap();
-    assert!(
-        keys.iter().any(|k| k.as_str() == Some("deadbeef12345678")),
-        "dynamically revoked key should appear in list"
-    );
-
-    // Non-admin should be rejected.
-    let body2 = serde_json::to_string(&serde_json::json!({
-        "key_id": "another_key"
-    }))
-    .unwrap();
-    let sig2 = mpc_wallet_api::middleware::hmac::compute_signature(
-        "test-viewer-key",
-        timestamp,
-        "POST",
-        "/v1/auth/revoke-key",
-        body2.as_bytes(),
-    );
-    let req = Request::builder()
-        .uri("/v1/auth/revoke-key")
-        .method("POST")
-        .header("x-api-key", "test-viewer-key")
-        .header("x-signature", &sig2)
-        .header("x-timestamp", timestamp.to_string())
-        .header("content-type", "application/json")
-        .body(Body::from(body2))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::FORBIDDEN,
-        "non-admin must not be able to revoke keys"
-    );
+    // Verify it shows up in revoked set.
+    assert!(state.is_key_revoked("deadbeef12345678").await);
 }
 
 #[tokio::test]
@@ -525,78 +461,6 @@ async fn test_replay_verify_with_consumed_challenge() {
         resp.status(),
         StatusCode::UNAUTHORIZED,
         "replayed verify with consumed challenge must fail"
-    );
-}
-
-#[tokio::test]
-async fn test_hmac_replay_same_signature_stale_timestamp() {
-    let app = test_router().await;
-
-    let body = serde_json::to_string(&serde_json::json!({
-        "label": "test", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
-    }))
-    .unwrap();
-
-    // Use a stale timestamp (more than 30s ago).
-    let stale_timestamp = unix_now() - 60;
-    let sig = mpc_wallet_api::middleware::hmac::compute_signature(
-        "test-admin-key",
-        stale_timestamp,
-        "POST",
-        "/v1/wallets",
-        body.as_bytes(),
-    );
-
-    let req = Request::builder()
-        .uri("/v1/wallets")
-        .method("POST")
-        .header("x-api-key", "test-admin-key")
-        .header("x-signature", &sig)
-        .header("x-timestamp", stale_timestamp.to_string())
-        .header("content-type", "application/json")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::UNAUTHORIZED,
-        "stale HMAC timestamp must be rejected"
-    );
-}
-
-#[tokio::test]
-async fn test_hmac_replay_future_timestamp() {
-    let app = test_router().await;
-
-    let body = serde_json::to_string(&serde_json::json!({
-        "label": "test", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
-    }))
-    .unwrap();
-
-    // Use a future timestamp (more than 30s ahead).
-    let future_ts = unix_now() + 120;
-    let sig = mpc_wallet_api::middleware::hmac::compute_signature(
-        "test-admin-key",
-        future_ts,
-        "POST",
-        "/v1/wallets",
-        body.as_bytes(),
-    );
-
-    let req = Request::builder()
-        .uri("/v1/wallets")
-        .method("POST")
-        .header("x-api-key", "test-admin-key")
-        .header("x-signature", &sig)
-        .header("x-timestamp", future_ts.to_string())
-        .header("content-type", "application/json")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::UNAUTHORIZED,
-        "far-future HMAC timestamp must be rejected"
     );
 }
 
@@ -1331,201 +1195,27 @@ async fn test_verify_nonexistent_challenge() {
 // SECTION 9: HMAC BYPASS & MANIPULATION
 // ═══════════════════════════════════════════════════════════════════
 
-#[tokio::test]
-async fn test_hmac_not_required_for_get() {
-    // GET requests should NOT require HMAC (no mutation).
-    let app = test_router().await;
-
-    let req = Request::builder()
-        .uri("/v1/wallets")
-        .method("GET")
-        .header("x-api-key", "test-admin-key")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "GET should not require HMAC");
-}
-
-#[tokio::test]
-async fn test_hmac_required_for_post_with_api_key() {
-    let app = test_router().await;
-
-    let body = serde_json::to_string(&serde_json::json!({
-        "label": "test", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
-    }))
-    .unwrap();
-
-    let req = Request::builder()
-        .uri("/v1/wallets")
-        .method("POST")
-        .header("x-api-key", "test-admin-key")
-        .header("content-type", "application/json")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::UNAUTHORIZED,
-        "POST with API key but no HMAC must be rejected"
-    );
-}
-
-#[tokio::test]
-async fn test_hmac_body_tamper_detected() {
-    // ATTACK: Sign one body, send a different body.
-    let app = test_router().await;
-
-    let original_body = serde_json::to_string(&serde_json::json!({
-        "label": "legit", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
-    }))
-    .unwrap();
-
-    let tampered_body = serde_json::to_string(&serde_json::json!({
-        "label": "HACKED", "scheme": "gg20-ecdsa", "threshold": 1, "total_parties": 1
-    }))
-    .unwrap();
-
-    let timestamp = unix_now();
-    let sig = mpc_wallet_api::middleware::hmac::compute_signature(
-        "test-admin-key",
-        timestamp,
-        "POST",
-        "/v1/wallets",
-        original_body.as_bytes(), // Signed the original
-    );
-
-    let req = Request::builder()
-        .uri("/v1/wallets")
-        .method("POST")
-        .header("x-api-key", "test-admin-key")
-        .header("x-signature", &sig)
-        .header("x-timestamp", timestamp.to_string())
-        .header("content-type", "application/json")
-        .body(Body::from(tampered_body)) // But sent the tampered body
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::UNAUTHORIZED,
-        "tampered body must be detected"
-    );
-}
-
-#[tokio::test]
-async fn test_hmac_path_tamper_detected() {
-    // ATTACK: Sign for /v1/wallets but send to /v1/wallets/abc/freeze.
-    let app = test_router().await;
-
-    let body = serde_json::to_string(&serde_json::json!({})).unwrap();
-    let timestamp = unix_now();
-
-    // Sign for wallets path.
-    let sig = mpc_wallet_api::middleware::hmac::compute_signature(
-        "test-admin-key",
-        timestamp,
-        "POST",
-        "/v1/wallets",
-        body.as_bytes(),
-    );
-
-    // Send to a different path.
-    let req = Request::builder()
-        .uri("/v1/wallets/abc/freeze")
-        .method("POST")
-        .header("x-api-key", "test-admin-key")
-        .header("x-signature", &sig)
-        .header("x-timestamp", timestamp.to_string())
-        .header("content-type", "application/json")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::UNAUTHORIZED,
-        "HMAC signed for wrong path must be rejected"
-    );
-}
-
-#[tokio::test]
-async fn test_hmac_wrong_api_key() {
-    // ATTACK: Compute HMAC with one key, send with another.
-    let app = test_router().await;
-
-    let body = serde_json::to_string(&serde_json::json!({
-        "label": "test", "scheme": "gg20-ecdsa", "threshold": 2, "total_parties": 3
-    }))
-    .unwrap();
-
-    let timestamp = unix_now();
-    let sig = mpc_wallet_api::middleware::hmac::compute_signature(
-        "test-viewer-key", // Signed with viewer key
-        timestamp,
-        "POST",
-        "/v1/wallets",
-        body.as_bytes(),
-    );
-
-    let req = Request::builder()
-        .uri("/v1/wallets")
-        .method("POST")
-        .header("x-api-key", "test-admin-key") // But claiming admin key
-        .header("x-signature", &sig)
-        .header("x-timestamp", timestamp.to_string())
-        .header("content-type", "application/json")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::UNAUTHORIZED,
-        "HMAC computed with wrong key must fail"
-    );
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // SECTION 10: AUTH METHOD CONFUSION
 // ═══════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn test_session_token_takes_priority_over_api_key() {
-    // If both headers are present, session token should be checked first.
-    let (router, state) = test_app().await;
-    let (session_token, _) = handshake_via_http(&state).await;
-
-    // Send both a valid session token AND a bogus API key.
-    let req = Request::builder()
-        .uri("/v1/wallets")
-        .method("GET")
-        .header("x-session-token", &session_token)
-        .header("x-api-key", "totally-wrong-key")
-        .body(Body::empty())
-        .unwrap();
-    let resp = router.oneshot(req).await.unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "valid session token should take priority over invalid API key"
-    );
-}
-
-#[tokio::test]
-async fn test_invalid_session_does_not_fall_through_to_api_key() {
+async fn test_invalid_session_does_not_fall_through() {
     // SECURITY: If session token is present but invalid, it should NOT fall
-    // through to try API key auth. This prevents auth confusion attacks.
+    // through to try other auth methods. This prevents auth confusion attacks.
     let app = test_router().await;
 
     let req = Request::builder()
         .uri("/v1/wallets")
         .method("GET")
         .header("x-session-token", "invalid-session")
-        .header("x-api-key", "test-admin-key")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(
         resp.status(),
         StatusCode::UNAUTHORIZED,
-        "invalid session token must fail immediately without trying API key"
+        "invalid session token must fail immediately without trying other auth"
     );
 }
 
@@ -1710,14 +1400,6 @@ async fn test_error_messages_are_generic() {
 
     // Different auth failures should all return the same error message.
     let scenarios = vec![
-        ("wrong API key", {
-            Request::builder()
-                .uri("/v1/wallets")
-                .method("GET")
-                .header("x-api-key", "nonexistent-key")
-                .body(Body::empty())
-                .unwrap()
-        }),
         ("expired session", {
             Request::builder()
                 .uri("/v1/wallets")
@@ -1778,30 +1460,6 @@ async fn test_handshake_errors_are_generic() {
     );
 }
 
-#[tokio::test]
-async fn test_api_key_prefix_does_not_leak_valid_key() {
-    // When an API key fails, the error should not reflect anything about valid keys.
-    let app = test_router().await;
-
-    // Send a key that starts the same as a valid key.
-    let req = Request::builder()
-        .uri("/v1/wallets")
-        .method("GET")
-        .header("x-api-key", "test-admin-key-WRONG")
-        .body(Body::empty())
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-
-    let json = body_json(resp).await;
-    let error_msg = json["error"].as_str().unwrap();
-    assert!(
-        !error_msg.contains("test-admin"),
-        "error must not leak valid key prefixes"
-    );
-    assert_eq!(error_msg, "authentication failed");
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // SECTION 14: EDGE CASES — CONCURRENT & RACE CONDITIONS
 // ═══════════════════════════════════════════════════════════════════
@@ -1847,50 +1505,3 @@ async fn test_same_client_multiple_sessions() {
     assert!(state.session_store.get(&t3).await.is_some());
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// SECTION 15: API KEY SPECIFIC ATTACKS
-// ═══════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-async fn test_api_key_constant_time_comparison() {
-    let config = mpc_wallet_api::config::AppConfig::for_test();
-    let state = mpc_wallet_api::state::AppState::from_config(&config);
-    state.api_key_store.load_static_keys(&config.api_keys).await;
-
-    // All of these should fail identically.
-    assert!(state.api_key_store.verify("").await.is_none());
-    assert!(state.api_key_store.verify("test-admin-ke").await.is_none());
-    assert!(state
-        .api_key_store
-        .verify("test-admin-key ")
-        .await
-        .is_none());
-    assert!(state.api_key_store.verify("TEST-ADMIN-KEY").await.is_none());
-
-    // Valid key should work.
-    assert!(state.api_key_store.verify("test-admin-key").await.is_some());
-}
-
-#[tokio::test]
-async fn test_api_key_with_expired_entry() {
-    let mut config = mpc_wallet_api::config::AppConfig::for_test();
-    config.api_keys.push(mpc_wallet_api::config::ApiKeyConfig {
-        key: "expired-key-123".into(),
-        label: "expired".into(),
-        role: "admin".into(),
-        allowed_wallets: None,
-        allowed_chains: None,
-        expires_at: Some(1000), // Long expired
-    });
-    let state = mpc_wallet_api::state::AppState::from_config(&config);
-    state.api_key_store.load_static_keys(&config.api_keys).await;
-
-    assert!(
-        state
-            .api_key_store
-            .verify("expired-key-123")
-            .await
-            .is_none(),
-        "expired API key must be rejected"
-    );
-}

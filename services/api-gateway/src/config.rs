@@ -1,8 +1,5 @@
 //! Environment configuration for the API gateway.
 
-use mpc_wallet_core::rbac::ApiRole;
-use serde::Deserialize;
-
 /// API gateway configuration loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -14,8 +11,6 @@ pub struct AppConfig {
     pub jwt_issuer: String,
     /// Expected JWT audience (`aud` claim).
     pub jwt_audience: String,
-    /// Scoped API keys with role-based permissions.
-    pub api_keys: Vec<ApiKeyConfig>,
     /// Network environment: "mainnet", "testnet", "devnet".
     pub network: String,
     /// Rate limit: max requests per second per IP.
@@ -34,33 +29,6 @@ pub struct AppConfig {
     pub mtls_services_file: Option<String>,
 }
 
-/// Configuration for a single scoped API key.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ApiKeyConfig {
-    /// The raw API key secret (only used during startup to compute hash).
-    pub key: String,
-    /// Human-readable label for audit logging.
-    pub label: String,
-    /// Maximum role this key can assume.
-    pub role: String,
-    /// Optional: restrict to specific wallet IDs.
-    #[serde(default)]
-    pub allowed_wallets: Option<Vec<String>>,
-    /// Optional: restrict to specific chains.
-    #[serde(default)]
-    pub allowed_chains: Option<Vec<String>>,
-    /// Expiration timestamp (UNIX seconds). Null = no expiry.
-    #[serde(default)]
-    pub expires_at: Option<u64>,
-}
-
-impl ApiKeyConfig {
-    /// Parse the role string into an `ApiRole`.
-    pub fn api_role(&self) -> ApiRole {
-        crate::auth::types::parse_role(&self.role)
-    }
-}
-
 impl AppConfig {
     /// Load configuration from environment variables.
     ///
@@ -70,8 +38,6 @@ impl AppConfig {
         let jwt_secret =
             std::env::var("JWT_SECRET").expect("JWT_SECRET environment variable must be set");
 
-        let api_keys = Self::load_api_keys();
-
         let config = Self {
             port: std::env::var("PORT")
                 .ok()
@@ -80,7 +46,6 @@ impl AppConfig {
             jwt_secret,
             jwt_issuer: std::env::var("JWT_ISSUER").unwrap_or_else(|_| "mpc-wallet".into()),
             jwt_audience: std::env::var("JWT_AUDIENCE").unwrap_or_else(|_| "mpc-wallet-api".into()),
-            api_keys,
             network: std::env::var("NETWORK")
                 .unwrap_or_else(|_| "testnet".into())
                 .to_lowercase(),
@@ -105,33 +70,6 @@ impl AppConfig {
         };
         config.validate();
         config
-    }
-
-    /// Load API keys from `API_KEYS_FILE` (JSON array) or fall back to
-    /// `API_KEYS` (comma-separated plaintext, all get Viewer role).
-    fn load_api_keys() -> Vec<ApiKeyConfig> {
-        if let Ok(path) = std::env::var("API_KEYS_FILE") {
-            let content = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("failed to read API_KEYS_FILE at {path}: {e}"));
-            serde_json::from_str(&content)
-                .unwrap_or_else(|e| panic!("failed to parse API_KEYS_FILE as JSON array: {e}"))
-        } else {
-            // Legacy fallback: comma-separated keys, all get Viewer role.
-            std::env::var("API_KEYS")
-                .unwrap_or_default()
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .enumerate()
-                .map(|(i, key)| ApiKeyConfig {
-                    key: key.to_string(),
-                    label: format!("legacy-key-{i}"),
-                    role: "viewer".into(),
-                    allowed_wallets: None,
-                    allowed_chains: None,
-                    expires_at: None,
-                })
-                .collect()
-        }
     }
 
     /// Validate configuration invariants. Panics on invalid config.
@@ -172,32 +110,6 @@ impl AppConfig {
             jwt_secret: "test-secret-for-unit-tests-only-32b".into(),
             jwt_issuer: "test-issuer".into(),
             jwt_audience: "test-audience".into(),
-            api_keys: vec![
-                ApiKeyConfig {
-                    key: "test-admin-key".into(),
-                    label: "test-admin".into(),
-                    role: "admin".into(),
-                    allowed_wallets: None,
-                    allowed_chains: None,
-                    expires_at: None,
-                },
-                ApiKeyConfig {
-                    key: "test-viewer-key".into(),
-                    label: "test-viewer".into(),
-                    role: "viewer".into(),
-                    allowed_wallets: None,
-                    allowed_chains: None,
-                    expires_at: None,
-                },
-                ApiKeyConfig {
-                    key: "test-initiator-key".into(),
-                    label: "test-initiator".into(),
-                    role: "initiator".into(),
-                    allowed_wallets: None,
-                    allowed_chains: None,
-                    expires_at: None,
-                },
-            ],
             network: "testnet".into(),
             rate_limit_rps: 100,
             cors_origins: vec![],
@@ -236,26 +148,4 @@ mod tests {
         config.validate();
     }
 
-    #[test]
-    fn test_api_key_role_parsing() {
-        let key = ApiKeyConfig {
-            key: "k".into(),
-            label: "l".into(),
-            role: "admin".into(),
-            allowed_wallets: None,
-            allowed_chains: None,
-            expires_at: None,
-        };
-        assert_eq!(key.api_role(), ApiRole::Admin);
-
-        let key2 = ApiKeyConfig {
-            key: "k".into(),
-            label: "l".into(),
-            role: "unknown".into(),
-            allowed_wallets: None,
-            allowed_chains: None,
-            expires_at: None,
-        };
-        assert_eq!(key2.api_role(), ApiRole::Viewer);
-    }
 }

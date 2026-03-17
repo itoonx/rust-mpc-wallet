@@ -10,7 +10,6 @@ use mpc_wallet_chains::registry::ChainRegistry;
 use mpc_wallet_core::identity::JwtValidator;
 use mpc_wallet_core::rbac::ApiRole;
 
-use crate::auth::api_keys::ApiKeyStore;
 use crate::auth::mtls::{MtlsServiceEntry, MtlsServiceRegistry};
 use crate::auth::session::SessionStore;
 use crate::config::AppConfig;
@@ -122,10 +121,6 @@ pub struct AppState {
     pub chain_registry: Arc<ChainRegistry>,
     /// JWT validator for Bearer token auth.
     pub jwt_validator: Arc<JwtValidator>,
-    /// HMAC key for API key hashing (derived from JWT secret).
-    pub hmac_key: Arc<Vec<u8>>,
-    /// Unified API key store (static + dynamic keys).
-    pub api_key_store: ApiKeyStore,
     /// Server Ed25519 signing key for handshake auth.
     pub server_signing_key: Arc<SigningKey>,
     /// Authenticated session store.
@@ -239,11 +234,6 @@ impl AppState {
             &config.jwt_audience,
         );
 
-        let hmac_key = config.jwt_secret.as_bytes().to_vec();
-
-        // Unified API key store (static keys loaded at main.rs startup).
-        let api_key_store = ApiKeyStore::new(hmac_key.clone());
-
         // Load or generate server signing key.
         let server_signing_key = if let Some(ref key_hex) = config.server_signing_key {
             let key_bytes = hex::decode(key_hex).expect("SERVER_SIGNING_KEY must be valid hex");
@@ -309,8 +299,6 @@ impl AppState {
         Self {
             chain_registry: Arc::new(chain_registry),
             jwt_validator: Arc::new(jwt_validator),
-            hmac_key: Arc::new(hmac_key),
-            api_key_store,
             server_signing_key: Arc::new(server_signing_key),
             session_store: SessionStore::new(),
             client_registry: Arc::new(client_registry),

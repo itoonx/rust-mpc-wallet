@@ -62,7 +62,7 @@ Vaultex is a **Rust workspace** for building enterprise-grade **threshold multi-
 | **[Changelog](CHANGELOG.md)** | Version history and release notes |
 | **[Chain Roadmap](docs/CHAIN_ROADMAP.md)** | 54-chain expansion plan: EVM L2s, Move, Substrate, TON, Cosmos |
 | **[Standards & References](docs/STANDARDS.md)** | All cryptographic standards, RFCs, EIPs, BIPs implemented |
-| **[API Reference](docs/API_REFERENCE.md)** | REST API endpoints, auth methods, HMAC signing |
+| **[API Reference](docs/API_REFERENCE.md)** | REST API endpoints, auth methods |
 | **[Auth Spec](specs/AUTH_SPEC.md)** | Key-exchange handshake protocol (28 sections) |
 | **[Security Audit](docs/SECURITY_AUDIT_AUTH.md)** | Auth security audit (57 tests, all findings resolved) |
 | **[Security Findings](docs/SECURITY_FINDINGS.md)** | Full audit trail (0 CRITICAL/HIGH open) |
@@ -112,9 +112,9 @@ Client                          Gateway                           MPC Nodes
 └──────────┘               └─────────────────┘              └──────────┘
 ```
 
-### Four Auth Methods (priority order)
+### Three Auth Methods (priority order)
 
-The gateway checks in this order: **mTLS → Session JWT → API Key → Bearer JWT**. If a header is **present** but invalid, auth fails immediately — no fall-through to the next method.
+The gateway checks in this order: **mTLS → Session JWT → Bearer JWT**. If a header is **present** but invalid, auth fails immediately — no fall-through to the next method.
 
 #### 1. Session JWT (`X-Session-Token`) — for SDK clients
 
@@ -213,57 +213,7 @@ The gateway maps CN → service identity + RBAC role via `MTLS_SERVICES_FILE`:
 
 ---
 
-#### 3. API Key (`X-API-Key`) — for simple service integration
-
-**When to use:** Quick integrations, CI/CD pipelines, or environments where managing TLS certificates is impractical. Simpler than mTLS but requires careful secret management.
-
-**How it works:**
-
-```
-Operator provisions key via JSON file or API:
-  { "key": "sk_prod_a1b2c3...", "role": "initiator", "label": "trading-bot" }
-                    ↓
-Server hashes with HMAC-SHA256 at startup → stores hash only, never raw key
-                    ↓
-Client sends:  X-API-Key: sk_prod_a1b2c3...
-Server:  HMAC-SHA256(raw_key) → constant-time compare with stored hash
-  Match? → authenticated with the key's role
-  No match? → 401
-```
-
-For **POST** requests (mutations), API keys also require **HMAC request signing** to prevent replay and tampering:
-
-```bash
-# GET requests — key only
-curl -H "X-API-Key: sk_prod_a1b2c3..." /v1/wallets
-
-# POST requests — key + HMAC signature
-TIMESTAMP=$(date +%s)
-BODY='{"label":"My Wallet","scheme":"gg20-ecdsa","threshold":2,"total_parties":3}'
-BODY_HASH=$(echo -n "$BODY" | sha256sum | cut -d' ' -f1)
-SIGNATURE=$(echo -n "${TIMESTAMP}.POST./v1/wallets.${BODY_HASH}" \
-  | openssl dgst -sha256 -hmac "sk_prod_a1b2c3..." -hex | cut -d' ' -f2)
-
-curl -X POST \
-  -H "X-API-Key: sk_prod_a1b2c3..." \
-  -H "X-Signature: v1=${SIGNATURE}" \
-  -H "X-Timestamp: ${TIMESTAMP}" \
-  -H "Content-Type: application/json" \
-  -d "$BODY" /v1/wallets
-```
-
-**Self-service key management** (admin only):
-```bash
-POST   /v1/api-keys      # Create — raw key shown ONCE
-GET    /v1/api-keys       # List — metadata only, no secrets
-DELETE /v1/api-keys/:id   # Delete permanently
-```
-
-**Roles:** `admin` (full access), `initiator` (sign + create), `approver` (sign + freeze), `viewer` (read-only).
-
----
-
-#### 4. Bearer JWT (`Authorization: Bearer`) — for user-facing apps
+#### 3. Bearer JWT (`Authorization: Bearer`) — for user-facing apps
 
 **When to use:** Web/mobile apps where users authenticate via an identity provider (Auth0, Okta, Firebase, etc.) that issues JWTs. The gateway validates the JWT signature and extracts user identity + roles.
 
@@ -304,8 +254,6 @@ curl -H "Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOi..." \
 | Kubernetes / service mesh | **mTLS** | Native support in Istio, Linkerd, Consul Connect |
 | SDK / native app | **Session JWT** | Forward secrecy, mutual auth, per-request context binding |
 | Mobile app | **Session JWT** | Device fingerprint in JWT claims for audit trail |
-| CI/CD pipeline | **API Key** | Script-friendly, no cert management needed |
-| Quick integration / PoC | **API Key** | Simplest setup, no handshake or cert infrastructure |
 | Web app with IdP | **Bearer JWT** | Users authenticate via Auth0/Okta, no key management needed |
 | Admin dashboard | **Bearer JWT + MFA** | User identity + MFA step-up for sensitive operations |
 
@@ -466,7 +414,7 @@ crates/
   mpc-wallet-chains/   ← Chain adapters: 50 chains across 8 ecosystems
   mpc-wallet-cli/      ← CLI binary
 services/
-  api-gateway/         ← REST API server, auth (key exchange + JWT + API keys), RBAC
+  api-gateway/         ← REST API server, auth (key exchange + JWT + mTLS), RBAC
 specs/                 ← AUTH_SPEC.md, SIGN_AUTHORIZATION_SPEC.md
 retro/                 ← Decision records, lessons learned, security audits
 docs/                  ← Architecture, security, CLI guide, API reference

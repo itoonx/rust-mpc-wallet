@@ -1,6 +1,6 @@
-//! Authentication middleware: mTLS, session JWT, API key, and external JWT validation.
+//! Authentication middleware: mTLS, session JWT, and external JWT validation.
 //!
-//! Priority order: mTLS → X-Session-Token (JWT) → X-API-Key → Authorization: Bearer.
+//! Priority order: mTLS → X-Session-Token (JWT) → Authorization: Bearer.
 //! If a header is PRESENT but invalid, auth fails immediately — no fall-through.
 
 use axum::{
@@ -135,22 +135,7 @@ pub async fn auth_middleware(
         }
     }
 
-    // Path 2: X-API-Key.
-    if let Some(api_key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
-        match state.api_key_store.verify(api_key).await {
-            Some(meta) => {
-                let ctx = meta.auth_context();
-                request.extensions_mut().insert(ctx);
-                return next.run(request).await;
-            }
-            None => {
-                state.metrics.auth_failures.inc();
-                return auth_failed().into_response();
-            }
-        }
-    }
-
-    // Path 3: Authorization: Bearer <jwt>.
+    // Path 2: Authorization: Bearer <jwt>.
     if let Some(auth_header) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
         if let Some(token) = auth_header.strip_prefix("Bearer ") {
             match state.jwt_validator.validate(token) {
