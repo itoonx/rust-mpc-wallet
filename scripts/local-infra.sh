@@ -2,278 +2,356 @@
 # ═══════════════════════════════════════════════════════════════════════
 # MPC Wallet — Local Infrastructure (1-shot)
 #
-# Spins up Vault + Redis + Gateway on localhost for testing.
-# Everything auto-provisions: Vault secrets, AppRole, Redis, Gateway.
+# Spins up Vault + Redis + NATS + Gateway on localhost for testing.
+# All config lives in infra/local/.env — no hardcoded values here.
 #
 # Usage:
-#   ./scripts/local-infra.sh          # start everything
-#   ./scripts/local-infra.sh down     # tear down
-#   ./scripts/local-infra.sh status   # check health
-#   ./scripts/local-infra.sh logs     # tail gateway logs
+#   ./scripts/local-infra.sh              # start everything
+#   ./scripts/local-infra.sh down         # tear down (containers + gateway)
+#   ./scripts/local-infra.sh status       # check service health
+#   ./scripts/local-infra.sh logs         # tail all service logs
+#   ./scripts/local-infra.sh restart-gw   # rebuild & restart gateway only
+#
+# First run:
+#   cp infra/local/.env.example infra/local/.env   # then edit if needed
 # ═══════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
 
-COMPOSE_FILE="infra/docker/docker-compose.local.yml"
-PROJECT_NAME="mpc-local"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+# ── Paths ─────────────────────────────────────────────────────────────
+
+ENV_FILE="infra/local/.env"
+ENV_EXAMPLE="infra/local/.env.example"
+COMPOSE_FILE="infra/local/docker-compose.yml"
+COMPOSE_PROJECT="mpc-local"
+PID_FILE="/tmp/mpc-wallet-gateway.pid"
+
+# ── Colors ────────────────────────────────────────────────────────────
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; DIM='\033[2m'; NC='\033[0m'
 
 log()  { echo -e "${GREEN}[+]${NC} $1"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1"; }
-err()  { echo -e "${RED}[x]${NC} $1"; exit 1; }
-step() { echo -e "\n${CYAN}━━━ $1 ━━━${NC}"; }
+err()  { echo -e "${RED}[x]${NC} $1" >&2; exit 1; }
+step() { echo -e "\n${CYAN}--- $1 ---${NC}"; }
+
+# ── Load .env ─────────────────────────────────────────────────────────
+
+load_env() {
+  if [ ! -f "$ENV_FILE" ]; then
+    if [ -f "$ENV_EXAMPLE" ]; then
+      warn ".env not found — copying from .env.example"
+      cp "$ENV_EXAMPLE" "$ENV_FILE"
+    else
+      err "No .env or .env.example found at infra/local/"
+    fi
+  fi
+
+  # Export all non-comment, non-empty lines
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+}
+
+load_env
+
+# ── Derived values (from .env) ────────────────────────────────────────
+
+VAULT_ADDR="http://127.0.0.1:${VAULT_PORT:-8200}"
+REDIS_URL="redis://127.0.0.1:${REDIS_PORT:-6379}"
+NATS_URL="nats://127.0.0.1:${NATS_CLIENT_PORT:-4222}"
+GATEWAY_URL="http://127.0.0.1:${GATEWAY_PORT:-3000}"
+
+# Docker compose command
+DC="docker compose -p $COMPOSE_PROJECT -f $COMPOSE_FILE --env-file $ENV_FILE"
+
+# ── Helpers ───────────────────────────────────────────────────────────
+
+check_prereqs() {
+  local missing=()
+  command -v docker  >/dev/null 2>&1 || missing+=("docker")
+  command -v curl    >/dev/null 2>&1 || missing+=("curl")
+  command -v jq      >/dev/null 2>&1 || missing+=("jq (brew install jq)")
+  command -v openssl >/dev/null 2>&1 || missing+=("openssl")
+  command -v cargo   >/dev/null 2>&1 || missing+=("cargo (rustup)")
+
+  if [ ${#missing[@]} -gt 0 ]; then
+    err "Missing: ${missing[*]}"
+  fi
+
+  docker info >/dev/null 2>&1 || err "Docker daemon not running"
+}
+
+# Wait for a service health check URL to respond
+wait_healthy() {
+  local name="$1" url="$2" max="${3:-30}"
+  for i in $(seq 1 "$max"); do
+    if curl -sf "$url" >/dev/null 2>&1; then
+      log "$name is healthy"
+      return 0
+    fi
+    [ "$i" -eq "$max" ] && err "$name failed health check after ${max}s ($url)"
+    sleep 1
+  done
+}
+
+# Stop the gateway process if running
+stop_gateway() {
+  if [ -f "$PID_FILE" ]; then
+    local pid
+    pid=$(cat "$PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      log "Gateway stopped (PID: $pid)"
+    fi
+    rm -f "$PID_FILE"
+  fi
+  # Belt and suspenders
+  pkill -f "target/.*/mpc-wallet-api" 2>/dev/null || true
+}
+
+# Vault API helper
+vault_api() {
+  local method="$1" path="$2"; shift 2
+  curl -sf -X "$method" "${VAULT_ADDR}/v1/${path}" \
+    -H "X-Vault-Token: ${VAULT_DEV_TOKEN:-dev-root-token}" \
+    -H "Content-Type: application/json" \
+    "$@"
+}
 
 # ── Subcommands ───────────────────────────────────────────────────────
 
+cmd_down() {
+  step "Tearing down"
+  stop_gateway
+  $DC down -v 2>/dev/null || true
+  rm -f "$PID_FILE"
+  log "All containers and volumes removed."
+}
+
+cmd_status() {
+  step "Service status"
+  $DC ps 2>/dev/null || warn "Compose services not running"
+  echo ""
+
+  local vault_ok redis_ok nats_ok gw_ok
+  vault_ok=$(curl -sf "${VAULT_ADDR}/v1/sys/health" 2>/dev/null | jq -r '"initialized=\(.initialized) sealed=\(.sealed)"' 2>/dev/null || echo "not running")
+  redis_ok=$(docker exec "${COMPOSE_PROJECT}-redis-1" redis-cli ping 2>/dev/null || echo "not running")
+  nats_ok=$(curl -sf "http://127.0.0.1:${NATS_MONITOR_PORT:-8222}/healthz" 2>/dev/null && echo "ok" || echo "not running")
+  gw_ok=$(curl -sf "${GATEWAY_URL}/v1/health" 2>/dev/null | jq -r '.data.status' 2>/dev/null || echo "not running")
+
+  echo "  Vault:   $vault_ok"
+  echo "  Redis:   $redis_ok"
+  echo "  NATS:    $nats_ok"
+  echo "  Gateway: $gw_ok"
+
+  if [ -f "$PID_FILE" ]; then
+    local pid; pid=$(cat "$PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "  Gateway PID: $pid"
+    fi
+  fi
+}
+
+cmd_logs() {
+  $DC logs -f "$@"
+}
+
+cmd_restart_gw() {
+  step "Rebuilding gateway"
+  stop_gateway
+  build_gateway
+  start_gateway
+  smoke_test
+}
+
+# ── Core functions ────────────────────────────────────────────────────
+
+start_containers() {
+  step "Starting containers (Vault + Redis + NATS)"
+  $DC up -d
+
+  wait_healthy "Vault" "${VAULT_ADDR}/v1/sys/health" 30
+  wait_healthy "Redis" "" 0 # skip URL check, use docker instead
+  # Redis doesn't have an HTTP health endpoint — use docker exec
+  for i in $(seq 1 15); do
+    if docker exec "${COMPOSE_PROJECT}-redis-1" redis-cli ping 2>/dev/null | grep -q PONG; then
+      log "Redis is healthy"
+      break
+    fi
+    [ "$i" -eq 15 ] && err "Redis failed health check"
+    sleep 1
+  done
+  wait_healthy "NATS" "http://127.0.0.1:${NATS_MONITOR_PORT:-8222}/healthz" 15
+}
+
+provision_vault() {
+  step "Provisioning Vault"
+
+  local mount="${VAULT_MOUNT:-secret}"
+  local path="${VAULT_SECRETS_PATH:-mpc-wallet/gateway}"
+  local role="${VAULT_APPROLE_NAME:-mpc-gateway}"
+  local policy="${VAULT_POLICY_NAME:-mpc-gateway}"
+
+  # Generate random secrets
+  local jwt_secret server_signing_key session_encryption_key
+  jwt_secret=$(openssl rand -hex 32)
+  server_signing_key=$(openssl rand -hex 32)
+  session_encryption_key=$(openssl rand -hex 32)
+
+  # Write secrets
+  vault_api POST "${mount}/data/${path}" \
+    -d "$(jq -n \
+      --arg jwt "$jwt_secret" \
+      --arg ssk "$server_signing_key" \
+      --arg sek "$session_encryption_key" \
+      --arg redis "redis://127.0.0.1:${REDIS_PORT:-6379}" \
+      '{data: {jwt_secret: $jwt, server_signing_key: $ssk, session_encryption_key: $sek, redis_url: $redis}}'
+    )" > /dev/null
+
+  # Verify
+  local count
+  count=$(vault_api GET "${mount}/data/${path}" | jq -r '.data.data | keys | length')
+  log "Secrets written to ${mount}/${path} ($count keys)"
+
+  # Enable AppRole (idempotent)
+  vault_api POST "sys/auth/approle" -d '{"type":"approle"}' 2>/dev/null || true
+
+  # Policy
+  vault_api PUT "sys/policies/acl/${policy}" \
+    -d "$(jq -n --arg p "path \"${mount}/data/${path}\" { capabilities = [\"read\"] }" '{policy: $p}')" > /dev/null
+
+  # Role
+  vault_api POST "auth/approle/role/${role}" \
+    -d '{"token_policies":["'"${policy}"'"],"token_ttl":"1h","token_max_ttl":"4h"}' > /dev/null
+
+  # Get credentials
+  APPROLE_ROLE_ID=$(vault_api GET "auth/approle/role/${role}/role-id" | jq -r '.data.role_id')
+  APPROLE_SECRET_ID=$(vault_api POST "auth/approle/role/${role}/secret-id" | jq -r '.data.secret_id')
+
+  log "AppRole ready (role_id=${APPROLE_ROLE_ID:0:8}...)"
+}
+
+build_gateway() {
+  step "Building API gateway (${CARGO_PROFILE:-release})"
+
+  local profile="${CARGO_PROFILE:-release}"
+  if [ "$profile" = "debug" ]; then
+    cargo build -p mpc-wallet-api 2>&1 | tail -3
+  else
+    cargo build --release -p mpc-wallet-api 2>&1 | tail -3
+  fi
+  log "Build complete"
+}
+
+start_gateway() {
+  step "Starting API gateway"
+  stop_gateway
+
+  local profile="${CARGO_PROFILE:-release}"
+  local binary="./target/${profile}/mpc-wallet-api"
+  [ -f "$binary" ] || err "Binary not found: $binary (run build first)"
+
+  SECRETS_BACKEND=vault \
+  VAULT_ADDR="$VAULT_ADDR" \
+  VAULT_ROLE_ID="$APPROLE_ROLE_ID" \
+  VAULT_SECRET_ID="$APPROLE_SECRET_ID" \
+  VAULT_MOUNT="${VAULT_MOUNT:-secret}" \
+  VAULT_SECRETS_PATH="${VAULT_SECRETS_PATH:-mpc-wallet/gateway}" \
+  NETWORK="${NETWORK:-testnet}" \
+  SESSION_BACKEND="${SESSION_BACKEND:-redis}" \
+  SESSION_TTL="${SESSION_TTL:-3600}" \
+  REDIS_URL="redis://127.0.0.1:${REDIS_PORT:-6379}" \
+  PORT="${GATEWAY_PORT:-3000}" \
+  RATE_LIMIT_RPS="${RATE_LIMIT_RPS:-100}" \
+  RUST_LOG="${RUST_LOG:-mpc_wallet_api=info}" \
+    "$binary" &
+
+  local pid=$!
+  echo "$pid" > "$PID_FILE"
+  log "Gateway starting (PID: $pid)"
+
+  wait_healthy "Gateway" "${GATEWAY_URL}/v1/health" 15
+}
+
+smoke_test() {
+  step "Smoke test"
+
+  echo ""
+  echo "  Health:"
+  curl -sf "${GATEWAY_URL}/v1/health" | jq -c '{ status: .data.status, chains: .data.chains_supported }'
+
+  echo "  Chains:"
+  curl -sf "${GATEWAY_URL}/v1/chains" | jq -c '{ total: .data.total }'
+
+  echo "  Auth error format:"
+  curl -s "${GATEWAY_URL}/v1/wallets" | jq -c '.error'
+
+  echo ""
+}
+
+print_summary() {
+  local pid
+  pid=$(cat "$PID_FILE" 2>/dev/null || echo "?")
+
+  step "Local infrastructure ready"
+  echo ""
+  printf "  %-10s %s\n" "Vault"    "${VAULT_ADDR}  (UI: ${VAULT_ADDR}/ui, token: ${VAULT_DEV_TOKEN:-dev-root-token})"
+  printf "  %-10s %s\n" "Redis"    "redis://127.0.0.1:${REDIS_PORT:-6379}"
+  printf "  %-10s %s\n" "NATS"     "${NATS_URL}  (monitor: http://127.0.0.1:${NATS_MONITOR_PORT:-8222})"
+  printf "  %-10s %s\n" "Gateway"  "${GATEWAY_URL}  (PID: ${pid})"
+  echo ""
+  echo "  Vault secrets: ${VAULT_MOUNT:-secret}/${VAULT_SECRETS_PATH:-mpc-wallet/gateway}"
+  echo ""
+  echo "  Commands:"
+  echo "    ./scripts/local-infra.sh status       # health check"
+  echo "    ./scripts/local-infra.sh logs          # tail all logs"
+  echo "    ./scripts/local-infra.sh restart-gw    # rebuild gateway"
+  echo "    ./scripts/local-infra.sh down          # tear down everything"
+  echo ""
+  echo "  Quick test:"
+  echo "    curl -s ${GATEWAY_URL}/v1/health | jq ."
+  echo "    curl -s ${GATEWAY_URL}/v1/chains | jq .data.total"
+  echo ""
+}
+
+# ── Main ──────────────────────────────────────────────────────────────
+
+cmd_up() {
+  step "Checking prerequisites"
+  check_prereqs
+  log "OK"
+
+  start_containers
+  provision_vault
+  build_gateway
+  start_gateway
+  smoke_test
+  print_summary
+}
+
+# ── Dispatch ──────────────────────────────────────────────────────────
+
 case "${1:-up}" in
-  down|stop)
-    step "Tearing down local infra"
-    docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" down -v 2>/dev/null || true
-    log "Done. All containers and volumes removed."
-    exit 0
-    ;;
-  status)
-    step "Service status"
-    docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" ps
-    echo ""
-    echo "Health checks:"
-    curl -sf http://localhost:8200/v1/sys/health | jq -r '"  Vault:   \(.initialized) / sealed=\(.sealed)"' 2>/dev/null || echo "  Vault:   not running"
-    curl -sf http://localhost:6379 2>/dev/null && echo "  Redis:   ok" || echo "  Redis:   not running"
-    curl -sf http://localhost:3000/v1/health | jq -r '"  Gateway: \(.data.status) (chains=\(.data.chains_supported))"' 2>/dev/null || echo "  Gateway: not running"
-    exit 0
-    ;;
-  logs)
-    docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" logs -f gateway
-    exit 0
-    ;;
-  up) ;; # fall through to main flow
+  up)           cmd_up ;;
+  down|stop)    cmd_down ;;
+  status)       cmd_status ;;
+  logs)         shift; cmd_logs "$@" ;;
+  restart-gw)   cmd_restart_gw ;;
   *)
-    echo "Usage: $0 [up|down|status|logs]"
+    echo "Usage: $0 [up|down|status|logs|restart-gw]"
+    echo ""
+    echo "  up           Start Vault + Redis + NATS + Gateway (default)"
+    echo "  down         Tear down all containers and gateway"
+    echo "  status       Check health of all services"
+    echo "  logs         Tail container logs (pass service name to filter)"
+    echo "  restart-gw   Rebuild and restart gateway only"
     exit 1
     ;;
 esac
-
-# ── Prerequisites ─────────────────────────────────────────────────────
-
-step "Checking prerequisites"
-
-command -v docker >/dev/null 2>&1 || err "docker not found"
-command -v curl >/dev/null 2>&1   || err "curl not found"
-command -v jq >/dev/null 2>&1     || err "jq not found — brew install jq"
-docker info >/dev/null 2>&1       || err "Docker daemon not running"
-
-log "Prerequisites OK"
-
-# ── Generate compose file ─────────────────────────────────────────────
-
-step "Generating docker-compose for local infra"
-
-mkdir -p "$(dirname "$COMPOSE_FILE")"
-
-cat > "$COMPOSE_FILE" << 'COMPOSEFILE'
-# Auto-generated by scripts/local-infra.sh — do not edit manually
-# Vault (dev) + Redis + NATS + API Gateway
-
-services:
-  # ── HashiCorp Vault (dev mode) ──────────────────────────────────
-  vault:
-    image: hashicorp/vault:1.15
-    ports:
-      - "8200:8200"
-    environment:
-      VAULT_DEV_ROOT_TOKEN_ID: "dev-root-token"
-      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
-    cap_add:
-      - IPC_LOCK
-    healthcheck:
-      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  # ── Redis ───────────────────────────────────────────────────────
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  # ── NATS (MPC transport) ────────────────────────────────────────
-  nats:
-    image: nats:2.10-alpine
-    ports:
-      - "4222:4222"
-      - "8222:8222"
-    command: -js --http_port 8222 --max_payload 1048576
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-COMPOSEFILE
-
-log "Compose file written: $COMPOSE_FILE"
-
-# ── Start infrastructure containers ──────────────────────────────────
-
-step "Starting Vault + Redis + NATS"
-
-docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" up -d
-
-# Wait for healthy
-log "Waiting for services to be healthy..."
-for svc in vault redis nats; do
-  for i in $(seq 1 30); do
-    if docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" ps "$svc" 2>/dev/null | grep -q "healthy"; then
-      log "$svc is healthy"
-      break
-    fi
-    if [ "$i" -eq 30 ]; then
-      err "$svc failed to become healthy after 30s"
-    fi
-    sleep 1
-  done
-done
-
-# ── Provision Vault secrets ──────────────────────────────────────────
-
-step "Provisioning Vault secrets"
-
-export VAULT_ADDR="http://127.0.0.1:8200"
-export VAULT_TOKEN="dev-root-token"
-
-# Generate random secrets
-JWT_SECRET=$(openssl rand -hex 32)
-SERVER_SIGNING_KEY=$(openssl rand -hex 32)
-SESSION_ENCRYPTION_KEY=$(openssl rand -hex 32)
-
-# Write secrets to Vault KV v2
-curl -sf -X POST "$VAULT_ADDR/v1/secret/data/mpc-wallet/gateway" \
-  -H "X-Vault-Token: $VAULT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "$(jq -n \
-    --arg jwt "$JWT_SECRET" \
-    --arg ssk "$SERVER_SIGNING_KEY" \
-    --arg sek "$SESSION_ENCRYPTION_KEY" \
-    '{data: {jwt_secret: $jwt, server_signing_key: $ssk, session_encryption_key: $sek, redis_url: "redis://redis:6379"}}'
-  )" > /dev/null
-
-log "Secrets written to Vault at secret/mpc-wallet/gateway"
-
-# Verify secrets are readable
-VERIFY=$(curl -sf "$VAULT_ADDR/v1/secret/data/mpc-wallet/gateway" \
-  -H "X-Vault-Token: $VAULT_TOKEN" | jq -r '.data.data | keys | length')
-log "Verified: $VERIFY secrets in Vault"
-
-# ── Create AppRole (production pattern demo) ─────────────────────────
-
-step "Creating AppRole for gateway"
-
-# Enable AppRole auth (ignore if already enabled)
-curl -sf -X POST "$VAULT_ADDR/v1/sys/auth/approle" \
-  -H "X-Vault-Token: $VAULT_TOKEN" \
-  -d '{"type": "approle"}' 2>/dev/null || true
-
-# Create policy
-curl -sf -X PUT "$VAULT_ADDR/v1/sys/policies/acl/mpc-gateway" \
-  -H "X-Vault-Token: $VAULT_TOKEN" \
-  -d '{"policy": "path \"secret/data/mpc-wallet/*\" { capabilities = [\"read\"] }"}' > /dev/null
-
-# Create role
-curl -sf -X POST "$VAULT_ADDR/v1/auth/approle/role/mpc-gateway" \
-  -H "X-Vault-Token: $VAULT_TOKEN" \
-  -d '{"token_policies": ["mpc-gateway"], "token_ttl": "1h", "token_max_ttl": "4h"}' > /dev/null
-
-# Get role_id and secret_id
-ROLE_ID=$(curl -sf "$VAULT_ADDR/v1/auth/approle/role/mpc-gateway/role-id" \
-  -H "X-Vault-Token: $VAULT_TOKEN" | jq -r '.data.role_id')
-
-SECRET_ID=$(curl -sf -X POST "$VAULT_ADDR/v1/auth/approle/role/mpc-gateway/secret-id" \
-  -H "X-Vault-Token: $VAULT_TOKEN" | jq -r '.data.secret_id')
-
-log "AppRole created: role_id=$ROLE_ID"
-
-# ── Build and run the gateway ────────────────────────────────────────
-
-step "Building API gateway"
-
-cargo build --release -p mpc-wallet-api 2>&1 | tail -3
-
-step "Starting API gateway (Vault + Redis)"
-
-# Kill any existing gateway
-pkill -f "mpc-wallet-api" 2>/dev/null || true
-sleep 1
-
-# Start gateway with Vault backend
-SECRETS_BACKEND=vault \
-VAULT_ADDR=http://127.0.0.1:8200 \
-VAULT_ROLE_ID="$ROLE_ID" \
-VAULT_SECRET_ID="$SECRET_ID" \
-NETWORK=testnet \
-SESSION_BACKEND=redis \
-REDIS_URL=redis://127.0.0.1:6379 \
-RUST_LOG=mpc_wallet_api=info \
-  ./target/release/mpc-wallet-api &
-
-GATEWAY_PID=$!
-log "Gateway started (PID: $GATEWAY_PID)"
-
-# Wait for gateway to be ready
-for i in $(seq 1 15); do
-  if curl -sf http://localhost:3000/v1/health > /dev/null 2>&1; then
-    break
-  fi
-  if [ "$i" -eq 15 ]; then
-    err "Gateway failed to start after 15s"
-  fi
-  sleep 1
-done
-
-# ── Smoke test ───────────────────────────────────────────────────────
-
-step "Smoke test"
-
-echo ""
-echo "  Health check:"
-curl -sf http://localhost:3000/v1/health | jq '.'
-
-echo ""
-echo "  Chains (first 3):"
-curl -sf http://localhost:3000/v1/chains | jq '.data.chains[:3]'
-
-echo ""
-echo "  Auth (no token → expect AUTH_FAILED):"
-curl -sf http://localhost:3000/v1/wallets 2>/dev/null | jq '.error' || \
-  curl -s http://localhost:3000/v1/wallets | jq '.error'
-
-# ── Summary ──────────────────────────────────────────────────────────
-
-step "Local infrastructure ready"
-
-echo ""
-echo -e "  ${GREEN}Vault${NC}     http://localhost:8200  (token: dev-root-token)"
-echo -e "  ${GREEN}Redis${NC}     redis://localhost:6379"
-echo -e "  ${GREEN}NATS${NC}      nats://localhost:4222   (monitor: http://localhost:8222)"
-echo -e "  ${GREEN}Gateway${NC}   http://localhost:3000   (PID: $GATEWAY_PID)"
-echo ""
-echo -e "  Vault UI:  ${CYAN}http://localhost:8200/ui${NC}"
-echo -e "  Secrets:   ${CYAN}secret/mpc-wallet/gateway${NC} (jwt_secret, server_signing_key, session_encryption_key, redis_url)"
-echo ""
-echo -e "  ${YELLOW}Tear down:${NC}  ./scripts/local-infra.sh down && kill $GATEWAY_PID"
-echo ""
-echo -e "  Test handshake:"
-echo -e "    curl -s http://localhost:3000/v1/health | jq ."
-echo -e "    curl -s http://localhost:3000/v1/chains | jq .data.total"
-echo ""
