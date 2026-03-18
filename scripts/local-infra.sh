@@ -178,16 +178,17 @@ start_containers() {
   $DC up -d
 
   wait_healthy "Vault" "${VAULT_ADDR}/v1/sys/health" 30
-  wait_healthy "Redis" "" 0 # skip URL check, use docker instead
-  # Redis doesn't have an HTTP health endpoint — use docker exec
-  for i in $(seq 1 15); do
+
+  # Redis has no HTTP endpoint — use redis-cli ping via docker exec
+  for i in $(seq 1 30); do
     if docker exec "${COMPOSE_PROJECT}-redis-1" redis-cli ping 2>/dev/null | grep -q PONG; then
       log "Redis is healthy"
       break
     fi
-    [ "$i" -eq 15 ] && err "Redis failed health check"
+    [ "$i" -eq 30 ] && err "Redis failed health check after 30s"
     sleep 1
   done
+
   wait_healthy "NATS" "http://127.0.0.1:${NATS_MONITOR_PORT:-8222}/healthz" 15
 }
 
@@ -327,6 +328,10 @@ cmd_up() {
   step "Checking prerequisites"
   check_prereqs
   log "OK"
+
+  # Clean up any stale containers from previous runs
+  $DC down -v 2>/dev/null || true
+  stop_gateway
 
   start_containers
   provision_vault

@@ -28,12 +28,7 @@ services:
     image: ${REDIS_IMAGE:-redis:7-alpine}
     ports:
       - "${REDIS_PORT:-6379}:6379"
-    command: >
-      redis-server
-      --maxmemory ${REDIS_MAXMEMORY:-128mb}
-      --maxmemory-policy ${REDIS_MAXMEMORY_POLICY:-allkeys-lru}
-      --save ""
-      --appendonly no
+    command: ["redis-server", "--maxmemory", "${REDIS_MAXMEMORY:-128mb}", "--maxmemory-policy", "${REDIS_MAXMEMORY_POLICY:-allkeys-lru}", "--save", "", "--appendonly", "no"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -47,10 +42,7 @@ services:
     ports:
       - "${NATS_CLIENT_PORT:-4222}:4222"
       - "${NATS_MONITOR_PORT:-8222}:8222"
-    command: >
-      -js
-      --http_port 8222
-      --max_payload ${NATS_MAX_PAYLOAD:-1048576}
+    command: ["-js", "-m", "8222"]
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
       interval: 5s
