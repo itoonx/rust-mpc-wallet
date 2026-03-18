@@ -37,6 +37,8 @@ jsonwebtoken = { workspace = true }
 
 # Distributed storage
 redis = { workspace = true }
+async-nats = { workspace = true }
+futures = { workspace = true }
 
 # Crypto — key exchange, signatures, AEAD
 sha2 = { workspace = true }

@@ -390,8 +390,10 @@ pub struct AppState {
     pub session_ttl: u64,
     /// Prometheus metrics registry.
     pub metrics: Arc<Metrics>,
-    /// In-memory wallet store (MPC key shares).
+    /// Legacy demo wallet store (holds all shares — NOT for production).
     pub wallet_store: crate::wallet_store::WalletStore,
+    /// Production MPC orchestrator (delegates to nodes via NATS — NO shares in gateway).
+    pub orchestrator: Option<crate::orchestrator::MpcOrchestrator>,
 }
 
 impl AppState {
@@ -548,6 +550,7 @@ impl AppState {
             session_ttl: config.session_ttl,
             metrics: Arc::new(metrics),
             wallet_store: crate::wallet_store::WalletStore::new(),
+            orchestrator: None, // Set via AppState::with_orchestrator() when NATS is configured
         }
     }
 

@@ -5,10 +5,11 @@ pub mod config;
 pub mod errors;
 pub mod middleware;
 pub mod models;
+pub mod orchestrator;
 pub mod routes;
 pub mod state;
 pub mod vault;
-pub mod wallet_store;
+pub mod wallet_store; // Legacy demo mode — use orchestrator for production (DEC-015)
 
 use axum::{
     http::{header, HeaderName, Method},

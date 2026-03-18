@@ -53,6 +53,8 @@ pub mod protocol;
 /// Provides [`rbac::ApiRole`] for RBAC, [`rbac::AbacAttributes`] for ABAC,
 /// [`rbac::AuthContext`] combining both, and [`rbac::Permissions`] for authorization gates.
 pub mod rbac;
+/// NATS RPC protocol messages for Gateway ↔ MPC Node communication (DEC-015).
+pub mod rpc;
 /// Signing session manager: idempotent session lifecycle with `tx_fingerprint` lock.
 ///
 /// Use [`session::SessionManager`] to create and track signing sessions.
