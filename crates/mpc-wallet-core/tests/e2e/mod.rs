@@ -4,6 +4,7 @@
 //! Run via: `./scripts/local-infra.sh test`
 
 pub mod chain_signing;
+pub mod distributed;
 pub mod full_flow;
 pub mod nats_transport;
 
