@@ -42,6 +42,7 @@ impl PartyKeys {
     }
 
     /// Create a NATS transport for one party, pre-registered with all peer keys.
+    /// For signing, use `connect_with_peers` to register only the signing parties.
     pub async fn connect(&self, party_index: usize, session_id: &str, url: &str) -> NatsTransport {
         let party_id = PartyId(party_index as u16 + 1);
         let mut transport = NatsTransport::connect_signed(
@@ -60,15 +61,42 @@ impl PartyKeys {
         }
         transport
     }
+
+    /// Create a NATS transport registering only specific peers (for signing subsets).
+    pub async fn connect_with_peers(
+        &self,
+        party_index: usize,
+        peer_indices: &[usize],
+        session_id: &str,
+        url: &str,
+    ) -> NatsTransport {
+        let party_id = PartyId(party_index as u16 + 1);
+        let mut transport = NatsTransport::connect_signed(
+            url,
+            party_id,
+            session_id.to_string(),
+            self.keys[party_index].clone(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("NATS connect party {}: {e}", party_id.0));
+
+        for &j in peer_indices {
+            if j != party_index {
+                transport.register_peer_key(PartyId(j as u16 + 1), self.keys[j].verifying_key());
+            }
+        }
+        transport
+    }
 }
 
 /// Run keygen for all parties concurrently via NATS.
+/// Returns (shares, party_keys) — party_keys must be reused for signing.
 pub async fn nats_keygen(
     protocol_factory: fn() -> Box<dyn MpcProtocol>,
     threshold: u16,
     total: u16,
     url: &str,
-) -> Vec<KeyShare> {
+) -> (Vec<KeyShare>, PartyKeys) {
     let session_id = unique_session_id();
     let config = ThresholdConfig::new(threshold, total).unwrap();
     let party_keys = PartyKeys::generate(total);
@@ -91,21 +119,29 @@ pub async fn nats_keygen(
     for h in handles {
         shares.push(h.await.expect("keygen panicked").expect("keygen failed"));
     }
-    shares
+    (shares, party_keys)
 }
 
 /// Run signing for a subset of parties concurrently via NATS.
+/// `party_keys` must be the same keys returned from `nats_keygen` —
+/// otherwise SignedEnvelope verification will fail.
+#[allow(dead_code)]
 pub async fn nats_sign(
     protocol_factory: fn() -> Box<dyn MpcProtocol>,
     shares: &[KeyShare],
     signer_indices: &[usize],
     message: &[u8],
     url: &str,
+    party_keys: &PartyKeys,
 ) -> Vec<MpcSignature> {
     let session_id = unique_session_id();
-    let total = shares[0].config.total_parties;
     let signers: Vec<PartyId> = signer_indices.iter().map(|&i| shares[i].party_id).collect();
-    let party_keys = PartyKeys::generate(total);
+
+    // Only register signing peers (not all parties) — important for NATS broadcast.
+    let signer_party_indices: Vec<usize> = signer_indices
+        .iter()
+        .map(|&i| shares[i].party_id.0 as usize - 1)
+        .collect();
 
     let mut handles = Vec::new();
     for &idx in signer_indices {
@@ -117,9 +153,12 @@ pub async fn nats_sign(
         let signers_clone = signers.clone();
         let msg = message.to_vec();
         let party_index = share.party_id.0 as usize - 1;
+        let peer_indices = signer_party_indices.clone();
 
         handles.push(tokio::spawn(async move {
-            let transport = pkeys.connect(party_index, &sid, &nats).await;
+            let transport = pkeys
+                .connect_with_peers(party_index, &peer_indices, &sid, &nats)
+                .await;
             protocol
                 .sign(&share, &signers_clone, &msg, &transport)
                 .await
