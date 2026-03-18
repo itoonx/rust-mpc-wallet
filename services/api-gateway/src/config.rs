@@ -1,4 +1,7 @@
 //! Environment configuration for the API gateway.
+//!
+//! Secrets can be loaded from environment variables (dev) or HashiCorp Vault (production).
+//! Set `SECRETS_BACKEND=vault` + `VAULT_ADDR` to use Vault.
 
 /// Backend type for sessions, replay cache, and revocation store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +17,24 @@ impl BackendType {
         match s.to_lowercase().as_str() {
             "redis" => Self::Redis,
             _ => Self::Memory,
+        }
+    }
+}
+
+/// Secrets backend — where sensitive values come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretsBackend {
+    /// Environment variables (dev/test).
+    Env,
+    /// HashiCorp Vault KV v2 (production).
+    Vault,
+}
+
+impl SecretsBackend {
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "vault" => Self::Vault,
+            _ => Self::Env,
         }
     }
 }
@@ -56,12 +77,66 @@ pub struct AppConfig {
 
 impl AppConfig {
     /// Load configuration from environment variables.
+    /// If `SECRETS_BACKEND=vault`, secrets are fetched from HashiCorp Vault first.
     ///
     /// # Panics
-    /// Panics if `JWT_SECRET` is not set or < 32 bytes.
+    /// Panics if `JWT_SECRET` is not set (either via env or Vault) or < 32 bytes.
     pub fn from_env() -> Self {
-        let jwt_secret =
-            std::env::var("JWT_SECRET").expect("JWT_SECRET environment variable must be set");
+        Self::from_env_sync(None)
+    }
+
+    /// Async version that loads secrets from Vault if configured.
+    pub async fn from_env_with_vault() -> Self {
+        let secrets_backend = SecretsBackend::parse(
+            &std::env::var("SECRETS_BACKEND").unwrap_or_else(|_| "env".into()),
+        );
+
+        let vault_secrets = if secrets_backend == SecretsBackend::Vault {
+            let vault_config = crate::vault::VaultConfig::from_env()
+                .expect("SECRETS_BACKEND=vault but VAULT_ADDR not set");
+            tracing::info!(
+                addr = %vault_config.addr,
+                mount = %vault_config.mount,
+                path = %vault_config.secrets_path,
+                "loading secrets from HashiCorp Vault"
+            );
+            let client = crate::vault::VaultClient::new(vault_config);
+            let secrets = client
+                .read_secrets()
+                .await
+                .expect("failed to read secrets from Vault");
+            tracing::info!("secrets loaded from Vault successfully");
+            Some(secrets)
+        } else {
+            None
+        };
+
+        Self::from_env_sync(vault_secrets)
+    }
+
+    /// Internal: build config, optionally overlaying Vault secrets.
+    fn from_env_sync(vault_secrets: Option<crate::vault::VaultSecrets>) -> Self {
+        // Vault secrets take precedence over env vars for sensitive fields.
+        let jwt_secret = vault_secrets
+            .as_ref()
+            .and_then(|v| v.jwt_secret.clone())
+            .or_else(|| std::env::var("JWT_SECRET").ok())
+            .expect("JWT_SECRET must be set (via Vault or JWT_SECRET env var)");
+
+        let server_signing_key = vault_secrets
+            .as_ref()
+            .and_then(|v| v.server_signing_key.clone())
+            .or_else(|| std::env::var("SERVER_SIGNING_KEY").ok());
+
+        let session_encryption_key = vault_secrets
+            .as_ref()
+            .and_then(|v| v.session_encryption_key.clone())
+            .or_else(|| std::env::var("SESSION_ENCRYPTION_KEY").ok());
+
+        let redis_url = vault_secrets
+            .as_ref()
+            .and_then(|v| v.redis_url.clone())
+            .or_else(|| std::env::var("REDIS_URL").ok());
 
         let config = Self {
             port: std::env::var("PORT")
@@ -84,7 +159,7 @@ impl AppConfig {
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .collect(),
-            server_signing_key: std::env::var("SERVER_SIGNING_KEY").ok(),
+            server_signing_key,
             client_keys_file: std::env::var("CLIENT_KEYS_FILE").ok(),
             revoked_keys_file: std::env::var("REVOKED_KEYS_FILE").ok(),
             session_ttl: std::env::var("SESSION_TTL")
@@ -95,8 +170,8 @@ impl AppConfig {
             session_backend: BackendType::parse(
                 &std::env::var("SESSION_BACKEND").unwrap_or_else(|_| "memory".into()),
             ),
-            redis_url: std::env::var("REDIS_URL").ok(),
-            session_encryption_key: std::env::var("SESSION_ENCRYPTION_KEY").ok(),
+            redis_url,
+            session_encryption_key,
         };
         config.validate();
         config

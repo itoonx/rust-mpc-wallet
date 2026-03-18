@@ -23,7 +23,7 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let config = AppConfig::from_env();
+    let config = AppConfig::from_env_with_vault().await;
     let state = AppState::from_config(&config).await;
 
     // Start background session pruning (every 60s).

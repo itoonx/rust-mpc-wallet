@@ -52,6 +52,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 prometheus = "0.13"
 
+# Secrets management
+reqwest = { workspace = true }
+
 # Utilities
 uuid = { workspace = true }
 hex = { workspace = true }

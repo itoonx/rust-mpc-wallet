@@ -72,18 +72,34 @@ If a header is **present** but invalid, auth fails immediately — no fall-throu
 
 ### Environment Variables Reference
 
-#### Secrets (sensitive — use KMS/HSM in production)
+#### Secrets (sensitive — use Vault in production)
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `JWT_SECRET` | yes | HMAC secret for JWT validation (>= 32 bytes) |
-| `SERVER_SIGNING_KEY` | no (auto-generated) | Hex-encoded 32-byte Ed25519 secret for handshake |
-| `SESSION_ENCRYPTION_KEY` | no | Hex 32-byte KEK for Redis session encryption (ChaCha20-Poly1305) |
-| `REDIS_URL` | no | Redis connection URL (may contain password) |
+| `JWT_SECRET` | yes* | HMAC secret for JWT validation (>= 32 bytes) |
+| `SERVER_SIGNING_KEY` | no* (auto-generated) | Hex-encoded 32-byte Ed25519 secret for handshake |
+| `SESSION_ENCRYPTION_KEY` | no* | Hex 32-byte KEK for Redis session encryption (ChaCha20-Poly1305) |
+| `REDIS_URL` | no* | Redis connection URL (may contain password) |
 
-> **Production requirement:** These secrets MUST NOT be stored as plaintext environment variables, config files, or checked into source control. See [Secrets Management](#secrets-management) below.
+*These can be loaded from Vault instead of env vars — see below.
 
-#### Configuration (non-sensitive)
+> **Production:** Set `SECRETS_BACKEND=vault` to load all secrets from HashiCorp Vault at startup. No plaintext secrets in env vars, config files, or source control.
+
+#### Vault Configuration
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SECRETS_BACKEND` | no | `env` | `env` (env vars) or `vault` (HashiCorp Vault) |
+| `VAULT_ADDR` | if vault | — | Vault server URL (e.g., `https://vault.internal:8200`) |
+| `VAULT_TOKEN` | if vault* | — | Vault token (dev/CI) |
+| `VAULT_ROLE_ID` | if vault* | — | AppRole role ID (production) |
+| `VAULT_SECRET_ID` | if vault* | — | AppRole secret ID (production) |
+| `VAULT_MOUNT` | no | `secret` | KV v2 mount path |
+| `VAULT_SECRETS_PATH` | no | `mpc-wallet/gateway` | Secret path within mount |
+
+*Either `VAULT_TOKEN` or (`VAULT_ROLE_ID` + `VAULT_SECRET_ID`) must be set.
+
+#### Application Configuration (non-sensitive)
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -99,7 +115,7 @@ If a header is **present** but invalid, auth fails immediately — no fall-throu
 
 ### Secrets Management
 
-Secrets (`JWT_SECRET`, `SERVER_SIGNING_KEY`, `SESSION_ENCRYPTION_KEY`, `REDIS_URL`) require different handling depending on the environment:
+The gateway has **built-in HashiCorp Vault integration** as the recommended production default. Secrets are fetched at startup — no plaintext secrets needed in the environment.
 
 #### Development / Local
 
@@ -109,53 +125,108 @@ export JWT_SECRET=$(openssl rand -hex 32)
 export SERVER_SIGNING_KEY=$(openssl rand -hex 32)
 ```
 
-#### Staging / Production — use a secrets manager
+#### Production — HashiCorp Vault (recommended default)
 
-| Platform | Recommended Approach |
-|----------|---------------------|
-| **AWS** | Secrets Manager or SSM Parameter Store (SecureString) → injected at container start |
-| **GCP** | Secret Manager → mounted as volume or injected via workload identity |
-| **Azure** | Key Vault → injected via managed identity |
-| **Kubernetes** | External Secrets Operator syncing from cloud KMS → `Secret` → env/volume |
-| **HashiCorp Vault** | Dynamic secrets with short TTL, agent sidecar injects at runtime |
+**1. Write secrets to Vault:**
+```bash
+vault kv put secret/mpc-wallet/gateway \
+  jwt_secret=$(openssl rand -hex 32) \
+  server_signing_key=$(openssl rand -hex 32) \
+  session_encryption_key=$(openssl rand -hex 32) \
+  redis_url="rediss://user:pass@redis.internal:6379"
+```
 
-**AWS example (ECS/EKS):**
-```json
-{
-  "containerDefinitions": [{
-    "secrets": [
-      { "name": "JWT_SECRET", "valueFrom": "arn:aws:secretsmanager:us-east-1:123456:secret:mpc-wallet/jwt-secret" },
-      { "name": "SERVER_SIGNING_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:123456:secret:mpc-wallet/signing-key" },
-      { "name": "SESSION_ENCRYPTION_KEY", "valueFrom": "arn:aws:secretsmanager:us-east-1:123456:secret:mpc-wallet/session-kek" }
-    ]
-  }]
+**2. Create AppRole for the gateway:**
+```bash
+# Policy
+vault policy write mpc-gateway - <<EOF
+path "secret/data/mpc-wallet/gateway" {
+  capabilities = ["read"]
 }
+EOF
+
+# AppRole
+vault auth enable approle
+vault write auth/approle/role/mpc-gateway \
+  token_policies="mpc-gateway" \
+  token_ttl=1h \
+  token_max_ttl=4h \
+  secret_id_ttl=720h
+
+# Get credentials for deployment
+vault read auth/approle/role/mpc-gateway/role-id
+vault write -f auth/approle/role/mpc-gateway/secret-id
 ```
 
-**Kubernetes External Secrets example:**
-```yaml
-apiVersion: external-secrets.io/v1beta1
-kind: ExternalSecret
-metadata:
-  name: mpc-wallet-secrets
-spec:
-  refreshInterval: 1h
-  secretStoreRef:
-    name: aws-secrets-manager
-    kind: ClusterSecretStore
-  target:
-    name: mpc-wallet-secrets
-  data:
-    - secretKey: JWT_SECRET
-      remoteRef:
-        key: mpc-wallet/jwt-secret
-    - secretKey: SERVER_SIGNING_KEY
-      remoteRef:
-        key: mpc-wallet/signing-key
-    - secretKey: SESSION_ENCRYPTION_KEY
-      remoteRef:
-        key: mpc-wallet/session-kek
+**3. Deploy with Vault:**
+```bash
+# Minimal production env — no secrets in plaintext
+export SECRETS_BACKEND=vault
+export VAULT_ADDR=https://vault.internal:8200
+export VAULT_ROLE_ID=<from step 2>
+export VAULT_SECRET_ID=<from step 2>
+export NETWORK=mainnet
+export SESSION_BACKEND=redis
 ```
+
+Or with Vault token (dev/CI):
+```bash
+export SECRETS_BACKEND=vault
+export VAULT_ADDR=http://127.0.0.1:8200
+export VAULT_TOKEN=hvs.xxxxxxxxxxxxx
+```
+
+**4. Kubernetes deployment:**
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mpc-gateway
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: SECRETS_BACKEND
+              value: "vault"
+            - name: VAULT_ADDR
+              value: "https://vault.internal:8200"
+            - name: VAULT_ROLE_ID
+              valueFrom:
+                secretRef:
+                  name: vault-approle
+                  key: role_id
+            - name: VAULT_SECRET_ID
+              valueFrom:
+                secretRef:
+                  name: vault-approle
+                  key: secret_id
+            - name: NETWORK
+              value: "mainnet"
+            - name: SESSION_BACKEND
+              value: "redis"
+```
+
+**Expected Vault secret structure (KV v2):**
+```
+secret/data/mpc-wallet/gateway:
+  jwt_secret: "a1b2c3d4...64-hex-chars"
+  server_signing_key: "e5f6a7b8...64-hex-chars"
+  session_encryption_key: "c9d0e1f2...64-hex-chars"
+  redis_url: "rediss://user:pass@redis.internal:6379"
+```
+
+#### Alternative: Cloud-Native Secrets Managers
+
+If you don't use Vault, inject secrets via your cloud platform's native tools:
+
+| Platform | Approach |
+|----------|----------|
+| **AWS** | Secrets Manager → ECS task definition `secrets` / EKS CSI driver |
+| **GCP** | Secret Manager → workload identity mount |
+| **Azure** | Key Vault → managed identity injection |
+| **Kubernetes** | External Secrets Operator syncing from any backend → `Secret` → env |
 
 #### KMS/HSM for Key Material (recommended for high-security)
 
