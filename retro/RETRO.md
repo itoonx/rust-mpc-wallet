@@ -33,6 +33,8 @@ retro/
 | [DEC-010](decisions/DEC-010_auth-lib-split.md) | 2026-03-17 | Split api-gateway into lib+bin | Decided: for integration tests |
 | [DEC-011](decisions/DEC-011_auth-hardening.md) | 2026-03-17 | Auth production hardening architecture | Decided: rate limit + session cap + dynamic revoke + zeroize |
 | [DEC-012](decisions/DEC-012_sign-authorization.md) | 2026-03-17 | MPC node independent verification | Decided: SignAuthorization proof before every sign |
+| [DEC-013](decisions/DEC-013_remove-api-keys.md) | 2026-03-18 | Remove API key auth | Decided: simplify to mTLS + Session JWT + Bearer JWT |
+| [DEC-014](decisions/DEC-014_redis-kms-migration.md) | 2026-03-18 | Redis + KMS/HSM migration | Decided: trait-based backends, encrypted session storage |
 
 ---
 
@@ -54,7 +56,7 @@ retro/
 
 | Report | Date | Scope | Findings |
 |--------|------|-------|----------|
-| [AUTH-AUDIT-001](security/AUTH-AUDIT-001.md) | 2026-03-17 | Auth system (handshake, middleware, HMAC) | 57 tests, all HIGH/MED fixed, 3 LOW + 1 INFO accepted |
+| [AUTH-AUDIT-001](security/AUTH-AUDIT-001.md) | 2026-03-17 | Auth system (handshake, middleware) | 46 tests, all HIGH/MED fixed, API keys removed |
 
 ---
 

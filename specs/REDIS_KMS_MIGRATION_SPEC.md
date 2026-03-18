@@ -174,13 +174,14 @@ Key share bytes (`Zeroizing<Vec<u8>>`) are decrypted only in-process, never in H
 
 | Sprint | Scope | Files | Tests |
 |--------|-------|-------|-------|
-| **S1** | SessionStore trait + InMemory backend (refactor) | `auth/session.rs` | Keep existing |
-| **S2** | Redis backend + session encryption | `auth/session_redis.rs`, `Cargo.toml` (+redis) | Add Redis integration tests |
-| **S3** | ReplayCache → Redis | `state.rs` | Add tests |
-| **S4** | revoked_keys → Redis SET | `state.rs`, `routes/auth.rs` | Add tests |
-| **S5** | AuthSigner trait + LocalSigner | `auth/signer.rs` | Keep existing |
-| **S6** | KmsSigner (AWS KMS) | `auth/kms_signer.rs` | Mock KMS tests |
-| **S7** | HSM key share wrapping | `key_store/hsm.rs` | Integration tests |
+| **S1** | SessionStore trait + InMemory backend | `auth/session.rs` | **DONE** |
+| **S2** | Redis backend + session encryption | `auth/session_redis.rs` | **DONE** (ChaCha20-Poly1305, Zeroizing KEK) |
+| **S3** | ReplayCache → Redis | `state.rs`, `redis_backend.rs` | **DONE** (SET NX EX, SCAN) |
+| **S4** | revoked_keys → Redis SET | `state.rs`, `redis_backend.rs` | **DONE** (SADD/SISMEMBER) |
+| **S5** | AuthSigner trait + LocalSigner | `auth/signer.rs` | **DONE** |
+| **S6** | KmsSigner (AWS KMS) | `auth/kms_signer.rs` | **DONE** (stub, returns Err) |
+| **S7** | HSM key share wrapping | `key_store/hsm.rs` | **DONE** (LocalKeyEncryption) |
+| **S8** | Real Redis integration | `redis_backend.rs` + `redis` crate | **DONE** (ConnectionManager, SCAN) |
 
 ## Security Checklist
 

@@ -96,47 +96,63 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ## Current State (as of Sprint 14 — all epics complete, CI green)
 
-### Auth System (key-exchange handshake)
+### Auth System (3 methods, Redis-ready)
 
-Three auth methods — middleware checks in order: `X-Session-Token` → `X-API-Key` → `Authorization: Bearer`.
-If a header is **present** but invalid, auth fails immediately — no fall-through to the next method.
+Three auth methods — priority: **mTLS → Session JWT → Bearer JWT**.
+If a header is **present** but invalid, auth fails immediately — no fall-through.
 
-**Key-exchange handshake** (primary method for SDK clients):
-- `POST /v1/auth/hello` — ClientHello (X25519 ephemeral key + Ed25519 key ID), rate-limited (10 req/sec per key_id)
-- `POST /v1/auth/verify` — ClientAuth (Ed25519 signature over transcript) → returns session token
-- `POST /v1/auth/refresh-session` — extend session TTL
-- `GET /v1/auth/revoked-keys` — key revocation list
-- `POST /v1/auth/revoke-key` — dynamic key revocation (admin)
+```
+mTLS          = Machine → Machine   (TLS cert identity, service-to-service)
+Session JWT   = App → Server        (HS256 signed with key-exchange derived key)
+Bearer JWT    = Human → System      (RS256/ES256 from IdP like Auth0/Okta)
+```
 
-Properties: mutual auth, forward secrecy (per-session X25519 ECDH), ChaCha20-Poly1305 AEAD, HKDF-SHA256 KDF.
+**Endpoints:**
+- `POST /v1/auth/hello` — ClientHello (X25519 + Ed25519), rate-limited 10 req/sec
+- `POST /v1/auth/verify` — ClientAuth → session token
+- `POST /v1/auth/refresh-session` — extend TTL (configurable via SESSION_TTL)
+- `GET /v1/auth/revoked-keys` — revocation list
+- `POST /v1/auth/revoke-key` — dynamic revocation (admin-only, behind auth)
 
 **Architecture (`services/api-gateway/`):**
 ```
 src/
-  lib.rs              ← Library crate (public modules, build_router())
-  main.rs             ← Binary entry point (uses lib, starts prune task)
+  lib.rs              ← Library crate (build_router())
+  main.rs             ← Binary (loads config, connects Redis if configured)
   auth/
-    types.rs          ← Message types, AuthenticatedSession (Zeroize+ZeroizeOnDrop), transcript hashing
-    handshake.rs      ← Server-side handshake state machine
+    types.rs          ← AuthenticatedSession (Zeroize+ZeroizeOnDrop), transcript hashing
+    handshake.rs      ← Server-side handshake state machine (session_ttl param)
     client.rs         ← Client SDK (HandshakeClient)
-    session.rs        ← SessionStore (100k cap, lazy prune, background prune every 60s)
-  routes/
-    auth.rs           ← Handshake endpoints + dynamic revoke-key
+    session.rs        ← SessionBackend trait + InMemoryBackend + SessionStore facade
+    session_redis.rs  ← RedisSessionBackend (encrypted keys, ChaCha20-Poly1305)
+    session_jwt.rs    ← Session JWT: create/extract_session_id/verify_with_key
+    redis_backend.rs  ← RealRedisClient + RedisReplayBackend + RedisRevocationBackend
+    mtls.rs           ← MtlsServiceRegistry + MtlsIdentity (cert-based auth)
+    signer.rs         ← AuthSigner trait + LocalSigner (Ed25519)
+    kms_signer.rs     ← KmsSigner stub (AWS KMS placeholder)
+  routes/auth.rs      ← Handshake + revoke-key endpoints
   middleware/
-    auth.rs           ← 3-method auth middleware (presence-based, no fall-through)
-    hmac.rs           ← HMAC request signing for POST mutations
+    auth.rs           ← 3-method middleware (mTLS → Session JWT → Bearer JWT)
     rate_limit.rs     ← Token-bucket rate limiter (per-key)
-  state.rs            ← AppState, API key HMAC hashing, RwLock revoked keys, client registry
-  config.rs           ← AppConfig, env loading, for_test()
+  state.rs            ← AppState, ReplayCacheBackend trait, RevocationBackend trait
+  config.rs           ← BackendType enum (Memory|Redis), env loading
 tests/
-  auth_security_audit.rs ← 57 security-focused integration tests
+  auth_security_audit.rs ← 46 security integration tests
 ```
 
-**Security audit (2026-03-17):** 57 attack tests, report at `docs/SECURITY_AUDIT_AUTH.md`.
-All HIGH/MEDIUM findings resolved: rate limiting wired, session store capped + pruned, dynamic revocation added, non-UTF8 fall-through fixed, session keys zeroized on drop.
-Remaining LOW/INFO: HMAC 30s replay window (accepted), all-zeros X25519 key (accepted), hardcoded session TTL, 422 vs 401 on downgrade.
+**Redis integration (SESSION_BACKEND=redis):**
+- Sessions: encrypted with ChaCha20-Poly1305 (KEK from SESSION_ENCRYPTION_KEY) before Redis storage
+- Replay cache: Redis SET NX EX (atomic, TTL-based)
+- Revoked keys: Redis SET (SADD/SISMEMBER)
+- All backends are trait-based: `SessionBackend`, `ReplayCacheBackend`, `RevocationBackend`
+- SCAN used instead of KEYS (non-blocking)
 
-Full spec: `specs/AUTH_SPEC.md` (28 sections, 1,067 lines)
+**KMS/HSM readiness:**
+- `AuthSigner` trait: `LocalSigner` (current) or `KmsSigner` (AWS KMS stub)
+- `KeyEncryptionProvider` trait: `LocalKeyEncryption` or future HSM backend
+- See `specs/REDIS_KMS_MIGRATION_SPEC.md`
+
+Full spec: `specs/AUTH_SPEC.md` (28 sections) | Migration: `specs/REDIS_KMS_MIGRATION_SPEC.md`
 
 ### Sign Authorization (MPC node independent verification)
 
@@ -287,6 +303,8 @@ Full findings log → `docs/SECURITY_FINDINGS.md`
 | DEC-010 | Split api-gateway into lib.rs + main.rs for integration test access |
 | DEC-011 | Session keys use `Zeroize + ZeroizeOnDrop`; revoked_keys behind `RwLock` for dynamic revocation |
 | DEC-012 | Sign Authorization: MPC nodes independently verify gateway proof before signing |
+| DEC-013 | Remove API keys — simplify to 3 auth methods (mTLS, Session JWT, Bearer JWT) |
+| DEC-014 | Redis + KMS/HSM migration: trait-based backends, encrypted session storage |
 
 Full decision log → `docs/DECISIONS.md` and `retro/decisions/`
 
