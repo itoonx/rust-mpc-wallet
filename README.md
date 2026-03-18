@@ -75,7 +75,7 @@ Vaultex is a **Rust workspace** for building enterprise-grade **threshold multi-
 git clone https://github.com/itoonx/vaultex-mpc-rust.git
 cd vaultex-mpc-rust
 
-cargo test --workspace     # 325 tests, ~4 seconds
+cargo test --workspace     # 507 tests, ~4 seconds
 ./scripts/demo.sh          # interactive end-to-end demo
 ```
 
@@ -94,6 +94,7 @@ cargo test --workspace     # 325 tests, ~4 seconds
 | **Enterprise** | RBAC, ABAC, MFA, policy engine, approval workflows, audit ledger |
 | **Simulation** | Pre-sign risk scoring for all chains |
 | **Operations** | Multi-cloud constraints, RPC failover, chaos framework, DR |
+| **MPC Nodes** | Distributed architecture — each node holds 1 share, gateway orchestrates |
 
 ---
 
@@ -358,6 +359,20 @@ All API errors return structured JSON with a machine-readable `code` for program
 
 > Full error code reference: [`docs/API_REFERENCE.md#error-codes`](docs/API_REFERENCE.md#error-codes)
 
+### MPC Node Architecture (Production)
+
+In production, the gateway holds **zero key shares**. Each MPC node holds exactly 1 share, stored in an encrypted file store (AES-256-GCM + Argon2id). All coordination happens via NATS.
+
+```
+Gateway (orchestrator — 0 shares)
+    │ NATS
+    ├── Node 1 (share 1 only)
+    ├── Node 2 (share 2 only)
+    └── Node 3 (share 3 only)
+```
+
+No single process can reconstruct the private key. An attacker must compromise ≥ threshold nodes simultaneously.
+
 ---
 
 ## Supported Blockchains (50)
@@ -510,7 +525,7 @@ docs/                  ← Architecture, security, CLI guide, API reference
 ## Metrics
 
 ```
-  Chains:    50          Tests:     ~450 pass
+  Chains:    50          Tests:     507 pass
   Protocols: 6           CI:        fmt + clippy + test + audit
   Sprints:   20          Findings:  0 CRITICAL | 0 HIGH open
 ```

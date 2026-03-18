@@ -19,7 +19,8 @@ crates/
   mpc-wallet-chains/  ← Chain providers: EVM, Bitcoin, Solana, Sui
   mpc-wallet-cli/     ← CLI binary (demo only)
 services/
-  api-gateway/        ← REST API server, auth middleware, route handlers
+  api-gateway/        ← REST API server, auth middleware, MpcOrchestrator
+  mpc-node/           ← Standalone MPC node (1 party, 1 share, NATS + KeyStore)
 docs/
   AGENTS.md           ← Agent roles, ownership, instructions (READ THIS NEXT)
   SPRINT.md           ← Current sprint tasks + Gate Status table
@@ -94,7 +95,7 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 14 — all epics complete, CI green)
+## Current State (as of Sprint 15 — production readiness, CI green)
 
 ### Auth System (3 methods, Redis-ready)
 
@@ -154,6 +155,28 @@ tests/
 
 Full spec: `specs/AUTH_SPEC.md` (28 sections) | Migration: `specs/REDIS_KMS_MIGRATION_SPEC.md`
 
+### MPC Node Architecture (DEC-015 — Sprint 15)
+
+Production architecture: Gateway holds ZERO key shares. Each MPC node holds exactly 1 share.
+
+```
+Gateway (orchestrator — MpcOrchestrator, NO shares)
+    │ NATS control channels
+    ├── MPC Node 1 (share 1, EncryptedFileStore)
+    ├── MPC Node 2 (share 2, EncryptedFileStore)
+    └── MPC Node 3 (share 3, EncryptedFileStore)
+```
+
+**Crates:**
+- `services/mpc-node/` — standalone MPC node binary (Party ID + KeyStore + NATS)
+- `services/api-gateway/src/orchestrator.rs` — MpcOrchestrator (NATS pub/sub, metadata only)
+- `crates/mpc-wallet-core/src/rpc/` — shared NATS RPC messages (KeygenReq/Resp, SignReq/Resp)
+
+**NATS Control Channels:**
+- `mpc.control.keygen.{group_id}` — orchestrator → nodes keygen request
+- `mpc.control.sign.{group_id}` — orchestrator → nodes sign request (with SignAuthorization)
+- `mpc.control.freeze.{group_id}` — orchestrator → nodes freeze/unfreeze
+
 ### Sign Authorization (MPC node independent verification)
 
 **Problem:** Gateway is a single point of trust. If compromised, attacker can sign any transaction.
@@ -174,11 +197,11 @@ Gateway (creates proof)    →    MPC Node (verifies before sign)
 
 ### Tests on `main`
 ```
-233 tests pass  (cargo test --workspace)  1 ignored (NATS live-server test)
+507 tests pass (cargo test --workspace) + 15 E2E (--ignored, need live infra)
 cargo fmt        clean
 cargo clippy     clean (0 warnings, -D warnings)
 cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
-CI pipeline      ALL GREEN (fmt + clippy + test + audit)
+CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 ```
 
 ### Sprint Status
@@ -189,8 +212,19 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit)
 - **Sprint 12:** COMPLETE — GG20 key resharing, multi-cloud ops (distribution + quorum risk)
 - **Sprint 13:** COMPLETE — FROST reshare, DR plan, RPC failover, chaos framework
 - **Sprint 14:** COMPLETE — JetStream ACL (E5), WORM storage config (F4), CI fixes (clippy + audit)
+- **Sprint 15:** COMPLETE — Production readiness (standard errors, Vault, NatsTransport fix, sig verification, gateway↔node split, benchmarks, CI E2E)
 
 **All 10 epics: 100% COMPLETE**
+
+### New in Sprint 15
+- `services/mpc-node/` — Epic DEC-015: standalone MPC node binary (NATS + EncryptedFileStore + SignAuthorization)
+- `services/api-gateway/src/orchestrator.rs` — MpcOrchestrator replaces WalletStore (gateway holds 0 shares)
+- `services/api-gateway/src/errors.rs` — Standard ApiError + ErrorCode (structured JSON errors)
+- `services/api-gateway/src/vault.rs` — HashiCorp Vault integration (SECRETS_BACKEND=vault)
+- `crates/mpc-wallet-core/src/rpc/` — Shared NATS RPC protocol messages
+- NatsTransport: eager subscription + broadcast support (L-008 fix)
+- 14 signature verification tests covering all 50 chains
+- CI: 5 jobs (fmt, clippy, test, audit, E2E with Vault+Redis+NATS)
 
 ### New in Sprint 12–14
 - `mpc_wallet_core::protocol` — Epic H2: GG20 key resharing (change threshold + add/remove parties)
@@ -305,6 +339,7 @@ Full findings log → `docs/SECURITY_FINDINGS.md`
 | DEC-012 | Sign Authorization: MPC nodes independently verify gateway proof before signing |
 | DEC-013 | Remove API keys — simplify to 3 auth methods (mTLS, Session JWT, Bearer JWT) |
 | DEC-014 | Redis + KMS/HSM migration: trait-based backends, encrypted session storage |
+| DEC-015 | Split MPC nodes from gateway — each node holds exactly 1 share, gateway holds 0 |
 
 Full decision log → `docs/DECISIONS.md` and `retro/decisions/`
 

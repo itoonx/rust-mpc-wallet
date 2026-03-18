@@ -111,6 +111,7 @@ If a header is **present** but invalid, auth fails immediately — no fall-throu
 | `NETWORK` | no | `testnet` | `mainnet`, `testnet`, or `devnet` |
 | `PORT` | no | `3000` | HTTP listen port |
 | `RATE_LIMIT_RPS` | no | `100` | Max requests/second per IP |
+| `NATS_URL` | no | `nats://localhost:4222` | NATS server URL (gateway orchestrator mode) |
 | `CORS_ALLOWED_ORIGINS` | no | (permissive) | Comma-separated origins |
 
 ### Secrets Management
