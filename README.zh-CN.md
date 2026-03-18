@@ -321,6 +321,34 @@ curl -H "Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOi..." \
 
 > 完整 API 参考：[`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | 协议规范：[`specs/AUTH_SPEC.md`](specs/AUTH_SPEC.md)
 
+### 错误响应
+
+所有 API 错误返回结构化 JSON，包含机器可读的 `code` 用于程序化处理：
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "wallet 550e8400 not found"
+  }
+}
+```
+
+| 错误码 | HTTP | 触发条件 |
+|--------|------|---------|
+| `AUTH_FAILED` | 401 | 令牌无效/过期、密钥已吊销 |
+| `AUTH_RATE_LIMITED` | 429 | 超出速率限制 |
+| `PERMISSION_DENIED` | 403 | RBAC 角色不足 |
+| `MFA_REQUIRED` | 403 | 管理员+MFA 操作缺少 MFA 验证 |
+| `INVALID_INPUT` | 400 | 请求参数错误（十六进制、格式） |
+| `NOT_FOUND` | 404 | 钱包/资源未找到 |
+| `KEY_FROZEN` | 422 | 钱包已冻结，签名被阻止 |
+| `POLICY_DENIED` | 422 | 策略检查失败 |
+| `INTERNAL_ERROR` | 500 | 服务器错误 |
+
+> 完整错误码参考：[`docs/API_REFERENCE.md#error-codes`](docs/API_REFERENCE.md#error-codes)
+
 ---
 
 ## 支持的区块链（50 条）

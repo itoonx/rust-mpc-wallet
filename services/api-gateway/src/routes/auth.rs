@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 
 use crate::auth::handshake::ServerHandshake;
 use crate::auth::types::*;
+use crate::errors::{ApiError, ErrorCode};
 use crate::models::response::ApiResponse;
 use crate::state::AppState;
 
@@ -65,7 +66,7 @@ pub struct AuthRouteState {
 pub async fn auth_hello(
     State(state): State<AuthRouteState>,
     Json(client_hello): Json<ClientHello>,
-) -> Result<Json<ApiResponse<ServerHello>>, (StatusCode, Json<ApiResponse<()>>)> {
+) -> Result<Json<ApiResponse<ServerHello>>, ApiError> {
     state.app.metrics.handshake_total.inc();
 
     if state
@@ -88,12 +89,7 @@ pub async fn auth_hello(
     {
         state.app.metrics.handshake_failures.inc();
         tracing::warn!(client_key_id = %client_hello.client_key_id, "handshake rate limited");
-        return Err((
-            axum::http::StatusCode::TOO_MANY_REQUESTS,
-            axum::Json(crate::models::response::ApiResponse::err(
-                "rate limit exceeded",
-            )),
-        ));
+        return Err(ApiError::rate_limited());
     }
 
     if state.app.is_key_revoked(&client_hello.client_key_id).await {
@@ -144,7 +140,7 @@ pub struct AuthVerifyRequest {
 pub async fn auth_verify(
     State(state): State<AuthRouteState>,
     Json(req): Json<AuthVerifyRequest>,
-) -> Result<Json<ApiResponse<SessionEstablished>>, (StatusCode, Json<ApiResponse<()>>)> {
+) -> Result<Json<ApiResponse<SessionEstablished>>, ApiError> {
     let mut pending = state
         .pending
         .remove(&req.server_challenge)
@@ -228,7 +224,7 @@ pub struct RefreshSessionResponse {
 pub async fn refresh_session(
     State(state): State<AuthRouteState>,
     Json(req): Json<RefreshSessionRequest>,
-) -> Result<Json<ApiResponse<RefreshSessionResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+) -> Result<Json<ApiResponse<RefreshSessionResponse>>, ApiError> {
     let session = state
         .app
         .session_store
@@ -287,16 +283,17 @@ pub async fn revoke_key(
     State(state): State<crate::state::AppState>,
     axum::Extension(ctx): axum::Extension<mpc_wallet_core::rbac::AuthContext>,
     Json(req): Json<RevokeKeyRequest>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, (StatusCode, Json<ApiResponse<()>>)> {
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     // Require admin role.
     mpc_wallet_core::rbac::Permissions::require_role(
         &ctx,
         &[mpc_wallet_core::rbac::ApiRole::Admin],
     )
     .map_err(|_| {
-        (
+        ApiError::new(
             StatusCode::FORBIDDEN,
-            Json(ApiResponse::err("admin role required")),
+            ErrorCode::PermissionDenied,
+            "admin role required",
         )
     })?;
 

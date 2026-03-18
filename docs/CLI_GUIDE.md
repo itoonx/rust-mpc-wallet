@@ -555,7 +555,10 @@ $ mpc-wallet audit-verify --pack-file tampered.json
 [error] Audit verification failed: signature invalid at entry 2
 {
   "verified": false,
-  "error": "audit error: signature invalid at entry 2"
+  "error": {
+    "code": "INTERNAL_ERROR",
+    "message": "audit error: signature invalid at entry 2"
+  }
 }
 ```
 

@@ -36,7 +36,7 @@ mpc-wallet-cli freeze --group-id $WALLET_ID
 curl -X POST https://api.example.com/v1/wallets/{wallet_id}/sign \
   -H "Authorization: Bearer $JWT" \
   -d '{"message": "deadbeef"}'
-# Expected: {"success": false, "error": "key group frozen: ..."}
+# Expected: {"success": false, "error": {"code": "KEY_FROZEN", "message": "key group frozen: ..."}}
 ```
 
 ### Unfreeze Procedure
@@ -64,7 +64,7 @@ Requires Admin + MFA. Verify signing works after unfreeze.
 3. **Execute required operation** with audit trail:
    ```bash
    curl -X POST https://api.example.com/v1/wallets/{id}/transactions \
-     -H "X-API-Key: $BREAK_GLASS_KEY" \
+     -H "Authorization: Bearer $BREAK_GLASS_JWT" \
      -d '{"chain": "ethereum", "to": "0x...", "value": "...", ...}'
    ```
 4. **Immediately rotate** break-glass credentials after use

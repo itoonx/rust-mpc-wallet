@@ -9,6 +9,7 @@ use axum::{
 use mpc_wallet_chains::provider::{Chain, TransactionParams};
 use mpc_wallet_core::rbac::{ApiRole, AuthContext, Permissions};
 
+use crate::errors::{ApiError, ErrorCode};
 use crate::models::request::{SimulateRequest, TransactionRequest};
 use crate::models::response::{ApiResponse, SimulationResponse, TransactionResponse};
 use crate::state::AppState;
@@ -39,37 +40,28 @@ pub async fn create_transaction(
     Extension(ctx): Extension<AuthContext>,
     Path(wallet_id): Path<String>,
     Json(req): Json<TransactionRequest>,
-) -> Result<Json<ApiResponse<TransactionResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
-    Permissions::require_role(&ctx, &[ApiRole::Initiator, ApiRole::Admin]).map_err(|_| {
-        (
-            StatusCode::FORBIDDEN,
-            Json(ApiResponse::err("insufficient permissions")),
-        )
-    })?;
+) -> Result<Json<ApiResponse<TransactionResponse>>, ApiError> {
+    Permissions::require_role(&ctx, &[ApiRole::Initiator, ApiRole::Admin])
+        .map_err(|_| ApiError::forbidden("insufficient permissions"))?;
     Permissions::check_risk_tier_for_signing(&ctx)
-        .map_err(|e| (StatusCode::FORBIDDEN, Json(ApiResponse::err(e.to_string()))))?;
+        .map_err(|e| ApiError::forbidden(e.to_string()))?;
 
     let chain: Chain = req
         .chain
         .parse()
-        .map_err(|e: String| (StatusCode::BAD_REQUEST, Json(ApiResponse::err(e))))?;
+        .map_err(|e: String| ApiError::bad_request(ErrorCode::InvalidInput, e))?;
 
-    let _provider = state.chain_registry.provider(chain).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::err(e.to_string())),
-        )
-    })?;
+    let _provider = state
+        .chain_registry
+        .provider(chain)
+        .map_err(ApiError::from)?;
 
     let data = req
         .data
         .as_deref()
         .map(|d| {
             hex::decode(d.strip_prefix("0x").unwrap_or(d)).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::err(format!("invalid hex data: {e}"))),
-                )
+                ApiError::bad_request(ErrorCode::InvalidInput, format!("invalid hex data: {e}"))
             })
         })
         .transpose()?;
@@ -84,12 +76,9 @@ pub async fn create_transaction(
 
     state.metrics.sign_total.inc();
 
-    Err((
-        StatusCode::NOT_FOUND,
-        Json(ApiResponse::err(format!(
-            "wallet {wallet_id} not found — full tx pipeline requires key store + MPC transport"
-        ))),
-    ))
+    Err(ApiError::not_found(format!(
+        "wallet {wallet_id} not found — full tx pipeline requires key store + MPC transport"
+    )))
 }
 
 /// `POST /v1/wallets/:id/simulate` — simulate transaction risk.
@@ -99,7 +88,7 @@ pub async fn simulate_transaction(
     Extension(ctx): Extension<AuthContext>,
     Path(_wallet_id): Path<String>,
     Json(req): Json<SimulateRequest>,
-) -> Result<Json<ApiResponse<SimulationResponse>>, (StatusCode, Json<ApiResponse<()>>)> {
+) -> Result<Json<ApiResponse<SimulationResponse>>, ApiError> {
     Permissions::require_role(
         &ctx,
         &[
@@ -109,34 +98,24 @@ pub async fn simulate_transaction(
             ApiRole::Admin,
         ],
     )
-    .map_err(|_| {
-        (
-            StatusCode::FORBIDDEN,
-            Json(ApiResponse::err("insufficient permissions")),
-        )
-    })?;
+    .map_err(|_| ApiError::forbidden("insufficient permissions"))?;
 
     let chain: Chain = req
         .chain
         .parse()
-        .map_err(|e: String| (StatusCode::BAD_REQUEST, Json(ApiResponse::err(e))))?;
+        .map_err(|e: String| ApiError::bad_request(ErrorCode::InvalidInput, e))?;
 
-    let provider = state.chain_registry.provider(chain).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::err(e.to_string())),
-        )
-    })?;
+    let provider = state
+        .chain_registry
+        .provider(chain)
+        .map_err(ApiError::from)?;
 
     let data = req
         .data
         .as_deref()
         .map(|d| {
             hex::decode(d.strip_prefix("0x").unwrap_or(d)).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::err(format!("invalid hex data: {e}"))),
-                )
+                ApiError::bad_request(ErrorCode::InvalidInput, format!("invalid hex data: {e}"))
             })
         })
         .transpose()?;
@@ -156,9 +135,10 @@ pub async fn simulate_transaction(
             risk_score: result.risk_score,
             risk_flags: result.risk_flags,
         }))),
-        Err(e) => Err((
+        Err(e) => Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
-            Json(ApiResponse::err(format!("simulation failed: {e}"))),
+            ErrorCode::ProtocolError,
+            format!("simulation failed: {e}"),
         )),
     }
 }

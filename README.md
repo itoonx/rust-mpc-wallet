@@ -327,6 +327,34 @@ A typical enterprise deployment uses all three methods simultaneously:
 
 > Full API reference: [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | Protocol spec: [`specs/AUTH_SPEC.md`](specs/AUTH_SPEC.md)
 
+### Error Responses
+
+All API errors return structured JSON with a machine-readable `code` for programmatic handling:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "wallet 550e8400 not found"
+  }
+}
+```
+
+| Code | HTTP | When |
+|------|------|------|
+| `AUTH_FAILED` | 401 | Invalid/expired token, revoked key |
+| `AUTH_RATE_LIMITED` | 429 | Rate limit exceeded |
+| `PERMISSION_DENIED` | 403 | Insufficient RBAC role |
+| `MFA_REQUIRED` | 403 | Admin+MFA operation without MFA |
+| `INVALID_INPUT` | 400 | Bad request params (hex, format) |
+| `NOT_FOUND` | 404 | Wallet/resource not found |
+| `KEY_FROZEN` | 422 | Wallet frozen, signing blocked |
+| `POLICY_DENIED` | 422 | Policy check failed |
+| `INTERNAL_ERROR` | 500 | Server error |
+
+> Full error code reference: [`docs/API_REFERENCE.md#error-codes`](docs/API_REFERENCE.md#error-codes)
+
 ---
 
 ## Supported Blockchains (50)

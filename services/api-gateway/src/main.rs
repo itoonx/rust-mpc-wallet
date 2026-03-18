@@ -133,7 +133,11 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"].as_str().unwrap(), "authentication failed");
+        assert_eq!(
+            json["error"]["message"].as_str().unwrap(),
+            "authentication failed"
+        );
+        assert_eq!(json["error"]["code"].as_str().unwrap(), "AUTH_FAILED");
     }
 
     // ── Metrics requires auth ─────────────────────────────────────

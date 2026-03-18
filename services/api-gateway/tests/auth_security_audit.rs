@@ -1428,7 +1428,7 @@ async fn test_error_messages_are_generic() {
 
         let json = body_json(resp).await;
         assert_eq!(
-            json["error"].as_str().unwrap(),
+            json["error"]["message"].as_str().unwrap(),
             "authentication failed",
             "error message for '{label}' must be generic — no info leak"
         );
@@ -1455,7 +1455,7 @@ async fn test_handshake_errors_are_generic() {
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
     assert_eq!(
-        json["error"].as_str().unwrap(),
+        json["error"]["message"].as_str().unwrap(),
         "authentication failed",
         "handshake error must not leak specific failure reason"
     );
