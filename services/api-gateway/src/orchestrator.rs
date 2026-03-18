@@ -48,8 +48,24 @@ pub struct MpcOrchestrator {
     ceremony_timeout: Duration,
 }
 
+impl Default for MpcOrchestrator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MpcOrchestrator {
-    /// Create a new orchestrator connected to NATS.
+    /// Create an orchestrator without NATS (for unit tests).
+    /// Keygen/sign operations will fail — only metadata operations work.
+    pub fn new() -> Self {
+        Self {
+            nats: None,
+            wallets: Arc::new(RwLock::new(HashMap::new())),
+            ceremony_timeout: Duration::from_secs(60),
+        }
+    }
+
+    /// Create an orchestrator connected to NATS (production).
     pub async fn connect(nats_url: &str) -> Result<Self, mpc_wallet_core::error::CoreError> {
         let nats = async_nats::connect(nats_url).await.map_err(|e| {
             mpc_wallet_core::error::CoreError::Transport(format!("NATS connect: {e}"))

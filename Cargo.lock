@@ -3393,11 +3393,13 @@ dependencies = [
 name = "mpc-wallet-api"
 version = "0.1.0"
 dependencies = [
+ "async-nats",
  "async-trait",
  "axum",
  "base64",
  "chacha20poly1305",
  "ed25519-dalek",
+ "futures",
  "hex",
  "hkdf",
  "jsonwebtoken",
@@ -3433,6 +3435,7 @@ dependencies = [
  "bitcoin",
  "blake2",
  "bs58",
+ "criterion",
  "ed25519-dalek",
  "hex",
  "k256",
@@ -3489,7 +3492,10 @@ dependencies = [
  "hkdf",
  "jsonwebtoken",
  "k256",
+ "mpc-wallet-chains",
  "rand 0.8.5",
+ "redis",
+ "reqwest",
  "rustls",
  "rustls-pemfile",
  "schnorrkel",
@@ -3502,6 +3508,25 @@ dependencies = [
  "tracing",
  "uuid",
  "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "mpc-wallet-node"
+version = "0.1.0"
+dependencies = [
+ "async-nats",
+ "async-trait",
+ "ed25519-dalek",
+ "futures",
+ "hex",
+ "mpc-wallet-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
  "zeroize",
 ]
 

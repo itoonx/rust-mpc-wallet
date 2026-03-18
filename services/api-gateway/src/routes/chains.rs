@@ -153,9 +153,9 @@ pub async fn derive_address(
         .provider(chain)
         .map_err(ApiError::from)?;
 
-    // Load wallet's group public key from wallet store.
+    // Load wallet's group public key from orchestrator metadata.
     let wallet = state
-        .wallet_store
+        .orchestrator
         .get(&wallet_id)
         .await
         .ok_or_else(|| ApiError::not_found(format!("wallet {wallet_id} not found")))?;
