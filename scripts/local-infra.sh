@@ -343,20 +343,47 @@ cmd_up() {
 
 # ── Dispatch ──────────────────────────────────────────────────────────
 
+cmd_test() {
+  step "Running E2E test suite"
+
+  # Ensure infra is up
+  cmd_up
+
+  step "Running E2E tests (--ignored)"
+  NATS_URL="$NATS_URL" \
+  REDIS_URL="$REDIS_URL" \
+  GATEWAY_URL="$GATEWAY_URL" \
+    cargo test --workspace -- --ignored --test-threads=1 2>&1
+
+  local exit_code=$?
+
+  step "E2E tests complete (exit: $exit_code)"
+  if [ $exit_code -eq 0 ]; then
+    log "All E2E tests passed"
+  else
+    warn "Some E2E tests failed — check output above"
+  fi
+  return $exit_code
+}
+
+# ── Dispatch ──────────────────────────────────────────────────────────
+
 case "${1:-up}" in
   up)           cmd_up ;;
   down|stop)    cmd_down ;;
   status)       cmd_status ;;
   logs)         shift; cmd_logs "$@" ;;
   restart-gw)   cmd_restart_gw ;;
+  test)         cmd_test ;;
   *)
-    echo "Usage: $0 [up|down|status|logs|restart-gw]"
+    echo "Usage: $0 [up|down|status|logs|restart-gw|test]"
     echo ""
     echo "  up           Start Vault + Redis + NATS + Gateway (default)"
     echo "  down         Tear down all containers and gateway"
     echo "  status       Check health of all services"
     echo "  logs         Tail container logs (pass service name to filter)"
     echo "  restart-gw   Rebuild and restart gateway only"
+    echo "  test         Start infra + run E2E tests (--ignored)"
     exit 1
     ;;
 esac
