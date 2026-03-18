@@ -369,19 +369,129 @@ All API errors return structured JSON with a machine-readable `code` for program
 
 > Full error code reference: [`docs/API_REFERENCE.md#error-codes`](docs/API_REFERENCE.md#error-codes)
 
-### MPC Node Architecture (Production)
+### MPC Node Architecture (Production — DEC-015)
 
-In production, the gateway holds **zero key shares**. Each MPC node holds exactly 1 share, stored in an encrypted file store (AES-256-GCM + Argon2id). All coordination happens via NATS.
+In production, the gateway holds **zero key shares**. Each MPC node is a standalone process that holds exactly 1 share, stored in an encrypted file store (AES-256-GCM + Argon2id). All coordination happens via NATS.
 
 ```
-Gateway (orchestrator — 0 shares)
-    │ NATS
-    ├── Node 1 (share 1 only)
-    ├── Node 2 (share 2 only)
-    └── Node 3 (share 3 only)
+┌────────────────────────────────────────────────────────────────────────┐
+│                         Production Deployment                          │
+│                                                                        │
+│   ┌─────────────┐        ┌──────────┐        ┌──────────┐            │
+│   │  Clients     │ ──────│   API     │ ──────│  Vault    │            │
+│   │ (SDK/Web/App)│  HTTPS │ Gateway  │ Vault  │ (Secrets) │            │
+│   └─────────────┘        │ (0 shares│        └──────────┘            │
+│                           │  RBAC +  │                                 │
+│                           │  Policy) │        ┌──────────┐            │
+│                           └────┬─────┘ ──────│  Redis    │            │
+│                                │       Redis  │ (Sessions)│            │
+│                     NATS Control Channels      └──────────┘            │
+│                    ┌───────────┼───────────┐                           │
+│                    │           │           │                            │
+│              ┌─────▼────┐ ┌───▼─────┐ ┌───▼─────┐                    │
+│              │  MPC      │ │  MPC    │ │  MPC    │                    │
+│              │  Node 1   │ │  Node 2 │ │  Node 3 │                    │
+│              │           │ │         │ │         │                    │
+│              │ share s₁  │ │ share s₂│ │ share s₃│  ← encrypted     │
+│              │ KeyStore  │ │ KeyStore│ │ KeyStore│    on disk        │
+│              │ (AES-GCM) │ │ (AES)  │ │ (AES)  │                    │
+│              └─────┬─────┘ └───┬─────┘ └───┬─────┘                    │
+│                    │           │           │                            │
+│                    └───────────┼───────────┘                           │
+│                     NATS Protocol Channels                             │
+│                      (SignedEnvelope + seq_no)                         │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-No single process can reconstruct the private key. An attacker must compromise ≥ threshold nodes simultaneously.
+**Security guarantees:**
+- No single process can reconstruct the private key
+- Attacker must compromise ≥ threshold nodes simultaneously
+- Gateway compromise = 0 shares leaked (only metadata)
+- Each node verifies `SignAuthorization` before signing (DEC-012)
+
+**NATS channels:**
+
+| Channel | Purpose |
+|---------|---------|
+| `mpc.control.keygen.{group_id}` | Gateway → nodes: initiate keygen ceremony |
+| `mpc.control.sign.{group_id}` | Gateway → nodes: sign request + SignAuthorization proof |
+| `mpc.control.freeze.{group_id}` | Gateway → nodes: freeze/unfreeze key group |
+| `mpc.{session_id}.party.{party_id}` | Node ↔ node: MPC protocol messages (SignedEnvelope) |
+
+**Sign flow (DEC-012):**
+
+```
+1. Client → Gateway:  POST /v1/wallets/:id/sign { message: "0xdead..." }
+2. Gateway:           Auth (mTLS/JWT) → RBAC check → Policy check → Approvals
+3. Gateway:           Create SignAuthorization (Ed25519 signed proof)
+4. Gateway → NATS:    Publish SignRequest + SignAuthorization to signer nodes
+5. Each Node:         Verify SignAuthorization → Load share from KeyStore
+6. Nodes ↔ Nodes:     MPC sign protocol via NATS (SignedEnvelope + seq_no)
+7. Coordinator:       Assemble final signature → Reply to gateway
+8. Gateway → Client:  Return { signature: { r, s, recovery_id } }
+```
+
+### Secrets Management (HashiCorp Vault)
+
+Production secrets are loaded from **HashiCorp Vault** at gateway startup. No plaintext secrets in environment variables or config files.
+
+```bash
+# Production: secrets from Vault (recommended)
+export SECRETS_BACKEND=vault
+export VAULT_ADDR=https://vault.internal:8200
+export VAULT_ROLE_ID=<approle-role-id>
+export VAULT_SECRET_ID=<approle-secret-id>
+
+# Development: plaintext env vars (NEVER in production)
+export JWT_SECRET=$(openssl rand -hex 32)
+```
+
+Vault stores: `jwt_secret`, `server_signing_key`, `session_encryption_key`, `redis_url`
+
+Supports: Vault Token auth (dev/CI) and AppRole auth (production).
+
+> Full Vault configuration: [`docs/API_REFERENCE.md#secrets-management`](docs/API_REFERENCE.md#secrets-management)
+
+### Infrastructure & Deployment
+
+**Local development (1 command):**
+```bash
+./scripts/local-infra.sh up    # Vault + Redis + NATS + 3 MPC nodes + gateway
+./scripts/local-infra.sh test  # Run E2E tests
+./scripts/local-infra.sh down  # Tear down everything
+```
+
+**Docker (production):**
+```bash
+docker compose -f infra/docker/docker-compose.yml up -d
+# Starts: NATS + 3 MPC nodes (separate containers) + gateway
+# Each node has its own persistent volume for encrypted key shares
+```
+
+**Kubernetes:**
+- StatefulSet for MPC nodes (stable DNS: `mpc-node-0.mpc-node.svc`)
+- Deployment for gateway
+- NATS cluster via Helm chart
+- Secrets via External Secrets Operator → Vault
+- See `infra/k8s/` for manifests
+
+### Testing
+
+| Layer | Tests | What it proves |
+|-------|-------|---------------|
+| **Unit** (507) | `cargo test --workspace` | Protocol correctness, chain providers, auth, policy |
+| **Signature Verification** (14) | All 50 chains | MPC signature verifies cryptographically per chain |
+| **E2E — Gateway** (7) | Vault secrets, Redis sessions, auth, chain endpoints | Infrastructure integration |
+| **E2E — Distributed** (2) | 3 nodes keygen + 2 nodes sign via NATS | **True MPC: each node holds 1 share, gateway holds 0** |
+| **E2E — NATS** (6) | Transport connectivity, message round-trip, protocol | NATS SignedEnvelope + session isolation |
+| **Benchmarks** (~35) | `cargo bench --workspace` | Performance baselines for all operations |
+
+```bash
+cargo test --workspace                           # 507 unit tests (~4s)
+cargo test --test signature_verification         # 14 sig verification tests
+./scripts/local-infra.sh test                    # E2E with live infra
+cargo bench --workspace                          # Performance benchmarks
+```
 
 ---
 
@@ -504,15 +614,24 @@ No single process can reconstruct the private key. An attacker must compromise �
 
 ## Performance
 
-| Operation | Latency | Config |
-|-----------|---------|--------|
-| GG20 Keygen | **44 µs** | 2-of-3, local transport |
-| GG20 Sign | **188 µs** | 2 signers |
-| ChaCha20 Encrypt 1KB | **4 µs** | per-message |
-| AES-256-GCM 1KB | **5 µs** | key store |
-| Argon2id Derive | **72 ms** | 64MiB (intentional) |
+| Category | Operation | Latency | Config |
+|----------|-----------|---------|--------|
+| **Protocol** | GG20 Keygen | **44 µs** | 2-of-3, local transport |
+| | GG20 Sign | **188 µs** | 2 signers |
+| | FROST Ed25519 Keygen | **~50 µs** | 2-of-3 |
+| **Auth** | Ed25519 Sign | **~9 µs** | handshake transcript |
+| | X25519 ECDH | **< 1 µs** | key exchange |
+| | SignAuthorization create+verify | **~20 µs** | Ed25519 sign + verify |
+| **Chain** | EVM Address Derivation | **~4 µs** | Keccak256 + checksum |
+| | Solana Address (Base58) | **~2 µs** | Ed25519 pubkey |
+| **Crypto** | ChaCha20-Poly1305 1KB | **~4 µs** | per-message encryption |
+| | AES-256-GCM 1KB | **~5 µs** | key store encryption |
+| | Argon2id Derive | **72 ms** | 64MiB memory-hard (intentional) |
 
-Run benchmarks: `cargo bench -p mpc-wallet-core --bench mpc_benchmarks`
+```bash
+cargo bench -p mpc-wallet-core --bench mpc_benchmarks   # Protocol + auth + crypto
+cargo bench -p mpc-wallet-chains --bench chain_benchmarks # Chain operations
+```
 
 ---
 

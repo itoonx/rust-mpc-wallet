@@ -363,19 +363,94 @@ curl -H "Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOi..." \
 
 > 完整错误码参考：[`docs/API_REFERENCE.md#error-codes`](docs/API_REFERENCE.md#error-codes)
 
-### MPC 节点架构（生产环境）
+### MPC 节点架构（生产环境 — DEC-015）
 
-生产环境中，网关持有**零密钥份额**。每个 MPC 节点仅持有 1 个份额，存储在加密文件存储中（AES-256-GCM + Argon2id）。所有协调通过 NATS 进行。
+生产环境中，网关持有**零密钥份额**。每个 MPC 节点是独立进程，仅持有 1 个份额，存储在加密文件存储中（AES-256-GCM + Argon2id）。所有协调通过 NATS 进行。
 
 ```
-Gateway（协调器 — 0 个份额）
-    │ NATS
-    ├── Node 1（仅持有份额 1）
-    ├── Node 2（仅持有份额 2）
-    └── Node 3（仅持有份额 3）
+┌────────────────────────────────────────────────────────────────────────┐
+│                           生产环境部署                                   │
+│                                                                        │
+│   ┌─────────────┐        ┌──────────┐        ┌──────────┐            │
+│   │  客户端      │ ──────│   API     │ ──────│  Vault    │            │
+│   │(SDK/Web/App)│  HTTPS │   网关    │ Vault  │ （密钥）   │            │
+│   └─────────────┘        │(0 个份额  │        └──────────┘            │
+│                           │ RBAC +   │                                 │
+│                           │ 策略引擎) │        ┌──────────┐            │
+│                           └────┬─────┘ ──────│  Redis    │            │
+│                                │       Redis  │ （会话）   │            │
+│                     NATS 控制通道               └──────────┘            │
+│                    ┌───────────┼───────────┐                           │
+│                    │           │           │                            │
+│              ┌─────▼────┐ ┌───▼─────┐ ┌───▼─────┐                    │
+│              │  MPC      │ │  MPC    │ │  MPC    │                    │
+│              │  节点 1    │ │  节点 2  │ │  节点 3  │                    │
+│              │           │ │         │ │         │                    │
+│              │ 份额 s₁   │ │ 份额 s₂ │ │ 份额 s₃ │  ← 磁盘加密       │
+│              │ KeyStore  │ │ KeyStore│ │ KeyStore│                    │
+│              │ (AES-GCM) │ │ (AES)  │ │ (AES)  │                    │
+│              └─────┬─────┘ └───┬─────┘ └───┬─────┘                    │
+│                    │           │           │                            │
+│                    └───────────┼───────────┘                           │
+│                     NATS 协议通道                                       │
+│                    (SignedEnvelope + seq_no)                            │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-没有任何单一进程可以还原私钥。攻击者必须同时攻破 >= 阈值数量的节点。
+**安全保证：**
+- 没有任何单一进程可以还原私钥
+- 攻击者必须同时攻破 >= 阈值数量的节点
+- 网关被攻破 = 泄露 0 个份额（仅元数据）
+- 每个节点在签名前验证 `SignAuthorization`（DEC-012）
+
+**签名流程（DEC-012）：**
+
+```
+1. 客户端 → 网关:     POST /v1/wallets/:id/sign { message: "0xdead..." }
+2. 网关:              认证 (mTLS/JWT) → RBAC → 策略检查 → 审批
+3. 网关:              创建 SignAuthorization（Ed25519 签名证明）
+4. 网关 → NATS:       发布 SignRequest + SignAuthorization 给签名节点
+5. 各节点:            验证 SignAuthorization → 从 KeyStore 加载份额
+6. 节点 ↔ 节点:       通过 NATS 执行 MPC 签名协议（SignedEnvelope）
+7. 协调者:            组装最终签名 → 回复网关
+8. 网关 → 客户端:     返回 { signature: { r, s, recovery_id } }
+```
+
+### 密钥管理（HashiCorp Vault）
+
+生产环境密钥在网关启动时从 **HashiCorp Vault** 加载。环境变量或配置文件中无明文密钥。
+
+```bash
+# 生产环境：密钥来自 Vault（推荐）
+export SECRETS_BACKEND=vault
+export VAULT_ADDR=https://vault.internal:8200
+export VAULT_ROLE_ID=<approle-role-id>
+export VAULT_SECRET_ID=<approle-secret-id>
+```
+
+> 完整 Vault 配置：[`docs/API_REFERENCE.md#secrets-management`](docs/API_REFERENCE.md#secrets-management)
+
+### 基础设施与部署
+
+```bash
+# 本地开发（一键启动）
+./scripts/local-infra.sh up    # Vault + Redis + NATS + 3 MPC 节点 + 网关
+./scripts/local-infra.sh test  # 运行 E2E 测试
+./scripts/local-infra.sh down  # 关闭所有
+
+# Docker（生产环境）
+docker compose -f infra/docker/docker-compose.yml up -d
+```
+
+### 测试
+
+| 层级 | 测试数 | 验证内容 |
+|------|-------|---------|
+| **单元测试** (507) | `cargo test --workspace` | 协议正确性、链提供器、认证、策略 |
+| **签名验证** (14) | 全部 50 条链 | MPC 签名的密码学正确性 |
+| **E2E — 网关** (7) | Vault、Redis、认证、链端点 | 基础设施集成 |
+| **E2E — 分布式** (2) | 3 节点 keygen + 2 节点 sign | **真正的 MPC：每节点 1 份额，网关 0 份额** |
+| **基准测试** (~35) | `cargo bench --workspace` | 所有操作的性能基线 |
 
 ---
 
@@ -498,15 +573,23 @@ Gateway（协调器 — 0 个份额）
 
 ## 性能
 
-| 操作 | 延迟 | 配置 |
-|------|------|------|
-| GG20 密钥生成 | **44 µs** | 2-of-3，本地传输 |
-| GG20 签名 | **188 µs** | 2 个签名方 |
-| ChaCha20 加密 1KB | **4 µs** | 每条消息 |
-| AES-256-GCM 1KB | **5 µs** | 密钥存储 |
-| Argon2id 推导 | **72 ms** | 64MiB（设计如此） |
+| 类别 | 操作 | 延迟 | 配置 |
+|------|------|------|------|
+| **协议** | GG20 密钥生成 | **44 µs** | 2-of-3 |
+| | GG20 签名 | **188 µs** | 2 个签名方 |
+| **认证** | Ed25519 签名 | **~9 µs** | 握手摘要 |
+| | X25519 ECDH | **< 1 µs** | 密钥交换 |
+| | SignAuthorization 创建+验证 | **~20 µs** | Ed25519 |
+| **链操作** | EVM 地址派生 | **~4 µs** | Keccak256 |
+| | Solana 地址 (Base58) | **~2 µs** | Ed25519 公钥 |
+| **加密** | ChaCha20-Poly1305 1KB | **~4 µs** | 消息加密 |
+| | AES-256-GCM 1KB | **~5 µs** | 密钥存储 |
+| | Argon2id 推导 | **72 ms** | 64MiB 内存硬化 |
 
-运行基准测试：`cargo bench -p mpc-wallet-core --bench mpc_benchmarks`
+```bash
+cargo bench -p mpc-wallet-core --bench mpc_benchmarks   # 协议 + 认证 + 加密
+cargo bench -p mpc-wallet-chains --bench chain_benchmarks # 链操作
+```
 
 ---
 
