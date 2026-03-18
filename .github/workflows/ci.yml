@@ -58,3 +58,98 @@ jobs:
         run: cargo install cargo-audit --locked
       - name: Run audit
         run: cargo audit
+
+  e2e:
+    name: E2E tests (Vault + Redis + NATS)
+    runs-on: ubuntu-latest
+    needs: [test] # only run E2E if unit tests pass
+    services:
+      vault:
+        image: hashicorp/vault:1.15
+        ports:
+          - 8200:8200
+        env:
+          VAULT_DEV_ROOT_TOKEN_ID: dev-root-token
+          VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+        options: >-
+          --cap-add IPC_LOCK
+          --health-cmd "vault status -address=http://127.0.0.1:8200"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      nats:
+        image: nats:2.10-alpine
+        ports:
+          - 4222:4222
+          - 8222:8222
+        options: >-
+          --health-cmd "wget --spider -q http://localhost:8222/healthz || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Provision Vault secrets
+        env:
+          VAULT_ADDR: http://127.0.0.1:8200
+          VAULT_TOKEN: dev-root-token
+        run: |
+          # Write secrets to Vault KV v2
+          JWT_SECRET=$(openssl rand -hex 32)
+          SERVER_SIGNING_KEY=$(openssl rand -hex 32)
+          SESSION_ENCRYPTION_KEY=$(openssl rand -hex 32)
+
+          curl -sf -X POST "$VAULT_ADDR/v1/secret/data/mpc-wallet/gateway" \
+            -H "X-Vault-Token: $VAULT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"data\":{\"jwt_secret\":\"$JWT_SECRET\",\"server_signing_key\":\"$SERVER_SIGNING_KEY\",\"session_encryption_key\":\"$SESSION_ENCRYPTION_KEY\",\"redis_url\":\"redis://127.0.0.1:6379\"}}"
+
+          # Verify
+          curl -sf "$VAULT_ADDR/v1/secret/data/mpc-wallet/gateway" \
+            -H "X-Vault-Token: $VAULT_TOKEN" | jq '.data.data | keys'
+
+      - name: Build gateway
+        run: cargo build --release -p mpc-wallet-api
+
+      - name: Start gateway
+        env:
+          SECRETS_BACKEND: vault
+          VAULT_ADDR: http://127.0.0.1:8200
+          VAULT_TOKEN: dev-root-token
+          NETWORK: testnet
+          SESSION_BACKEND: redis
+          REDIS_URL: redis://127.0.0.1:6379
+          PORT: "3000"
+          RUST_LOG: mpc_wallet_api=info
+        run: |
+          ./target/release/mpc-wallet-api &
+          # Wait for gateway to be ready
+          for i in $(seq 1 15); do
+            if curl -sf http://127.0.0.1:3000/v1/health > /dev/null 2>&1; then
+              echo "Gateway is healthy"
+              break
+            fi
+            if [ "$i" -eq 15 ]; then
+              echo "Gateway failed to start" && exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Run E2E tests
+        env:
+          NATS_URL: nats://127.0.0.1:4222
+          REDIS_URL: redis://127.0.0.1:6379
+          GATEWAY_URL: http://127.0.0.1:3000
+        run: cargo test --workspace -- --ignored --test-threads=1
