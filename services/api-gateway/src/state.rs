@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ed25519_dalek::SigningKey;
 use tokio::sync::RwLock;
 
@@ -69,30 +70,40 @@ impl ClientKeyRegistry {
     }
 }
 
-/// Replay cache for handshake nonces.
-#[derive(Clone)]
-pub struct ReplayCache {
-    /// Maps client_nonce (hex) → expiry timestamp.
+// ── ReplayCacheBackend Trait ─────────────────────────────────────────
+
+/// Pluggable replay cache backend.
+///
+/// Implementations track nonces that have been seen within a TTL window
+/// to prevent replay attacks on handshake messages.
+#[async_trait]
+pub trait ReplayCacheBackend: Send + Sync {
+    /// Check if a nonce has been seen. If not, record it with TTL.
+    /// Returns `true` if replay detected (nonce already seen).
+    async fn check_and_record(&self, nonce: &str, ttl_secs: u64) -> bool;
+
+    /// Remove expired entries. Returns count removed.
+    async fn prune(&self) -> usize;
+}
+
+// ── InMemoryReplayBackend ───────────────────────────────────────────
+
+/// In-memory replay cache backend (dev/test, single-instance).
+#[derive(Clone, Default)]
+pub struct InMemoryReplayBackend {
+    /// Maps nonce → expiry timestamp.
     cache: Arc<RwLock<HashMap<String, u64>>>,
 }
 
-impl Default for ReplayCache {
-    fn default() -> Self {
-        Self {
-            cache: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-}
-
-impl ReplayCache {
+impl InMemoryReplayBackend {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    /// Check if a nonce has been seen. If not, record it with TTL.
-    /// Returns true if replay detected (nonce already seen).
-    /// Capped at MAX_CACHE_ENTRIES to prevent DoS.
-    pub async fn check_and_record(&self, nonce: &str, ttl_secs: u64) -> bool {
+#[async_trait]
+impl ReplayCacheBackend for InMemoryReplayBackend {
+    async fn check_and_record(&self, nonce: &str, ttl_secs: u64) -> bool {
         let mut cache = self.cache.write().await;
         let now = crate::auth::types::unix_now();
 
@@ -112,34 +123,167 @@ impl ReplayCache {
         cache.insert(nonce.to_string(), now + ttl_secs);
         false
     }
+
+    async fn prune(&self) -> usize {
+        let mut cache = self.cache.write().await;
+        let now = crate::auth::types::unix_now();
+        let before = cache.len();
+        cache.retain(|_, expiry| *expiry > now);
+        before - cache.len()
+    }
 }
 
-/// Shared application state passed to all Axum handlers.
+// ── ReplayCache Facade ──────────────────────────────────────────────
+
+/// Replay cache facade — wraps any `ReplayCacheBackend` implementation.
+/// Use `ReplayCache::in_memory()` for dev/test, or provide a custom backend.
 #[derive(Clone)]
-pub struct AppState {
-    /// Chain registry for provider instantiation.
-    pub chain_registry: Arc<ChainRegistry>,
-    /// JWT validator for Bearer token auth.
-    pub jwt_validator: Arc<JwtValidator>,
-    /// Server Ed25519 signing key for handshake auth.
-    pub server_signing_key: Arc<SigningKey>,
-    /// Authenticated session store.
-    pub session_store: SessionStore,
-    /// Trusted client key registry.
-    pub client_registry: Arc<ClientKeyRegistry>,
-    /// Revoked key IDs (mutable for dynamic revocation).
-    pub revoked_keys: Arc<RwLock<HashSet<String>>>,
-    /// Replay cache for handshake nonces.
-    pub replay_cache: ReplayCache,
-    /// Rate limiter for handshake endpoints.
-    pub handshake_limiter: RateLimiter,
-    /// mTLS service identity registry (service-to-service auth).
-    pub mtls_registry: Arc<MtlsServiceRegistry>,
-    /// Session TTL in seconds.
-    pub session_ttl: u64,
-    /// Prometheus metrics registry.
-    pub metrics: Arc<Metrics>,
+pub struct ReplayCache {
+    backend: Arc<dyn ReplayCacheBackend>,
 }
+
+impl Default for ReplayCache {
+    fn default() -> Self {
+        Self::in_memory()
+    }
+}
+
+impl ReplayCache {
+    /// Create an in-memory replay cache (dev/test).
+    pub fn in_memory() -> Self {
+        Self {
+            backend: Arc::new(InMemoryReplayBackend::new()),
+        }
+    }
+
+    /// Create a replay cache with a custom backend (e.g., Redis).
+    pub fn with_backend(backend: Arc<dyn ReplayCacheBackend>) -> Self {
+        Self { backend }
+    }
+
+    pub fn new() -> Self {
+        Self::in_memory()
+    }
+
+    /// Check if a nonce has been seen. If not, record it with TTL.
+    /// Returns true if replay detected (nonce already seen).
+    /// Capped at MAX_CACHE_ENTRIES to prevent DoS.
+    pub async fn check_and_record(&self, nonce: &str, ttl_secs: u64) -> bool {
+        self.backend.check_and_record(nonce, ttl_secs).await
+    }
+
+    /// Remove expired entries. Returns count removed.
+    pub async fn prune(&self) -> usize {
+        self.backend.prune().await
+    }
+}
+
+// ── RevocationBackend Trait ─────────────────────────────────────────
+
+/// Pluggable key revocation backend.
+///
+/// Tracks which client key IDs have been revoked and should be denied
+/// access during handshake and session refresh.
+#[async_trait]
+pub trait RevocationBackend: Send + Sync {
+    /// Check if a key_id is revoked.
+    async fn is_revoked(&self, key_id: &str) -> bool;
+
+    /// Revoke a key_id. Returns `true` if it was newly added (not already revoked).
+    async fn revoke(&self, key_id: String) -> bool;
+
+    /// List all revoked key IDs.
+    async fn list(&self) -> Vec<String>;
+}
+
+// ── InMemoryRevocationBackend ───────────────────────────────────────
+
+/// In-memory revocation backend (dev/test, single-instance).
+#[derive(Clone, Default)]
+pub struct InMemoryRevocationBackend {
+    revoked: Arc<RwLock<HashSet<String>>>,
+}
+
+impl InMemoryRevocationBackend {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create from an initial set of revoked key IDs.
+    pub fn from_set(keys: HashSet<String>) -> Self {
+        Self {
+            revoked: Arc::new(RwLock::new(keys)),
+        }
+    }
+}
+
+#[async_trait]
+impl RevocationBackend for InMemoryRevocationBackend {
+    async fn is_revoked(&self, key_id: &str) -> bool {
+        self.revoked.read().await.contains(key_id)
+    }
+
+    async fn revoke(&self, key_id: String) -> bool {
+        self.revoked.write().await.insert(key_id)
+    }
+
+    async fn list(&self) -> Vec<String> {
+        self.revoked.read().await.iter().cloned().collect()
+    }
+}
+
+// ── RevocationStore Facade ──────────────────────────────────────────
+
+/// Revocation store facade — wraps any `RevocationBackend` implementation.
+/// Use `RevocationStore::in_memory()` for dev/test, or provide a custom backend.
+#[derive(Clone)]
+pub struct RevocationStore {
+    backend: Arc<dyn RevocationBackend>,
+}
+
+impl Default for RevocationStore {
+    fn default() -> Self {
+        Self::in_memory()
+    }
+}
+
+impl RevocationStore {
+    /// Create an in-memory revocation store (dev/test).
+    pub fn in_memory() -> Self {
+        Self {
+            backend: Arc::new(InMemoryRevocationBackend::new()),
+        }
+    }
+
+    /// Create an in-memory revocation store pre-populated with revoked keys.
+    pub fn in_memory_with(keys: HashSet<String>) -> Self {
+        Self {
+            backend: Arc::new(InMemoryRevocationBackend::from_set(keys)),
+        }
+    }
+
+    /// Create a revocation store with a custom backend (e.g., Redis).
+    pub fn with_backend(backend: Arc<dyn RevocationBackend>) -> Self {
+        Self { backend }
+    }
+
+    /// Check if a key_id is revoked.
+    pub async fn is_revoked(&self, key_id: &str) -> bool {
+        self.backend.is_revoked(key_id).await
+    }
+
+    /// Revoke a key_id. Returns `true` if it was newly added.
+    pub async fn revoke(&self, key_id: String) -> bool {
+        self.backend.revoke(key_id).await
+    }
+
+    /// List all revoked key IDs.
+    pub async fn list(&self) -> Vec<String> {
+        self.backend.list().await
+    }
+}
+
+// ── Metrics ─────────────────────────────────────────────────────────
 
 /// Prometheus metrics for the API gateway.
 pub struct Metrics {
@@ -219,6 +363,35 @@ impl Metrics {
     }
 }
 
+// ── AppState ────────────────────────────────────────────────────────
+
+/// Shared application state passed to all Axum handlers.
+#[derive(Clone)]
+pub struct AppState {
+    /// Chain registry for provider instantiation.
+    pub chain_registry: Arc<ChainRegistry>,
+    /// JWT validator for Bearer token auth.
+    pub jwt_validator: Arc<JwtValidator>,
+    /// Server Ed25519 signing key for handshake auth.
+    pub server_signing_key: Arc<SigningKey>,
+    /// Authenticated session store.
+    pub session_store: SessionStore,
+    /// Trusted client key registry.
+    pub client_registry: Arc<ClientKeyRegistry>,
+    /// Revoked key IDs store.
+    pub revoked_keys: RevocationStore,
+    /// Replay cache for handshake nonces.
+    pub replay_cache: ReplayCache,
+    /// Rate limiter for handshake endpoints.
+    pub handshake_limiter: RateLimiter,
+    /// mTLS service identity registry (service-to-service auth).
+    pub mtls_registry: Arc<MtlsServiceRegistry>,
+    /// Session TTL in seconds.
+    pub session_ttl: u64,
+    /// Prometheus metrics registry.
+    pub metrics: Arc<Metrics>,
+}
+
 impl AppState {
     /// Build `AppState` from configuration.
     pub fn from_config(config: &AppConfig) -> Self {
@@ -263,15 +436,15 @@ impl AppState {
             ClientKeyRegistry::new()
         };
 
-        // Load revoked keys.
+        // Load revoked keys into RevocationStore.
         let revoked_keys = if let Some(ref path) = config.revoked_keys_file {
             let content = std::fs::read_to_string(path)
                 .unwrap_or_else(|e| panic!("failed to read REVOKED_KEYS_FILE at {path}: {e}"));
             let keys: Vec<String> = serde_json::from_str(&content)
                 .unwrap_or_else(|e| panic!("failed to parse REVOKED_KEYS_FILE: {e}"));
-            keys.into_iter().collect()
+            RevocationStore::in_memory_with(keys.into_iter().collect())
         } else {
-            HashSet::new()
+            RevocationStore::in_memory()
         };
 
         // Load mTLS service registry.
@@ -302,8 +475,8 @@ impl AppState {
             server_signing_key: Arc::new(server_signing_key),
             session_store: SessionStore::in_memory(),
             client_registry: Arc::new(client_registry),
-            revoked_keys: Arc::new(RwLock::new(revoked_keys)),
-            replay_cache: ReplayCache::new(),
+            revoked_keys,
+            replay_cache: ReplayCache::in_memory(),
             handshake_limiter: RateLimiter::new(10), // 10 req/sec per key
             mtls_registry: Arc::new(mtls_registry),
             session_ttl: config.session_ttl,
@@ -313,12 +486,113 @@ impl AppState {
 
     /// Check if a key_id is revoked.
     pub async fn is_key_revoked(&self, key_id: &str) -> bool {
-        self.revoked_keys.read().await.contains(key_id)
+        self.revoked_keys.is_revoked(key_id).await
     }
 
     /// Dynamically revoke a key (adds to the revoked set).
     pub async fn revoke_key(&self, key_id: String) -> bool {
-        let mut revoked = self.revoked_keys.write().await;
-        revoked.insert(key_id)
+        self.revoked_keys.revoke(key_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ReplayCache Tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_replay_cache_in_memory_no_replay() {
+        let cache = ReplayCache::in_memory();
+        assert!(!cache.check_and_record("nonce1", 60).await);
+    }
+
+    #[tokio::test]
+    async fn test_replay_cache_in_memory_detects_replay() {
+        let cache = ReplayCache::in_memory();
+        assert!(!cache.check_and_record("nonce1", 60).await);
+        assert!(cache.check_and_record("nonce1", 60).await);
+    }
+
+    #[tokio::test]
+    async fn test_replay_cache_different_nonces_ok() {
+        let cache = ReplayCache::in_memory();
+        assert!(!cache.check_and_record("nonce1", 60).await);
+        assert!(!cache.check_and_record("nonce2", 60).await);
+    }
+
+    #[tokio::test]
+    async fn test_replay_cache_prune() {
+        let backend = InMemoryReplayBackend::new();
+        // Insert an already-expired entry
+        {
+            let mut cache = backend.cache.write().await;
+            cache.insert("expired".to_string(), 1); // epoch 1 = expired
+        }
+        let pruned = backend.prune().await;
+        assert_eq!(pruned, 1);
+    }
+
+    #[tokio::test]
+    async fn test_replay_cache_with_custom_backend() {
+        let backend = Arc::new(InMemoryReplayBackend::new());
+        let cache = ReplayCache::with_backend(backend);
+        assert!(!cache.check_and_record("n1", 60).await);
+        assert!(cache.check_and_record("n1", 60).await);
+    }
+
+    // ── RevocationStore Tests ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_revocation_store_empty() {
+        let store = RevocationStore::in_memory();
+        assert!(!store.is_revoked("key1").await);
+        assert!(store.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_revocation_store_revoke_and_check() {
+        let store = RevocationStore::in_memory();
+        assert!(store.revoke("key1".to_string()).await); // newly added
+        assert!(store.is_revoked("key1").await);
+        assert!(!store.revoke("key1".to_string()).await); // already revoked
+    }
+
+    #[tokio::test]
+    async fn test_revocation_store_list() {
+        let store = RevocationStore::in_memory();
+        store.revoke("key1".to_string()).await;
+        store.revoke("key2".to_string()).await;
+        let mut list = store.list().await;
+        list.sort();
+        assert_eq!(list, vec!["key1", "key2"]);
+    }
+
+    #[tokio::test]
+    async fn test_revocation_store_pre_populated() {
+        let keys: HashSet<String> = ["k1", "k2"].iter().map(|s| s.to_string()).collect();
+        let store = RevocationStore::in_memory_with(keys);
+        assert!(store.is_revoked("k1").await);
+        assert!(store.is_revoked("k2").await);
+        assert!(!store.is_revoked("k3").await);
+    }
+
+    #[tokio::test]
+    async fn test_revocation_store_with_custom_backend() {
+        let backend = Arc::new(InMemoryRevocationBackend::new());
+        let store = RevocationStore::with_backend(backend);
+        assert!(store.revoke("key1".to_string()).await);
+        assert!(store.is_revoked("key1").await);
+    }
+
+    // ── AppState backward compat tests ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_app_state_is_key_revoked() {
+        let config = AppConfig::for_test();
+        let state = AppState::from_config(&config);
+        assert!(!state.is_key_revoked("nonexistent").await);
+        state.revoke_key("k1".to_string()).await;
+        assert!(state.is_key_revoked("k1").await);
     }
 }

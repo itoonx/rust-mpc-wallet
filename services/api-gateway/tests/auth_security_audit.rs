@@ -1271,7 +1271,7 @@ async fn test_revoked_key_cannot_handshake() {
     let mut revoked = std::collections::HashSet::new();
     revoked.insert(client_key_id.clone());
     let state_with_revoked = mpc_wallet_api::state::AppState {
-        revoked_keys: std::sync::Arc::new(tokio::sync::RwLock::new(revoked)),
+        revoked_keys: mpc_wallet_api::state::RevocationStore::in_memory_with(revoked),
         ..state
     };
     let router = build_router(state_with_revoked, &[]);
@@ -1308,7 +1308,7 @@ async fn test_session_refresh_revokes_on_key_revocation() {
     let mut revoked = std::collections::HashSet::new();
     revoked.insert(client_key_id);
     let state_revoked = mpc_wallet_api::state::AppState {
-        revoked_keys: std::sync::Arc::new(tokio::sync::RwLock::new(revoked)),
+        revoked_keys: mpc_wallet_api::state::RevocationStore::in_memory_with(revoked),
         session_store: state.session_store.clone(), // Same session store
         ..state
     };

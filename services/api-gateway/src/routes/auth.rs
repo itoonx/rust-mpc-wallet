@@ -269,14 +269,7 @@ pub async fn refresh_session(
 
 /// `GET /v1/auth/revoked-keys`
 pub async fn revoked_keys(State(state): State<AuthRouteState>) -> Json<ApiResponse<Vec<String>>> {
-    let keys: Vec<String> = state
-        .app
-        .revoked_keys
-        .read()
-        .await
-        .iter()
-        .cloned()
-        .collect();
+    let keys = state.app.revoked_keys.list().await;
     Json(ApiResponse::ok(keys))
 }
 
