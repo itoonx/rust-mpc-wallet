@@ -460,7 +460,9 @@ impl AppState {
         }
 
         // Build backends based on SESSION_BACKEND config.
-        let (session_store, replay_cache, revoked_keys) = if config.session_backend == "redis" {
+        let (session_store, replay_cache, revoked_keys) = if config.session_backend
+            == crate::config::BackendType::Redis
+        {
             let redis_url = config.redis_url.as_ref().expect("REDIS_URL required");
             let redis_client = crate::auth::redis_backend::RealRedisClient::connect(redis_url)
                 .await

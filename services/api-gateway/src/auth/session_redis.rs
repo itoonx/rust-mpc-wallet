@@ -20,7 +20,7 @@ use chacha20poly1305::{
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
-use super::session::{SessionBackend, MAX_SESSIONS};
+use super::session::SessionBackend;
 use super::types::AuthenticatedSession;
 
 /// Encrypted session data suitable for JSON serialization and external storage.
@@ -191,11 +191,14 @@ pub trait RedisClient: Send + Sync {
 ///
 /// Session keys are encrypted with ChaCha20-Poly1305 using a 32-byte KEK
 /// before being sent to the Redis client.
+/// Redis key prefix for sessions.
+pub const SESSION_KEY_PREFIX: &str = "session:";
+
 pub struct RedisSessionBackend {
     client: Arc<dyn RedisClient>,
-    /// Key encryption key for session data (32 bytes).
-    kek: [u8; 32],
-    /// Key prefix for Redis keys (e.g., "session:").
+    /// Key encryption key for session data (32 bytes, zeroized on drop).
+    kek: zeroize::Zeroizing<[u8; 32]>,
+    /// Key prefix for Redis keys.
     prefix: String,
 }
 
@@ -207,8 +210,8 @@ impl RedisSessionBackend {
     pub fn new(client: Arc<dyn RedisClient>, kek: [u8; 32]) -> Self {
         Self {
             client,
-            kek,
-            prefix: "session:".to_string(),
+            kek: zeroize::Zeroizing::new(kek),
+            prefix: SESSION_KEY_PREFIX.to_string(),
         }
     }
 
@@ -217,28 +220,11 @@ impl RedisSessionBackend {
     }
 }
 
-impl Drop for RedisSessionBackend {
-    fn drop(&mut self) {
-        self.kek.zeroize();
-    }
-}
-
 #[async_trait]
 impl SessionBackend for RedisSessionBackend {
     async fn store(&self, session: AuthenticatedSession) -> bool {
-        // Check capacity via key count
-        match self.client.count_keys(&format!("{}*", self.prefix)).await {
-            Ok(count) if count >= MAX_SESSIONS => {
-                tracing::warn!(count, "Redis session store at capacity");
-                return false;
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Redis count_keys failed");
-                return false;
-            }
-            _ => {}
-        }
-
+        // No capacity check here — Redis TTL handles expiry automatically.
+        // Avoid KEYS command (O(n)) on every store; rely on Redis memory limits.
         let encrypted = match encrypt_session(&session, &self.kek) {
             Ok(data) => data,
             Err(e) => {
@@ -293,12 +279,8 @@ impl SessionBackend for RedisSessionBackend {
             }
         };
 
-        // Check expiry
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        if now > encrypted.expires_at {
+        // Check expiry using shared helper.
+        if super::session::is_expired(encrypted.expires_at) {
             return None;
         }
 

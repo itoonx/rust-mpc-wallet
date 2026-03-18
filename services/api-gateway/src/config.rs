@@ -1,5 +1,23 @@
 //! Environment configuration for the API gateway.
 
+/// Backend type for sessions, replay cache, and revocation store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendType {
+    /// In-memory storage (dev/test, single-instance).
+    Memory,
+    /// Redis storage (production, horizontally scalable).
+    Redis,
+}
+
+impl BackendType {
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "redis" => Self::Redis,
+            _ => Self::Memory,
+        }
+    }
+}
+
 /// API gateway configuration loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -27,8 +45,8 @@ pub struct AppConfig {
     pub session_ttl: u64,
     /// mTLS service registry file (JSON array of MtlsServiceEntry).
     pub mtls_services_file: Option<String>,
-    /// Session/cache backend: "memory" (default) or "redis".
-    pub session_backend: String,
+    /// Session/cache backend type.
+    pub session_backend: BackendType,
     /// Redis URL (required when session_backend = "redis").
     /// Supports `redis://` and `rediss://` (TLS).
     pub redis_url: Option<String>,
@@ -74,9 +92,9 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3600),
             mtls_services_file: std::env::var("MTLS_SERVICES_FILE").ok(),
-            session_backend: std::env::var("SESSION_BACKEND")
-                .unwrap_or_else(|_| "memory".into())
-                .to_lowercase(),
+            session_backend: BackendType::parse(
+                &std::env::var("SESSION_BACKEND").unwrap_or_else(|_| "memory".into()),
+            ),
             redis_url: std::env::var("REDIS_URL").ok(),
             session_encryption_key: std::env::var("SESSION_ENCRYPTION_KEY").ok(),
         };
@@ -102,7 +120,7 @@ impl AppConfig {
             self.session_ttl
         );
         // Redis backend requires URL and encryption key.
-        if self.session_backend == "redis" {
+        if self.session_backend == BackendType::Redis {
             assert!(
                 self.redis_url.is_some(),
                 "REDIS_URL is required when SESSION_BACKEND=redis"
@@ -141,7 +159,7 @@ impl AppConfig {
             revoked_keys_file: None,
             session_ttl: 3600,
             mtls_services_file: None,
-            session_backend: "memory".into(),
+            session_backend: BackendType::Memory,
             redis_url: None,
             session_encryption_key: None,
         }

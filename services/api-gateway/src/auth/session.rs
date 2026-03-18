@@ -16,8 +16,17 @@ use tokio::sync::RwLock;
 
 use super::types::AuthenticatedSession;
 
-/// Maximum number of sessions (DoS protection).
+/// Maximum number of sessions (DoS protection, in-memory backend only).
 pub const MAX_SESSIONS: usize = 100_000;
+
+/// Check if a session has expired.
+pub fn is_expired(expires_at: u64) -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    now > expires_at
+}
 
 /// Background prune interval (seconds).
 const PRUNE_INTERVAL_SECS: u64 = 60;
@@ -68,11 +77,7 @@ impl SessionBackend for InMemoryBackend {
     async fn get(&self, session_id: &str) -> Option<AuthenticatedSession> {
         let sessions = self.sessions.read().await;
         let session = sessions.get(session_id)?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        if now > session.expires_at {
+        if is_expired(session.expires_at) {
             return None;
         }
         Some(session.clone())

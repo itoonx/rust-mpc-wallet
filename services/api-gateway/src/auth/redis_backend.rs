@@ -9,6 +9,11 @@ use redis::AsyncCommands;
 use super::session_redis::RedisClient;
 use crate::state::{ReplayCacheBackend, RevocationBackend};
 
+/// Redis key prefix for replay nonces.
+const REPLAY_PREFIX: &str = "replay:";
+/// Redis SET key for revoked key IDs.
+const REVOKED_KEYS_SET: &str = "revoked_keys";
+
 /// Real Redis client wrapping `redis::aio::ConnectionManager`.
 ///
 /// `ConnectionManager` automatically reconnects on failure — no manual
@@ -54,23 +59,50 @@ impl RedisClient for RealRedisClient {
     }
 
     async fn count_keys(&self, pattern: &str) -> Result<usize, String> {
+        // Use SCAN (non-blocking, O(1) per iteration) instead of KEYS (O(n) blocking).
         let mut conn = self.conn.clone();
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(pattern)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| format!("Redis KEYS: {e}"))?;
-        Ok(keys.len())
+        let mut cursor: u64 = 0;
+        let mut count = 0;
+        loop {
+            let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| format!("Redis SCAN: {e}"))?;
+            count += keys.len();
+            cursor = new_cursor;
+            if cursor == 0 {
+                break;
+            }
+        }
+        Ok(count)
     }
 
     async fn scan_keys(&self, pattern: &str) -> Result<Vec<String>, String> {
         let mut conn = self.conn.clone();
-        let keys: Vec<String> = redis::cmd("KEYS")
-            .arg(pattern)
-            .query_async(&mut conn)
-            .await
-            .map_err(|e| format!("Redis KEYS: {e}"))?;
-        Ok(keys)
+        let mut cursor: u64 = 0;
+        let mut result = Vec::new();
+        loop {
+            let (new_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| format!("Redis SCAN: {e}"))?;
+            result.extend(keys);
+            cursor = new_cursor;
+            if cursor == 0 {
+                break;
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -87,7 +119,7 @@ impl RedisReplayBackend {
     pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self {
             conn,
-            prefix: "replay:".into(),
+            prefix: REPLAY_PREFIX.into(),
         }
     }
 }
@@ -137,7 +169,7 @@ impl RedisRevocationBackend {
     pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self {
             conn,
-            key: "revoked_keys".into(),
+            key: REVOKED_KEYS_SET.into(),
         }
     }
 
