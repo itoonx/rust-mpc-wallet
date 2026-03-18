@@ -8,8 +8,9 @@ pub mod full_flow;
 pub mod nats_transport;
 
 use ed25519_dalek::SigningKey;
+use mpc_wallet_core::protocol::{KeyShare, MpcProtocol, MpcSignature};
 use mpc_wallet_core::transport::nats::NatsTransport;
-use mpc_wallet_core::types::PartyId;
+use mpc_wallet_core::types::{PartyId, ThresholdConfig};
 
 pub const DEFAULT_NATS_URL: &str = "nats://127.0.0.1:4222";
 
@@ -59,4 +60,75 @@ impl PartyKeys {
         }
         transport
     }
+}
+
+/// Run keygen for all parties concurrently via NATS.
+pub async fn nats_keygen(
+    protocol_factory: fn() -> Box<dyn MpcProtocol>,
+    threshold: u16,
+    total: u16,
+    url: &str,
+) -> Vec<KeyShare> {
+    let session_id = unique_session_id();
+    let config = ThresholdConfig::new(threshold, total).unwrap();
+    let party_keys = PartyKeys::generate(total);
+
+    let mut handles = Vec::new();
+    for i in 0..total as usize {
+        let pkeys = party_keys.clone();
+        let sid = session_id.clone();
+        let nats = url.to_string();
+        let protocol = protocol_factory();
+        let party_id = PartyId(i as u16 + 1);
+
+        handles.push(tokio::spawn(async move {
+            let transport = pkeys.connect(i, &sid, &nats).await;
+            protocol.keygen(config, party_id, &transport).await
+        }));
+    }
+
+    let mut shares = Vec::new();
+    for h in handles {
+        shares.push(h.await.expect("keygen panicked").expect("keygen failed"));
+    }
+    shares
+}
+
+/// Run signing for a subset of parties concurrently via NATS.
+pub async fn nats_sign(
+    protocol_factory: fn() -> Box<dyn MpcProtocol>,
+    shares: &[KeyShare],
+    signer_indices: &[usize],
+    message: &[u8],
+    url: &str,
+) -> Vec<MpcSignature> {
+    let session_id = unique_session_id();
+    let total = shares[0].config.total_parties;
+    let signers: Vec<PartyId> = signer_indices.iter().map(|&i| shares[i].party_id).collect();
+    let party_keys = PartyKeys::generate(total);
+
+    let mut handles = Vec::new();
+    for &idx in signer_indices {
+        let share = shares[idx].clone();
+        let pkeys = party_keys.clone();
+        let sid = session_id.clone();
+        let nats = url.to_string();
+        let protocol = protocol_factory();
+        let signers_clone = signers.clone();
+        let msg = message.to_vec();
+        let party_index = share.party_id.0 as usize - 1;
+
+        handles.push(tokio::spawn(async move {
+            let transport = pkeys.connect(party_index, &sid, &nats).await;
+            protocol
+                .sign(&share, &signers_clone, &msg, &transport)
+                .await
+        }));
+    }
+
+    let mut sigs = Vec::new();
+    for h in handles {
+        sigs.push(h.await.expect("sign panicked").expect("sign failed"));
+    }
+    sigs
 }

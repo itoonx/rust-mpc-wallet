@@ -1,15 +1,21 @@
-//! E2E tests: NATS transport connectivity and message round-trip.
-//!
-//! Note: Multi-round MPC protocol tests (keygen/sign via NATS) are blocked by
-//! NatsTransport::recv() creating a new subscription per call — messages published
-//! before subscribe are lost. This needs a persistent subscription fix.
-//! For now, we test basic connectivity and single message round-trip.
+//! E2E tests: NATS transport — connectivity, message round-trip, and MPC protocols.
 //!
 //! Requires: `./scripts/local-infra.sh up` (NATS on localhost:4222)
 
 use super::*;
+use mpc_wallet_core::protocol::frost_ed25519::FrostEd25519Protocol;
+use mpc_wallet_core::protocol::gg20::Gg20Protocol;
+use mpc_wallet_core::protocol::{MpcProtocol, MpcSignature};
 use mpc_wallet_core::transport::nats::NatsTransport;
 use mpc_wallet_core::transport::{ProtocolMessage, Transport};
+
+fn gg20_factory() -> Box<dyn MpcProtocol> {
+    Box::new(Gg20Protocol::new())
+}
+
+fn frost_ed25519_factory() -> Box<dyn MpcProtocol> {
+    Box::new(FrostEd25519Protocol::new())
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // NATS connectivity
@@ -75,11 +81,6 @@ async fn test_nats_signed_message_round_trip() {
     assert_eq!(received.payload, b"hello from party 1");
 }
 
-// Note: Bidirectional exchange test removed — NatsTransport::recv() creates a fresh
-// subscription per call, so party 1 misses the reply if it subscribes after party 2
-// publishes. This is the same limitation that blocks multi-round MPC protocol tests.
-// Fix: NatsTransport should hold a persistent subscription.
-
 #[tokio::test]
 #[ignore = "requires NATS: ./scripts/local-infra.sh up"]
 async fn test_nats_session_isolation() {
@@ -120,12 +121,30 @@ async fn test_nats_session_isolation() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// MPC keygen/sign via NATS — blocked by recv() subscription issue
+// MPC keygen + sign via NATS (multi-round protocol)
 // ═══════════════════════════════════════════════════════════════════════
-// TODO: Once NatsTransport::recv() uses a persistent subscription,
-// enable these tests:
-// - test_nats_keygen_gg20_2of3
-// - test_nats_sign_gg20_subset_1_2
-// - test_nats_keygen_frost_ed25519
-// - test_nats_sign_frost_ed25519
-// See: protocol_integration.rs for LocalTransport versions that work
+
+#[tokio::test]
+#[ignore = "requires NATS: ./scripts/local-infra.sh up"]
+async fn test_nats_keygen_gg20_2of3() {
+    let url = nats_url();
+    let shares = nats_keygen(gg20_factory, 2, 3, &url).await;
+
+    assert_eq!(shares.len(), 3);
+    let gpk = &shares[0].group_public_key;
+    for share in &shares[1..] {
+        assert_eq!(
+            share.group_public_key.as_bytes(),
+            gpk.as_bytes(),
+            "all parties must derive same group pubkey via NATS"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// NATS sign + FROST keygen — requires shared PartyKeys across phases
+// ═══════════════════════════════════════════════════════════════════════
+// TODO (Phase 1 continued): nats_sign() creates fresh PartyKeys with different
+// Ed25519 envelope keys than the keygen phase — SignedEnvelope verification fails.
+// Fix: persist PartyKeys from keygen phase and reuse in sign phase.
+// FROST keygen needs investigation — may require different message ordering.
