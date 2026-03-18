@@ -49,6 +49,9 @@ retro/
 | [L-005](lessons/L-005_session-store-unbounded.md) | 2026-03-17 | Security | High | SessionStore has no size limit — **FIXED** |
 | [L-006](lessons/L-006_no-rate-limit-auth.md) | 2026-03-17 | Security | High | No rate limiting on auth endpoints — **FIXED** |
 | [L-007](lessons/L-007_session-keys-not-zeroized.md) | 2026-03-17 | Security | High | Session key material not zeroized on drop — **FIXED** |
+| L-008 | 2026-03-18 | Bug | High | NatsTransport::recv() re-subscribes per call — message loss — **FIXED** |
+| L-009 | 2026-03-18 | Architecture | Medium | GG20 signing requires Party 1 (coordinator) in signer subset — **DOCUMENTED** |
+| L-010 | 2026-03-18 | Testing | Low | E2E test ordering matters with shared NATS infrastructure — **MITIGATED** |
 
 ---
 
@@ -65,6 +68,7 @@ retro/
 | Report | Dates | Scope | Key Metrics |
 |--------|-------|-------|-------------|
 | [SESSION_RETRO_AUTH](SESSION_RETRO_AUTH.md) | 2026-03-17 ~ 2026-03-18 | Auth system build (mTLS, Session JWT, Bearer JWT, Redis) | ~30 commits, +147 tests, 5 decisions, v0.2.0 |
+| [SESSION_RETRO_SPRINT15](SESSION_RETRO_SPRINT15.md) | 2026-03-18 | Production readiness (errors, Vault, NATS fix, sig verify, gateway wiring, benchmarks, CI E2E) | 5 phases, +18 tests, 5 bugs found, ~35 benchmarks |
 
 ---
 
