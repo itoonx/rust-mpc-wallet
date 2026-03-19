@@ -57,6 +57,10 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tempfile = "3"
 criterion = { workspace = true }
+# E2E test deps
+mpc-wallet-chains = { path = "../mpc-wallet-chains" }
+reqwest = { workspace = true }
+redis = { workspace = true }
 
 [[bench]]
 name = "mpc_benchmarks"

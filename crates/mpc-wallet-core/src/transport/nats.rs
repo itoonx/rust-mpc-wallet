@@ -139,6 +139,9 @@ pub struct NatsTransport {
     last_seq: Mutex<HashMap<PartyId, u64>>,
     /// Per-peer outgoing seq_no counter (monotonically increasing).
     out_seq: Mutex<u64>,
+    /// Persistent subscription for receiving messages (lazy-initialized on first recv).
+    /// This ensures messages published between recv() calls are not lost.
+    subscriber: tokio::sync::Mutex<Option<async_nats::Subscriber>>,
 }
 
 impl NatsTransport {
@@ -162,6 +165,14 @@ impl NatsTransport {
         let client = async_nats::connect(nats_url)
             .await
             .map_err(|e| CoreError::Transport(format!("NATS connect failed: {e}")))?;
+
+        // Subscribe eagerly so no messages are lost between connect and first recv().
+        let inbox = format!("mpc.{}.party.{}", session_id, party_id.0);
+        let subscriber = client
+            .subscribe(inbox)
+            .await
+            .map_err(|e| CoreError::Transport(format!("NATS subscribe failed: {e}")))?;
+
         Ok(Self {
             client,
             party_id,
@@ -170,6 +181,7 @@ impl NatsTransport {
             peer_keys: HashMap::new(),
             last_seq: Mutex::new(HashMap::new()),
             out_seq: Mutex::new(0),
+            subscriber: tokio::sync::Mutex::new(Some(subscriber)),
         })
     }
 
@@ -201,6 +213,12 @@ impl NatsTransport {
             .await
             .map_err(|e| CoreError::Transport(format!("NATS TLS connect failed: {e}")))?;
 
+        let inbox = format!("mpc.{}.party.{}", session_id, party_id.0);
+        let subscriber = client
+            .subscribe(inbox)
+            .await
+            .map_err(|e| CoreError::Transport(format!("NATS TLS subscribe failed: {e}")))?;
+
         Ok(Self {
             client,
             party_id,
@@ -209,6 +227,7 @@ impl NatsTransport {
             peer_keys: HashMap::new(),
             last_seq: Mutex::new(HashMap::new()),
             out_seq: Mutex::new(0),
+            subscriber: tokio::sync::Mutex::new(Some(subscriber)),
         })
     }
 
@@ -226,10 +245,6 @@ impl NatsTransport {
         self.signing_key.verifying_key()
     }
 
-    fn inbox_subject(&self) -> String {
-        format!("mpc.{}.party.{}", self.session_id, self.party_id.0)
-    }
-
     fn party_subject(session_id: &str, target: PartyId) -> String {
         format!("mpc.{}.party.{}", session_id, target.0)
     }
@@ -239,18 +254,10 @@ impl NatsTransport {
         *seq += 1;
         *seq
     }
-}
 
-#[async_trait]
-impl Transport for NatsTransport {
-    async fn send(&self, msg: ProtocolMessage) -> Result<(), CoreError> {
-        let target = msg
-            .to
-            .ok_or_else(|| CoreError::Transport("NATS: broadcast not supported".into()))?;
-
+    /// Sign, serialize, and publish a message to a specific party.
+    async fn publish_to(&self, msg: ProtocolMessage, target: PartyId) -> Result<(), CoreError> {
         let seq_no = self.next_seq_no();
-
-        // SEC-007: wrap in signed envelope before publishing
         let envelope = SignedEnvelope::sign(
             msg,
             self.party_id,
@@ -258,26 +265,39 @@ impl Transport for NatsTransport {
             DEFAULT_TTL_SECS,
             &self.signing_key,
         );
-
         let subject = Self::party_subject(&self.session_id, target);
         let payload =
             serde_json::to_vec(&envelope).map_err(|e| CoreError::Serialization(e.to_string()))?;
-
         self.client
             .publish(subject, payload.into())
             .await
             .map_err(|e| CoreError::Transport(format!("NATS publish failed: {e}")))?;
+        Ok(())
+    }
+}
 
+#[async_trait]
+impl Transport for NatsTransport {
+    async fn send(&self, msg: ProtocolMessage) -> Result<(), CoreError> {
+        if let Some(target) = msg.to {
+            self.publish_to(msg, target).await?;
+        } else {
+            // Broadcast: send to all registered peers (one message per peer).
+            let peers: Vec<PartyId> = self.peer_keys.keys().copied().collect();
+            for peer_id in peers {
+                self.publish_to(msg.clone(), peer_id).await?;
+            }
+        }
         Ok(())
     }
 
     async fn recv(&self) -> Result<ProtocolMessage, CoreError> {
-        let subject = self.inbox_subject();
-        let mut subscriber = self
-            .client
-            .subscribe(subject)
-            .await
-            .map_err(|e| CoreError::Transport(format!("NATS subscribe failed: {e}")))?;
+        // Use the persistent subscription established at connect time.
+        // This ensures no messages are lost between send() and recv() calls.
+        let mut sub_guard = self.subscriber.lock().await;
+        let subscriber = sub_guard
+            .as_mut()
+            .ok_or_else(|| CoreError::Transport("NATS subscriber not initialized".into()))?;
 
         let raw = subscriber
             .next()

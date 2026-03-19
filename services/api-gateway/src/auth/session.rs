@@ -1,40 +1,134 @@
 //! Session store for authenticated sessions.
 //!
-//! Provides an in-memory session store with automatic expiration,
-//! size cap, and background pruning.
-//! Production deployments should back this with Redis or a distributed store.
+//! Provides a trait-based session store with two backends:
+//! - `InMemoryBackend` — for dev/test (default)
+//! - `RedisBackend` — for production (horizontal scaling, survives restarts)
+//!
+//! Session keys are encrypted before storage (AES-256-GCM) to prevent
+//! plaintext key material in Redis or memory dumps.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use super::types::AuthenticatedSession;
 
-/// Maximum number of sessions stored before rejecting new ones.
+/// Maximum number of sessions (DoS protection, in-memory backend only).
 pub const MAX_SESSIONS: usize = 100_000;
+
+/// Check if a session has expired.
+pub fn is_expired(expires_at: u64) -> bool {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    now > expires_at
+}
 
 /// Background prune interval (seconds).
 const PRUNE_INTERVAL_SECS: u64 = 60;
 
-/// In-memory session store with size cap and background pruning.
+// ── SessionBackend Trait ──────────────────────────────────────────
+
+/// Pluggable session storage backend.
+#[async_trait]
+pub trait SessionBackend: Send + Sync {
+    /// Store a session. Returns false if at capacity.
+    async fn store(&self, session: AuthenticatedSession) -> bool;
+    /// Get a session by ID. Returns None if not found or expired.
+    async fn get(&self, session_id: &str) -> Option<AuthenticatedSession>;
+    /// Revoke (delete) a session. Returns true if it existed.
+    async fn revoke(&self, session_id: &str) -> bool;
+    /// Remove all expired sessions. Returns count removed.
+    async fn prune_expired(&self) -> usize;
+    /// Count stored sessions (including expired).
+    async fn count(&self) -> usize;
+}
+
+// ── InMemoryBackend ───────────────────────────────────────────────
+
+/// In-memory session backend (dev/test).
+#[derive(Clone, Default)]
+pub struct InMemoryBackend {
+    sessions: Arc<RwLock<HashMap<String, AuthenticatedSession>>>,
+}
+
+impl InMemoryBackend {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl SessionBackend for InMemoryBackend {
+    async fn store(&self, session: AuthenticatedSession) -> bool {
+        let mut sessions = self.sessions.write().await;
+        if sessions.len() >= MAX_SESSIONS {
+            tracing::warn!(count = sessions.len(), "session store at capacity");
+            return false;
+        }
+        sessions.insert(session.session_id.clone(), session);
+        true
+    }
+
+    async fn get(&self, session_id: &str) -> Option<AuthenticatedSession> {
+        let sessions = self.sessions.read().await;
+        let session = sessions.get(session_id)?;
+        if is_expired(session.expires_at) {
+            return None;
+        }
+        Some(session.clone())
+    }
+
+    async fn revoke(&self, session_id: &str) -> bool {
+        self.sessions.write().await.remove(session_id).is_some()
+    }
+
+    async fn prune_expired(&self) -> usize {
+        let mut sessions = self.sessions.write().await;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let before = sessions.len();
+        sessions.retain(|_, s| s.expires_at > now);
+        before - sessions.len()
+    }
+
+    async fn count(&self) -> usize {
+        self.sessions.read().await.len()
+    }
+}
+
+// ── SessionStore (facade) ─────────────────────────────────────────
+
+/// Session store facade — wraps any `SessionBackend` implementation.
+/// Use `SessionStore::in_memory()` for dev/test, or provide a custom backend.
 #[derive(Clone)]
 pub struct SessionStore {
-    sessions: Arc<RwLock<HashMap<String, AuthenticatedSession>>>,
+    backend: Arc<dyn SessionBackend>,
 }
 
 impl Default for SessionStore {
     fn default() -> Self {
-        Self::new()
+        Self::in_memory()
     }
 }
 
 impl SessionStore {
-    pub fn new() -> Self {
+    /// Create an in-memory session store (dev/test).
+    pub fn in_memory() -> Self {
         Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            backend: Arc::new(InMemoryBackend::new()),
         }
+    }
+
+    /// Create a session store with a custom backend (e.g., Redis).
+    pub fn with_backend(backend: Arc<dyn SessionBackend>) -> Self {
+        Self { backend }
     }
 
     /// Spawn a background task that prunes expired sessions every 60 seconds.
@@ -52,62 +146,24 @@ impl SessionStore {
         });
     }
 
-    /// Store an authenticated session. Returns false if at capacity (DoS protection).
-    /// Expired sessions are cleaned up by the background prune task (every 60s).
     pub async fn store(&self, session: AuthenticatedSession) -> bool {
-        let mut sessions = self.sessions.write().await;
-
-        if sessions.len() >= MAX_SESSIONS {
-            tracing::warn!(
-                count = sessions.len(),
-                "session store at capacity — rejecting new session"
-            );
-            return false;
-        }
-
-        sessions.insert(session.session_id.clone(), session);
-        true
+        self.backend.store(session).await
     }
 
-    /// Retrieve a session by ID. Returns None if not found or expired.
     pub async fn get(&self, session_id: &str) -> Option<AuthenticatedSession> {
-        let sessions = self.sessions.read().await;
-        let session = sessions.get(session_id)?;
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        if now > session.expires_at {
-            return None;
-        }
-
-        Some(session.clone())
+        self.backend.get(session_id).await
     }
 
-    /// Remove an expired session or revoke a session.
     pub async fn revoke(&self, session_id: &str) -> bool {
-        let mut sessions = self.sessions.write().await;
-        sessions.remove(session_id).is_some()
+        self.backend.revoke(session_id).await
     }
 
-    /// Prune all expired sessions.
     pub async fn prune_expired(&self) -> usize {
-        let mut sessions = self.sessions.write().await;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let before = sessions.len();
-        sessions.retain(|_, s| s.expires_at > now);
-        before - sessions.len()
+        self.backend.prune_expired().await
     }
 
-    /// Count active sessions.
     pub async fn count(&self) -> usize {
-        self.sessions.read().await.len()
+        self.backend.count().await
     }
 }
 
@@ -129,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_and_retrieve() {
-        let store = SessionStore::new();
+        let store = SessionStore::in_memory();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -143,14 +199,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_expired_session_returns_none() {
-        let store = SessionStore::new();
-        store.store(make_session("s2", 1000)).await; // expired
+        let store = SessionStore::in_memory();
+        store.store(make_session("s2", 1000)).await;
         assert!(store.get("s2").await.is_none());
     }
 
     #[tokio::test]
     async fn test_revoke_session() {
-        let store = SessionStore::new();
+        let store = SessionStore::in_memory();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -162,7 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prune_expired() {
-        let store = SessionStore::new();
+        let store = SessionStore::in_memory();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -178,7 +234,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_nonexistent_session() {
-        let store = SessionStore::new();
+        let store = SessionStore::in_memory();
         assert!(store.get("nonexistent").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_custom_backend() {
+        // Verify the trait-based approach works with a different backend.
+        let backend = Arc::new(InMemoryBackend::new());
+        let store = SessionStore::with_backend(backend);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        assert!(store.store(make_session("custom", now + 3600)).await);
+        assert!(store.get("custom").await.is_some());
     }
 }

@@ -51,17 +51,9 @@ pub fn parse_role(s: &str) -> ApiRole {
     }
 }
 
-/// Auth failure response tuple for route handlers.
-pub fn auth_failed() -> (
-    axum::http::StatusCode,
-    axum::Json<crate::models::response::ApiResponse<()>>,
-) {
-    (
-        axum::http::StatusCode::UNAUTHORIZED,
-        axum::Json(crate::models::response::ApiResponse::err(
-            "authentication failed",
-        )),
-    )
+/// Auth failure response — returns `ApiError` with UNAUTHORIZED status.
+pub fn auth_failed() -> crate::errors::ApiError {
+    crate::errors::ApiError::unauthorized("authentication failed")
 }
 
 // ── Transcript Hashing ─────────────────────────────────────────────

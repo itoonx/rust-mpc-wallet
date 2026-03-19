@@ -2,10 +2,13 @@
 
 pub mod auth;
 pub mod config;
+pub mod errors;
 pub mod middleware;
 pub mod models;
+pub mod orchestrator;
 pub mod routes;
 pub mod state;
+pub mod vault;
 
 use axum::{
     http::{header, HeaderName, Method},

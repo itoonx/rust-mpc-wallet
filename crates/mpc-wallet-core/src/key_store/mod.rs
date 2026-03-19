@@ -1,5 +1,7 @@
 /// File-based encrypted key store implementation using AES-256-GCM + Argon2id.
 pub mod encrypted;
+/// HSM/KMS envelope encryption abstraction for key share wrapping.
+pub mod hsm;
 /// Key store primitive types: [`types::KeyGroupId`] and [`types::KeyMetadata`].
 pub mod types;
 

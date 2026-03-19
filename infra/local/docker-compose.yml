@@ -1,0 +1,51 @@
+# ═══════════════════════════════════════════════════════════════════════
+# MPC Wallet — Local Infrastructure (Vault + Redis + NATS)
+#
+# All config comes from .env — no hardcoded values.
+# Usage: docker compose --env-file infra/local/.env up -d
+# ═══════════════════════════════════════════════════════════════════════
+
+services:
+  # ── HashiCorp Vault (dev mode) ──────────────────────────────────────
+  vault:
+    image: ${VAULT_IMAGE:-hashicorp/vault:1.15}
+    ports:
+      - "${VAULT_PORT:-8200}:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "${VAULT_DEV_TOKEN:-dev-root-token}"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # ── Redis ───────────────────────────────────────────────────────────
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: ["redis-server", "--maxmemory", "${REDIS_MAXMEMORY:-128mb}", "--maxmemory-policy", "${REDIS_MAXMEMORY_POLICY:-allkeys-lru}", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
+  # ── NATS (MPC transport) ────────────────────────────────────────────
+  nats:
+    image: ${NATS_IMAGE:-nats:2.10-alpine}
+    ports:
+      - "${NATS_CLIENT_PORT:-4222}:4222"
+      - "${NATS_MONITOR_PORT:-8222}:8222"
+    command: ["-js", "-m", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s

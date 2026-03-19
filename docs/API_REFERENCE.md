@@ -3,13 +3,28 @@
 Base URL: `https://api.example.com`
 
 All responses follow the format:
+
+**Success:**
 ```json
 {
-  "success": true|false,
-  "data": { ... },
-  "error": "message (only when success=false)"
+  "success": true,
+  "data": { ... }
 }
 ```
+
+**Error:**
+```json
+{
+  "success": false,
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "human-readable description"
+  }
+}
+```
+
+`code` is a machine-readable SCREAMING_SNAKE_CASE constant for programmatic handling.
+See [Error Codes](#error-codes) for the full list.
 
 ---
 
@@ -17,102 +32,34 @@ All responses follow the format:
 
 Three methods supported — middleware checks in order, uses first match:
 
-### 1. Session Token (key-exchange handshake)
+### 1. mTLS (Machine → Machine)
 ```
-X-Session-Token: <session_token>
+X-Client-Cert-CN: trading-service.internal
+X-Client-Cert-Verified: SUCCESS
+```
+Set by TLS terminator (nginx/envoy) after verifying client certificate.
+Service identity mapped via `MTLS_SERVICES_FILE`.
+
+### 2. Session JWT (App → Server)
+```
+X-Session-Token: eyJhbGciOiJIUzI1NiJ9...
 ```
 Obtained via the `/v1/auth/hello` → `/v1/auth/verify` handshake flow (see below).
-Provides mutual authentication with forward secrecy (X25519 ECDH + Ed25519).
+HS256 signed with key-exchange derived key. Per-request, short-lived (2 min).
 
-### 2. API Key (service-to-service)
-```
-X-API-Key: sk_prod_abcdef1234567890
-```
-
-### 3. JWT Bearer Token (user-facing)
+### 3. Bearer JWT (Human → System)
 ```
 Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
 ```
 Supports RS256/ES256/HS256. JWT claims must include: `sub`, `exp`, `iat`, `iss`.
 Optional: `roles` (array), `dept`, `cost_center`, `risk_tier`, `mfa_verified`.
 
-**Middleware priority:** `X-Session-Token` → `X-API-Key` → `Authorization: Bearer` → 401.
+**Middleware priority:** mTLS → Session JWT → Bearer JWT → 401.
+If a header is **present** but invalid, auth fails immediately — no fall-through.
 
-> Full protocol specification: `specs/AUTH_SPEC.md` (28 sections, 1,067 lines)
+> Full protocol specification: `specs/AUTH_SPEC.md` (28 sections)
 
 ---
-
-## Getting API Keys
-
-API keys are provisioned by the server operator, not self-service. They are configured at startup via environment variables or a JSON file, then hashed with HMAC-SHA256 — the raw key is never stored.
-
-### Method 1: JSON File (recommended for production)
-
-Set the `API_KEYS_FILE` environment variable to a JSON file path:
-
-```bash
-export API_KEYS_FILE=/etc/mpc-wallet/api-keys.json
-```
-
-**File format** — array of key objects:
-
-```json
-[
-  {
-    "key": "sk_prod_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
-    "label": "trading-service",
-    "role": "initiator",
-    "allowed_wallets": ["550e8400-e29b-41d4-a716-446655440000"],
-    "allowed_chains": ["ethereum", "polygon", "arbitrum"],
-    "expires_at": 1742000000
-  },
-  {
-    "key": "sk_prod_q7r8s9t0u1v2w3x4y5z6a7b8c9d0e1f2",
-    "label": "monitoring-dashboard",
-    "role": "viewer",
-    "allowed_wallets": null,
-    "allowed_chains": null,
-    "expires_at": null
-  },
-  {
-    "key": "sk_prod_g3h4i5j6k7l8m9n0o1p2q3r4s5t6u7v8",
-    "label": "ops-admin",
-    "role": "admin",
-    "allowed_wallets": null,
-    "allowed_chains": null,
-    "expires_at": null
-  }
-]
-```
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `key` | string | yes | Raw API key secret. Use a cryptographically random string (>= 32 chars). Only used at startup to compute HMAC hash — never stored in plaintext. |
-| `label` | string | yes | Human-readable name for audit logs (e.g., `"trading-service"`, `"ops-admin"`). |
-| `role` | string | yes | Maximum permission level: `admin`, `initiator`, `approver`, or `viewer`. |
-| `allowed_wallets` | string[] or null | no | Restrict this key to specific wallet IDs. `null` = all wallets. |
-| `allowed_chains` | string[] or null | no | Restrict to specific chains. `null` = all chains. |
-| `expires_at` | u64 or null | no | UNIX timestamp (seconds). After this time the key is rejected. `null` = no expiry. |
-
-### Method 2: Environment Variable (simple / dev)
-
-Set comma-separated keys via `API_KEYS` — all get `viewer` role:
-
-```bash
-export API_KEYS=sk_dev_abc123,sk_dev_xyz789
-```
-
-### Generating a Secure Key
-
-```bash
-# Generate a 32-byte random key (recommended)
-openssl rand -hex 32
-# → e.g., 7f3a9c2b1d4e5f6a8b0c9d7e2f1a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a
-
-# Or with prefix for readability
-echo "sk_prod_$(openssl rand -hex 24)"
-# → e.g., sk_prod_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2w3x4
-```
 
 ### Roles & Permissions
 
@@ -123,148 +70,196 @@ echo "sk_prod_$(openssl rand -hex 24)"
 | `approver` | yes | no | yes | yes | no |
 | `admin` | yes | yes | yes | yes | yes |
 
-### Using an API Key
-
-**GET requests** — header only:
-
-```bash
-curl -H "X-API-Key: sk_prod_a1b2c3..." \
-  https://api.example.com/v1/wallets
-```
-
-**POST requests** — header + HMAC signature required:
-
-```bash
-TIMESTAMP=$(date +%s)
-BODY='{"label":"My Wallet","scheme":"gg20-ecdsa","threshold":2,"total_parties":3}'
-BODY_HASH=$(echo -n "$BODY" | sha256sum | cut -d' ' -f1)
-HMAC_INPUT="${TIMESTAMP}.POST./v1/wallets.${BODY_HASH}"
-SIGNATURE=$(echo -n "$HMAC_INPUT" | openssl dgst -sha256 -hmac "sk_prod_a1b2c3..." -hex | cut -d' ' -f2)
-
-curl -X POST \
-  -H "X-API-Key: sk_prod_a1b2c3..." \
-  -H "X-Signature: v1=${SIGNATURE}" \
-  -H "X-Timestamp: ${TIMESTAMP}" \
-  -H "Content-Type: application/json" \
-  -d "$BODY" \
-  https://api.example.com/v1/wallets
-```
-
-**HMAC signature format:** `v1=<hex(HMAC-SHA256(api_key, "{timestamp}.{METHOD}.{path}.{sha256(body)}"))>`
-
-The signature binds the timestamp, HTTP method, path, and body hash — preventing replay, path tampering, and body modification.
-
-### Self-Service API Key Management (user-facing)
-
-For user-facing applications, API keys can be created, listed, and deleted via REST endpoints.
-All endpoints require **admin** role.
-
-#### POST /v1/api-keys — Create a new key
-
-The raw key is returned **once** in the response. It is never stored — only the HMAC-SHA256 hash is kept. If the caller loses the key, they must create a new one.
-
-**Request:**
-```json
-{
-  "label": "my-trading-bot",
-  "role": "initiator",
-  "allowed_wallets": ["550e8400-e29b-41d4-a716-446655440000"],
-  "allowed_chains": ["ethereum", "polygon"],
-  "expires_at": 1742000000
-}
-```
-
-**Response (201 Created):**
-```json
-{
-  "success": true,
-  "data": {
-    "key_id": "vxk_a1b2c3d4e5f6g7h8",
-    "raw_key": "sk_initiator_7f3a9c2b1d4e5f6a8b0c9d7e2f1a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a",
-    "label": "my-trading-bot",
-    "role": "initiator",
-    "created_at": 1710768000,
-    "expires_at": 1742000000
-  }
-}
-```
-
-#### GET /v1/api-keys — List all keys (metadata only)
-
-Returns labels, roles, origins, and expiry — never raw keys or hashes.
-
-```json
-{
-  "success": true,
-  "data": {
-    "keys": [
-      {
-        "key_id": "vxk_static_0",
-        "label": "ops-admin",
-        "role": "Admin",
-        "origin": "static",
-        "created_by": "config",
-        "created_at": 1710768000,
-        "revoked": false
-      },
-      {
-        "key_id": "vxk_a1b2c3d4e5f6g7h8",
-        "label": "my-trading-bot",
-        "role": "Initiator",
-        "origin": "dynamic",
-        "created_by": "api-key:ops-admin",
-        "created_at": 1710768100,
-        "revoked": false
-      }
-    ],
-    "total": 2,
-    "active": 2
-  }
-}
-```
-
-#### GET /v1/api-keys/:id — Get a single key
-
-Returns metadata for a specific key by `key_id`.
-
-#### DELETE /v1/api-keys/:id — Delete a key
-
-Permanently removes the key. Returns 404 if the key doesn't exist.
-
-```json
-{
-  "success": true,
-  "data": {
-    "key_id": "vxk_a1b2c3d4e5f6g7h8",
-    "deleted": true
-  }
-}
-```
-
-### Security Notes
-
-- Raw keys are **never stored** on the server — only HMAC-SHA256 hashes (both static and dynamic).
-- Key verification uses **constant-time comparison** (`subtle::ConstantTimeEq`) to prevent timing attacks.
-- Dynamic keys show the raw key **once** at creation — it cannot be retrieved afterward.
-- Expired keys are **immediately rejected** — no grace period.
-- Static keys (service-to-service): rotate by updating the config file and restarting.
-- Dynamic keys (user-facing): create a new key via API, migrate clients, then delete the old key via API — **no restart needed**.
-- Keep `API_KEYS_FILE` with restrictive file permissions (`chmod 600`).
-
 ### Environment Variables Reference
+
+#### Secrets (sensitive — use Vault in production)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `JWT_SECRET` | yes* | HMAC secret for JWT validation (>= 32 bytes) |
+| `SERVER_SIGNING_KEY` | no* (auto-generated) | Hex-encoded 32-byte Ed25519 secret for handshake |
+| `SESSION_ENCRYPTION_KEY` | no* | Hex 32-byte KEK for Redis session encryption (ChaCha20-Poly1305) |
+| `REDIS_URL` | no* | Redis connection URL (may contain password) |
+
+*These can be loaded from Vault instead of env vars — see below.
+
+> **Production:** Set `SECRETS_BACKEND=vault` to load all secrets from HashiCorp Vault at startup. No plaintext secrets in env vars, config files, or source control.
+
+#### Vault Configuration
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `JWT_SECRET` | yes | — | HMAC secret for JWT validation + API key hashing (>= 32 bytes) |
-| `API_KEYS_FILE` | no | — | Path to JSON array of API key configs |
-| `API_KEYS` | no | — | Legacy: comma-separated keys (all get viewer role) |
-| `SERVER_SIGNING_KEY` | no | auto-generated | Hex-encoded 32-byte Ed25519 secret for handshake |
+| `SECRETS_BACKEND` | no | `env` | `env` (env vars) or `vault` (HashiCorp Vault) |
+| `VAULT_ADDR` | if vault | — | Vault server URL (e.g., `https://vault.internal:8200`) |
+| `VAULT_TOKEN` | if vault* | — | Vault token (dev/CI) |
+| `VAULT_ROLE_ID` | if vault* | — | AppRole role ID (production) |
+| `VAULT_SECRET_ID` | if vault* | — | AppRole secret ID (production) |
+| `VAULT_MOUNT` | no | `secret` | KV v2 mount path |
+| `VAULT_SECRETS_PATH` | no | `mpc-wallet/gateway` | Secret path within mount |
+
+*Either `VAULT_TOKEN` or (`VAULT_ROLE_ID` + `VAULT_SECRET_ID`) must be set.
+
+#### Application Configuration (non-sensitive)
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
 | `CLIENT_KEYS_FILE` | no | — | Path to JSON array of trusted client Ed25519 pubkeys |
 | `REVOKED_KEYS_FILE` | no | — | Path to JSON array of revoked key_id strings |
+| `MTLS_SERVICES_FILE` | no | — | Path to JSON array of mTLS service entries |
+| `SESSION_BACKEND` | no | `memory` | Session backend: `memory` or `redis` |
+| `SESSION_TTL` | no | `3600` | Session TTL in seconds |
 | `NETWORK` | no | `testnet` | `mainnet`, `testnet`, or `devnet` |
 | `PORT` | no | `3000` | HTTP listen port |
 | `RATE_LIMIT_RPS` | no | `100` | Max requests/second per IP |
+| `NATS_URL` | no | `nats://localhost:4222` | NATS server URL (gateway orchestrator mode) |
 | `CORS_ALLOWED_ORIGINS` | no | (permissive) | Comma-separated origins |
+
+### Secrets Management
+
+The gateway has **built-in HashiCorp Vault integration** as the recommended production default. Secrets are fetched at startup — no plaintext secrets needed in the environment.
+
+#### Development / Local
+
+```bash
+# OK for local dev only — NEVER in production
+export JWT_SECRET=$(openssl rand -hex 32)
+export SERVER_SIGNING_KEY=$(openssl rand -hex 32)
+```
+
+#### Production — HashiCorp Vault (recommended default)
+
+**1. Write secrets to Vault:**
+```bash
+vault kv put secret/mpc-wallet/gateway \
+  jwt_secret=$(openssl rand -hex 32) \
+  server_signing_key=$(openssl rand -hex 32) \
+  session_encryption_key=$(openssl rand -hex 32) \
+  redis_url="rediss://user:pass@redis.internal:6379"
+```
+
+**2. Create AppRole for the gateway:**
+```bash
+# Policy
+vault policy write mpc-gateway - <<EOF
+path "secret/data/mpc-wallet/gateway" {
+  capabilities = ["read"]
+}
+EOF
+
+# AppRole
+vault auth enable approle
+vault write auth/approle/role/mpc-gateway \
+  token_policies="mpc-gateway" \
+  token_ttl=1h \
+  token_max_ttl=4h \
+  secret_id_ttl=720h
+
+# Get credentials for deployment
+vault read auth/approle/role/mpc-gateway/role-id
+vault write -f auth/approle/role/mpc-gateway/secret-id
+```
+
+**3. Deploy with Vault:**
+```bash
+# Minimal production env — no secrets in plaintext
+export SECRETS_BACKEND=vault
+export VAULT_ADDR=https://vault.internal:8200
+export VAULT_ROLE_ID=<from step 2>
+export VAULT_SECRET_ID=<from step 2>
+export NETWORK=mainnet
+export SESSION_BACKEND=redis
+```
+
+Or with Vault token (dev/CI):
+```bash
+export SECRETS_BACKEND=vault
+export VAULT_ADDR=http://127.0.0.1:8200
+export VAULT_TOKEN=hvs.xxxxxxxxxxxxx
+```
+
+**4. Kubernetes deployment:**
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mpc-gateway
+spec:
+  template:
+    spec:
+      containers:
+        - name: gateway
+          env:
+            - name: SECRETS_BACKEND
+              value: "vault"
+            - name: VAULT_ADDR
+              value: "https://vault.internal:8200"
+            - name: VAULT_ROLE_ID
+              valueFrom:
+                secretRef:
+                  name: vault-approle
+                  key: role_id
+            - name: VAULT_SECRET_ID
+              valueFrom:
+                secretRef:
+                  name: vault-approle
+                  key: secret_id
+            - name: NETWORK
+              value: "mainnet"
+            - name: SESSION_BACKEND
+              value: "redis"
+```
+
+**Expected Vault secret structure (KV v2):**
+```
+secret/data/mpc-wallet/gateway:
+  jwt_secret: "a1b2c3d4...64-hex-chars"
+  server_signing_key: "e5f6a7b8...64-hex-chars"
+  session_encryption_key: "c9d0e1f2...64-hex-chars"
+  redis_url: "rediss://user:pass@redis.internal:6379"
+```
+
+#### Alternative: Cloud-Native Secrets Managers
+
+If you don't use Vault, inject secrets via your cloud platform's native tools:
+
+| Platform | Approach |
+|----------|----------|
+| **AWS** | Secrets Manager → ECS task definition `secrets` / EKS CSI driver |
+| **GCP** | Secret Manager → workload identity mount |
+| **Azure** | Key Vault → managed identity injection |
+| **Kubernetes** | External Secrets Operator syncing from any backend → `Secret` → env |
+
+#### KMS/HSM for Key Material (recommended for high-security)
+
+For the highest security level, signing keys should never leave the HSM boundary:
+
+| Secret | KMS/HSM Integration | Status |
+|--------|---------------------|--------|
+| `SERVER_SIGNING_KEY` | AWS KMS `Sign` API (Ed25519) — key never exported | `KmsSigner` trait ready, stub impl |
+| `SESSION_ENCRYPTION_KEY` | AWS KMS `GenerateDataKey` — envelope encryption | `KeyEncryptionProvider` trait ready |
+| `JWT_SECRET` | Secrets Manager with auto-rotation | Use cloud-native rotation |
+
+The gateway supports trait-based signer backends (`AuthSigner`):
+- **`LocalSigner`** — Ed25519 key in memory (current default)
+- **`KmsSigner`** — delegates signing to AWS KMS (key never leaves HSM)
+
+```rust
+// config selects backend at startup
+let signer: Arc<dyn AuthSigner> = match config.signer_backend {
+    SignerBackend::Local => Arc::new(LocalSigner::new(key)),
+    SignerBackend::Kms   => Arc::new(KmsSigner::new(kms_key_id)),
+};
+```
+
+> See `specs/REDIS_KMS_MIGRATION_SPEC.md` for full KMS/HSM migration plan.
+
+#### What NOT to do
+
+- **`export JWT_SECRET=...` in `.bashrc` or `.env` files** — survives in shell history, process listing (`/proc/*/environ`), and crash dumps
+- **Plaintext in config files** (`api-keys.json`, `config.toml`) — readable by any process with file access, often committed to git by accident
+- **Docker `--env` or `docker-compose.yml` environment** — visible in `docker inspect`, stored in image layers
+- **Kubernetes `ConfigMap`** — not encrypted at rest, visible to anyone with namespace read access
+- **Hardcoded in source code** — obvious but still happens
 
 ---
 
@@ -694,24 +689,128 @@ Derive a chain-specific address from a wallet's group public key.
 
 ---
 
-## Error Codes
+## Error Response Format
+
+All errors return a structured JSON response with a machine-readable `code` and human-readable `message`:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "wallet 550e8400 not found"
+  }
+}
+```
+
+### Error Codes
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| `AUTH_FAILED` | 401 | Authentication failed (invalid/expired token, revoked key) |
+| `AUTH_RATE_LIMITED` | 429 | Rate limit exceeded |
+| `PERMISSION_DENIED` | 403 | Insufficient RBAC permissions |
+| `MFA_REQUIRED` | 403 | MFA verification required for this operation |
+| `INVALID_INPUT` | 400 | Invalid request parameters (bad hex, wrong format) |
+| `INVALID_CONFIG` | 400 | Invalid configuration (threshold > parties, etc.) |
+| `NOT_FOUND` | 404 | Resource not found (wallet, session) |
+| `POLICY_DENIED` | 422 | Policy check failed (velocity limit, policy not loaded) |
+| `APPROVAL_REQUIRED` | 422 | Insufficient approval quorum |
+| `SESSION_ERROR` | 400 | Session state error (duplicate, invalid transition) |
+| `KEY_FROZEN` | 422 | Wallet is frozen — signing blocked |
+| `PROTOCOL_ERROR` | 500 | MPC protocol failure |
+| `CRYPTO_ERROR` | 500 | Cryptographic operation failed |
+| `SERIALIZATION_ERROR` | 400 | Encoding/decoding error |
+| `INTERNAL_ERROR` | 500 | Internal server error |
+
+### Error Response Examples
+
+**Authentication failure (401):**
+```json
+{
+  "success": false,
+  "error": {
+    "code": "AUTH_FAILED",
+    "message": "authentication failed"
+  }
+}
+```
+
+**Permission denied (403):**
+```json
+{
+  "success": false,
+  "error": {
+    "code": "PERMISSION_DENIED",
+    "message": "insufficient permissions"
+  }
+}
+```
+
+**Invalid input (400):**
+```json
+{
+  "success": false,
+  "error": {
+    "code": "INVALID_INPUT",
+    "message": "invalid hex message: Invalid character 'z' at position 0"
+  }
+}
+```
+
+**Wallet not found (404):**
+```json
+{
+  "success": false,
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "wallet 550e8400 not found"
+  }
+}
+```
+
+**Wallet frozen (422):**
+```json
+{
+  "success": false,
+  "error": {
+    "code": "KEY_FROZEN",
+    "message": "key group frozen: wallet 550e8400 is frozen"
+  }
+}
+```
+
+**Simulation failed (500):**
+```json
+{
+  "success": false,
+  "error": {
+    "code": "PROTOCOL_ERROR",
+    "message": "simulation failed: policy denied: daily velocity limit exceeded"
+  }
+}
+```
+
+### HTTP Status Codes
 
 | HTTP Status | Meaning |
 |-------------|---------|
 | 200 | Success |
 | 201 | Created (wallet, etc.) |
-| 400 | Bad request (invalid chain, scheme, params) |
-| 401 | Unauthorized (missing/invalid auth) |
-| 403 | Forbidden (wallet frozen, insufficient role) |
-| 404 | Not found (wallet ID doesn't exist) |
-| 422 | Unprocessable (simulation failed) |
-| 429 | Rate limit exceeded |
-| 500 | Internal server error |
+| 400 | Bad request — `INVALID_INPUT`, `INVALID_CONFIG`, `SESSION_ERROR`, `SERIALIZATION_ERROR` |
+| 401 | Unauthorized — `AUTH_FAILED` |
+| 403 | Forbidden — `PERMISSION_DENIED`, `MFA_REQUIRED` |
+| 404 | Not found — `NOT_FOUND` |
+| 422 | Unprocessable — `POLICY_DENIED`, `APPROVAL_REQUIRED`, `KEY_FROZEN`, `CRYPTO_ERROR` (EVM low-S) |
+| 429 | Rate limit exceeded — `AUTH_RATE_LIMITED` |
+| 500 | Internal error — `PROTOCOL_ERROR`, `CRYPTO_ERROR`, `INTERNAL_ERROR` |
+
+> **Security note:** Auth errors always return generic `"authentication failed"` — no details leaked to prevent enumeration.
 
 ---
 
 ## Rate Limits
 
-Default: 100 requests/second per IP.
+Default: 100 requests/second per IP. Handshake: 10 req/sec per `client_key_id`.
 
-Configure via `RATE_LIMIT_RPS` environment variable or per-API-key limits in production.
+Configure via `RATE_LIMIT_RPS` environment variable.

@@ -21,7 +21,11 @@
 
 pub mod client;
 pub mod handshake;
+pub mod kms_signer;
 pub mod mtls;
+pub mod redis_backend;
 pub mod session;
 pub mod session_jwt;
+pub mod session_redis;
+pub mod signer;
 pub mod types;

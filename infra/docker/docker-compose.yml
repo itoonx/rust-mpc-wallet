@@ -1,90 +1,107 @@
-# MPC Wallet — Local 3-node cluster + NATS
-# Usage: docker compose -f infra/docker/docker-compose.yml up -d
+# MPC Wallet — Production Architecture (DEC-015)
+#
+# 3 MPC Nodes (each holds exactly 1 share) + Gateway (orchestrator, ZERO shares)
+# Connected via NATS with SignedEnvelope authentication.
+#
+# Usage:
+#   docker compose -f infra/docker/docker-compose.yml up -d
+#   docker compose -f infra/docker/docker-compose.yml down -v
 
 services:
-  # NATS server for MPC inter-party transport
+  # ── NATS (MPC transport + control channels) ─────────────────────────
   nats:
     image: nats:2.10-alpine
     ports:
-      - "4222:4222"   # client
-      - "8222:8222"   # monitoring
-    command: >
-      -js
-      --http_port 8222
-      --max_payload 1048576
+      - "4222:4222"
+      - "8222:8222"
+    command: ["-js", "-m", "8222"]
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
-      interval: 10s
+      interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
+      start_period: 3s
 
-  # MPC Node 1 (party_id=1)
+  # ── MPC Node 1 (Party 1 — coordinator) ──────────────────────────────
   mpc-node-1:
     build:
       context: ../..
       dockerfile: infra/docker/Dockerfile
+      target: node
     environment:
-      PORT: "3001"
       PARTY_ID: "1"
       NATS_URL: "nats://nats:4222"
-      NETWORK: "testnet"
-      JWT_SECRET: "${JWT_SECRET:-dev-secret-change-in-production}"
-      API_KEYS: "${API_KEYS:-dev-api-key}"
-    ports:
-      - "3001:3001"
+      KEY_STORE_DIR: "/data/keys"
+      KEY_STORE_PASSWORD: "${KEY_STORE_PASSWORD:-dev-password-change-me}"
+      NODE_SIGNING_KEY: "${NODE_1_SIGNING_KEY:-0101010101010101010101010101010101010101010101010101010101010101}"
+      GATEWAY_PUBKEY: "${GATEWAY_PUBKEY:-}"
+      RUST_LOG: "mpc_wallet_node=info"
+    volumes:
+      - node1-keys:/data/keys
     depends_on:
       nats:
         condition: service_healthy
 
-  # MPC Node 2 (party_id=2)
+  # ── MPC Node 2 ──────────────────────────────────────────────────────
   mpc-node-2:
     build:
       context: ../..
       dockerfile: infra/docker/Dockerfile
+      target: node
     environment:
-      PORT: "3002"
       PARTY_ID: "2"
       NATS_URL: "nats://nats:4222"
-      NETWORK: "testnet"
-      JWT_SECRET: "${JWT_SECRET:-dev-secret-change-in-production}"
-      API_KEYS: "${API_KEYS:-dev-api-key}"
-    ports:
-      - "3002:3002"
+      KEY_STORE_DIR: "/data/keys"
+      KEY_STORE_PASSWORD: "${KEY_STORE_PASSWORD:-dev-password-change-me}"
+      NODE_SIGNING_KEY: "${NODE_2_SIGNING_KEY:-0202020202020202020202020202020202020202020202020202020202020202}"
+      GATEWAY_PUBKEY: "${GATEWAY_PUBKEY:-}"
+      RUST_LOG: "mpc_wallet_node=info"
+    volumes:
+      - node2-keys:/data/keys
     depends_on:
       nats:
         condition: service_healthy
 
-  # MPC Node 3 (party_id=3)
+  # ── MPC Node 3 ──────────────────────────────────────────────────────
   mpc-node-3:
     build:
       context: ../..
       dockerfile: infra/docker/Dockerfile
+      target: node
     environment:
-      PORT: "3003"
       PARTY_ID: "3"
       NATS_URL: "nats://nats:4222"
-      NETWORK: "testnet"
-      JWT_SECRET: "${JWT_SECRET:-dev-secret-change-in-production}"
-      API_KEYS: "${API_KEYS:-dev-api-key}"
-    ports:
-      - "3003:3003"
+      KEY_STORE_DIR: "/data/keys"
+      KEY_STORE_PASSWORD: "${KEY_STORE_PASSWORD:-dev-password-change-me}"
+      NODE_SIGNING_KEY: "${NODE_3_SIGNING_KEY:-0303030303030303030303030303030303030303030303030303030303030303}"
+      GATEWAY_PUBKEY: "${GATEWAY_PUBKEY:-}"
+      RUST_LOG: "mpc_wallet_node=info"
+    volumes:
+      - node3-keys:/data/keys
     depends_on:
       nats:
         condition: service_healthy
 
-  # API Gateway (load balancer front-end)
+  # ── API Gateway (orchestrator — ZERO shares) ────────────────────────
   api-gateway:
     build:
       context: ../..
       dockerfile: infra/docker/Dockerfile
-    environment:
-      PORT: "3000"
-      NETWORK: "testnet"
-      JWT_SECRET: "${JWT_SECRET:-dev-secret-change-in-production}"
-      API_KEYS: "${API_KEYS:-dev-api-key}"
+      target: gateway
     ports:
       - "3000:3000"
+    environment:
+      PORT: "3000"
+      NETWORK: "${NETWORK:-testnet}"
+      JWT_SECRET: "${JWT_SECRET:-dev-secret-at-least-32-bytes-long-change-in-production}"
+      NATS_URL: "nats://nats:4222"
+      RUST_LOG: "mpc_wallet_api=info"
     depends_on:
       - mpc-node-1
       - mpc-node-2
       - mpc-node-3
+
+volumes:
+  node1-keys:
+  node2-keys:
+  node3-keys:

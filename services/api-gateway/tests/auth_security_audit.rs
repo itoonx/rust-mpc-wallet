@@ -42,7 +42,7 @@ mod helpers {
     /// Create AppState + Router for integration testing.
     pub async fn test_app() -> (axum::Router, mpc_wallet_api::state::AppState) {
         let config = mpc_wallet_api::config::AppConfig::for_test();
-        let state = mpc_wallet_api::state::AppState::from_config(&config);
+        let state = mpc_wallet_api::state::AppState::from_config(&config).await;
         let router = build_router(state.clone(), &[]);
         (router, state)
     }
@@ -335,7 +335,7 @@ async fn test_dynamic_key_revocation() {
 
 #[tokio::test]
 async fn test_session_store_capacity_limit() {
-    let store = mpc_wallet_api::auth::session::SessionStore::new();
+    let store = mpc_wallet_api::auth::session::SessionStore::in_memory();
     let now = unix_now();
 
     // Fill up to capacity and verify rejection.
@@ -953,7 +953,8 @@ async fn test_refresh_expired_session_fails() {
 async fn test_refresh_valid_session_extends_ttl() {
     let state = mpc_wallet_api::state::AppState::from_config(
         &mpc_wallet_api::config::AppConfig::for_test(),
-    );
+    )
+    .await;
 
     let (session_token, _) = handshake_via_http(&state).await;
 
@@ -1262,7 +1263,7 @@ async fn test_revoked_keys_endpoint_public() {
 async fn test_revoked_key_cannot_handshake() {
     // Create state with a revoked key.
     let config = mpc_wallet_api::config::AppConfig::for_test();
-    let state = mpc_wallet_api::state::AppState::from_config(&config);
+    let state = mpc_wallet_api::state::AppState::from_config(&config).await;
 
     let client_key = gen_ed25519_key();
     let client_key_id = hex::encode(&client_key.verifying_key().to_bytes()[..8]);
@@ -1271,7 +1272,7 @@ async fn test_revoked_key_cannot_handshake() {
     let mut revoked = std::collections::HashSet::new();
     revoked.insert(client_key_id.clone());
     let state_with_revoked = mpc_wallet_api::state::AppState {
-        revoked_keys: std::sync::Arc::new(tokio::sync::RwLock::new(revoked)),
+        revoked_keys: mpc_wallet_api::state::RevocationStore::in_memory_with(revoked),
         ..state
     };
     let router = build_router(state_with_revoked, &[]);
@@ -1295,7 +1296,7 @@ async fn test_session_refresh_revokes_on_key_revocation() {
     // Create a valid session, then simulate key revocation,
     // and verify refresh fails + session is revoked.
     let config = mpc_wallet_api::config::AppConfig::for_test();
-    let state = mpc_wallet_api::state::AppState::from_config(&config);
+    let state = mpc_wallet_api::state::AppState::from_config(&config).await;
 
     let client_key = gen_ed25519_key();
     let client_key_id = hex::encode(&client_key.verifying_key().to_bytes()[..8]);
@@ -1308,7 +1309,7 @@ async fn test_session_refresh_revokes_on_key_revocation() {
     let mut revoked = std::collections::HashSet::new();
     revoked.insert(client_key_id);
     let state_revoked = mpc_wallet_api::state::AppState {
-        revoked_keys: std::sync::Arc::new(tokio::sync::RwLock::new(revoked)),
+        revoked_keys: mpc_wallet_api::state::RevocationStore::in_memory_with(revoked),
         session_store: state.session_store.clone(), // Same session store
         ..state
     };
@@ -1344,7 +1345,7 @@ async fn test_session_refresh_revokes_on_key_revocation() {
 
 #[tokio::test]
 async fn test_session_store_handles_many_sessions() {
-    let store = mpc_wallet_api::auth::session::SessionStore::new();
+    let store = mpc_wallet_api::auth::session::SessionStore::in_memory();
     let now = unix_now();
 
     // Insert 1000 sessions.
@@ -1368,7 +1369,7 @@ async fn test_session_store_handles_many_sessions() {
 
 #[tokio::test]
 async fn test_expired_session_pruning() {
-    let store = mpc_wallet_api::auth::session::SessionStore::new();
+    let store = mpc_wallet_api::auth::session::SessionStore::in_memory();
     let now = unix_now();
 
     // Insert a mix of expired and active sessions.
@@ -1427,7 +1428,7 @@ async fn test_error_messages_are_generic() {
 
         let json = body_json(resp).await;
         assert_eq!(
-            json["error"].as_str().unwrap(),
+            json["error"]["message"].as_str().unwrap(),
             "authentication failed",
             "error message for '{label}' must be generic — no info leak"
         );
@@ -1454,7 +1455,7 @@ async fn test_handshake_errors_are_generic() {
     let resp = app.clone().oneshot(req).await.unwrap();
     let json = body_json(resp).await;
     assert_eq!(
-        json["error"].as_str().unwrap(),
+        json["error"]["message"].as_str().unwrap(),
         "authentication failed",
         "handshake error must not leak specific failure reason"
     );

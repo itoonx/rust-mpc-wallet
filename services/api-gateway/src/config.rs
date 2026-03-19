@@ -1,4 +1,43 @@
 //! Environment configuration for the API gateway.
+//!
+//! Secrets can be loaded from environment variables (dev) or HashiCorp Vault (production).
+//! Set `SECRETS_BACKEND=vault` + `VAULT_ADDR` to use Vault.
+
+/// Backend type for sessions, replay cache, and revocation store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendType {
+    /// In-memory storage (dev/test, single-instance).
+    Memory,
+    /// Redis storage (production, horizontally scalable).
+    Redis,
+}
+
+impl BackendType {
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "redis" => Self::Redis,
+            _ => Self::Memory,
+        }
+    }
+}
+
+/// Secrets backend — where sensitive values come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretsBackend {
+    /// Environment variables (dev/test).
+    Env,
+    /// HashiCorp Vault KV v2 (production).
+    Vault,
+}
+
+impl SecretsBackend {
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "vault" => Self::Vault,
+            _ => Self::Env,
+        }
+    }
+}
 
 /// API gateway configuration loaded from environment variables.
 #[derive(Debug, Clone)]
@@ -27,16 +66,77 @@ pub struct AppConfig {
     pub session_ttl: u64,
     /// mTLS service registry file (JSON array of MtlsServiceEntry).
     pub mtls_services_file: Option<String>,
+    /// Session/cache backend type.
+    pub session_backend: BackendType,
+    /// Redis URL (required when session_backend = "redis").
+    /// Supports `redis://` and `rediss://` (TLS).
+    pub redis_url: Option<String>,
+    /// Session encryption key (hex-encoded 32 bytes). Required for Redis backend.
+    pub session_encryption_key: Option<String>,
 }
 
 impl AppConfig {
     /// Load configuration from environment variables.
+    /// If `SECRETS_BACKEND=vault`, secrets are fetched from HashiCorp Vault first.
     ///
     /// # Panics
-    /// Panics if `JWT_SECRET` is not set or < 32 bytes.
+    /// Panics if `JWT_SECRET` is not set (either via env or Vault) or < 32 bytes.
     pub fn from_env() -> Self {
-        let jwt_secret =
-            std::env::var("JWT_SECRET").expect("JWT_SECRET environment variable must be set");
+        Self::from_env_sync(None)
+    }
+
+    /// Async version that loads secrets from Vault if configured.
+    pub async fn from_env_with_vault() -> Self {
+        let secrets_backend = SecretsBackend::parse(
+            &std::env::var("SECRETS_BACKEND").unwrap_or_else(|_| "env".into()),
+        );
+
+        let vault_secrets = if secrets_backend == SecretsBackend::Vault {
+            let vault_config = crate::vault::VaultConfig::from_env()
+                .expect("SECRETS_BACKEND=vault but VAULT_ADDR not set");
+            tracing::info!(
+                addr = %vault_config.addr,
+                mount = %vault_config.mount,
+                path = %vault_config.secrets_path,
+                "loading secrets from HashiCorp Vault"
+            );
+            let client = crate::vault::VaultClient::new(vault_config);
+            let secrets = client
+                .read_secrets()
+                .await
+                .expect("failed to read secrets from Vault");
+            tracing::info!("secrets loaded from Vault successfully");
+            Some(secrets)
+        } else {
+            None
+        };
+
+        Self::from_env_sync(vault_secrets)
+    }
+
+    /// Internal: build config, optionally overlaying Vault secrets.
+    fn from_env_sync(vault_secrets: Option<crate::vault::VaultSecrets>) -> Self {
+        // Vault secrets take precedence over env vars for sensitive fields.
+        let jwt_secret = vault_secrets
+            .as_ref()
+            .and_then(|v| v.jwt_secret.clone())
+            .or_else(|| std::env::var("JWT_SECRET").ok())
+            .expect("JWT_SECRET must be set (via Vault or JWT_SECRET env var)");
+
+        let server_signing_key = vault_secrets
+            .as_ref()
+            .and_then(|v| v.server_signing_key.clone())
+            .or_else(|| std::env::var("SERVER_SIGNING_KEY").ok());
+
+        let session_encryption_key = vault_secrets
+            .as_ref()
+            .and_then(|v| v.session_encryption_key.clone())
+            .or_else(|| std::env::var("SESSION_ENCRYPTION_KEY").ok());
+
+        let redis_url = vault_secrets
+            .as_ref()
+            .and_then(|v| v.redis_url.clone())
+            .or_else(|| std::env::var("REDIS_URL").ok());
 
         let config = Self {
             port: std::env::var("PORT")
@@ -59,7 +159,7 @@ impl AppConfig {
                 .filter(|s| !s.is_empty())
                 .map(String::from)
                 .collect(),
-            server_signing_key: std::env::var("SERVER_SIGNING_KEY").ok(),
+            server_signing_key,
             client_keys_file: std::env::var("CLIENT_KEYS_FILE").ok(),
             revoked_keys_file: std::env::var("REVOKED_KEYS_FILE").ok(),
             session_ttl: std::env::var("SESSION_TTL")
@@ -67,6 +167,11 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3600),
             mtls_services_file: std::env::var("MTLS_SERVICES_FILE").ok(),
+            session_backend: BackendType::parse(
+                &std::env::var("SESSION_BACKEND").unwrap_or_else(|_| "memory".into()),
+            ),
+            redis_url,
+            session_encryption_key,
         };
         config.validate();
         config
@@ -89,6 +194,17 @@ impl AppConfig {
             "SESSION_TTL must be at least 60 seconds (got {})",
             self.session_ttl
         );
+        // Redis backend requires URL and encryption key.
+        if self.session_backend == BackendType::Redis {
+            assert!(
+                self.redis_url.is_some(),
+                "REDIS_URL is required when SESSION_BACKEND=redis"
+            );
+            assert!(
+                self.session_encryption_key.is_some(),
+                "SESSION_ENCRYPTION_KEY is required when SESSION_BACKEND=redis (hex-encoded 32 bytes)"
+            );
+        }
         // Mainnet safety: require explicit keys, no auto-generation.
         if self.network == "mainnet" {
             assert!(
@@ -118,6 +234,9 @@ impl AppConfig {
             revoked_keys_file: None,
             session_ttl: 3600,
             mtls_services_file: None,
+            session_backend: BackendType::Memory,
+            redis_url: None,
+            session_encryption_key: None,
         }
     }
 }

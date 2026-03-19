@@ -587,3 +587,67 @@ Structured sprint into waves:
 > additions, shared file modifications) and run them as Wave 1. Only start Wave 2 after
 > Wave 1 is merged. Wave 2 tasks can then run fully parallel with no dep issues.
 > Rule: **Wave 1 = orchestrator/R0 prep. Wave 2 = implementation agents.**
+
+---
+
+## L-008: NatsTransport::recv() Re-subscribes Per Call — Message Loss
+
+**Date:** 2026-03-18
+**Category:** Bug
+**Severity:** HIGH
+
+**What happened:**
+E2E tests for MPC keygen via NATS hung indefinitely. Multi-round protocol messages were being lost — parties would send messages but recipients never received them.
+
+**Root cause:**
+`NatsTransport::recv()` called `client.subscribe(subject)` on every invocation, creating a **new NATS subscription each time**. NATS only delivers messages to active subscriptions — if Party A publishes before Party B subscribes, the message is lost forever. For multi-round protocols (keygen has 2+ rounds), this is always broken.
+
+**Fix / Resolution:**
+Changed to **eager subscription** in `connect_signed()` — the subscription is created immediately at connect time and stored in `tokio::sync::Mutex<Option<Subscriber>>`. `recv()` reuses the persistent subscription. Messages published between `recv()` calls are buffered by NATS and delivered on the next `recv()`.
+
+**Takeaway:**
+> NATS pub/sub is fire-and-forget — if no one is subscribed when you publish, the message is gone.
+> Any transport that wraps pub/sub must **subscribe before any messages can arrive**, not lazily on first read.
+> E2E tests are the only way to catch this — unit tests with `LocalTransport` use in-memory channels that buffer automatically.
+
+---
+
+## L-009: GG20 Signing Requires Coordinator (Party 1) in Signer Subset
+
+**Date:** 2026-03-18
+**Category:** Architecture
+**Severity:** MEDIUM
+
+**What happened:**
+Signature verification test `test_ecdsa_different_subsets_all_verify` hung when trying to sign with subset {2,3} (without Party 1). The test worked fine with {1,2} and {1,3}.
+
+**Root cause:**
+GG20 distributed ECDSA implementation designates Party 1 as the coordinator. The coordinator draws the ephemeral nonce, broadcasts `(r, k_inv)`, and assembles the final signature from partial contributions. Without the coordinator, the protocol deadlocks waiting for coordinator messages that never arrive.
+
+**Fix / Resolution:**
+Documented the limitation. Tests only use subsets that include Party 1. Future: make coordinator selection dynamic (any party in the signer set can coordinate).
+
+**Takeaway:**
+> Always test multiple signer subsets including the edge case where the lowest-ID party is NOT included.
+> Coordinator selection should be documented as part of the protocol specification, not left implicit.
+
+---
+
+## L-010: E2E Test Ordering Matters with Shared Infrastructure
+
+**Date:** 2026-03-18
+**Category:** Testing
+**Severity:** LOW
+
+**What happened:**
+NATS keygen E2E test passed when run in isolation but hung when run sequentially after `test_nats_session_isolation` (which uses a 2-second timeout). Running with `--test-threads=1` made this deterministic.
+
+**Root cause:**
+The session isolation test creates subscriptions that timeout after 2 seconds. The leftover subscription state (or NATS internal buffering) from the timeout interferes with the next test's fresh subscriptions on the same NATS server.
+
+**Fix / Resolution:**
+Each test uses `unique_session_id()` (UUID) for NATS subject isolation. Tests that can't coexist are separated or run with `--test-threads` > 1 to avoid sequential interference.
+
+**Takeaway:**
+> E2E tests sharing live infrastructure must use unique namespaces (session IDs, Redis key prefixes, Vault paths) to prevent cross-test pollution.
+> `--test-threads=1` reveals ordering bugs that `--test-threads=N` hides via parallelism.

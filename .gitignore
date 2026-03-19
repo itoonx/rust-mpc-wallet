@@ -2,3 +2,7 @@
 .DS_Store
 *.enc
 .claude/worktrees/
+
+# Local infra secrets (never commit)
+infra/local/.env
+infra/docker/docker-compose.local.yml

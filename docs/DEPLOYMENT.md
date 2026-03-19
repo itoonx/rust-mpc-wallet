@@ -25,7 +25,6 @@ cd mpc-wallet
 
 # 2. Set environment variables
 export JWT_SECRET="your-secret-at-least-32-bytes-long"
-export API_KEYS="dev-api-key-1,dev-api-key-2"
 
 # 3. Start the cluster
 docker compose -f infra/docker/docker-compose.yml up -d
@@ -66,7 +65,6 @@ kubectl create namespace mpc-wallet
 kubectl create secret generic mpc-secrets \
   --namespace mpc-wallet \
   --from-literal=jwt_secret="$JWT_SECRET" \
-  --from-literal=api_keys="$API_KEYS" \
   --from-literal=encryption_password="$ENCRYPTION_PASSWORD"
 ```
 
@@ -151,6 +149,48 @@ kubectl apply -f infra/k8s/
 
 ---
 
+## MPC Node Deployment
+
+Each MPC node runs as a separate process/container. Deploy N nodes for an N-party threshold scheme.
+
+```yaml
+# Docker Compose (production)
+# See: infra/docker/docker-compose.yml
+
+# Per-node environment:
+PARTY_ID=1                    # This node's party ID (1-indexed)
+NATS_URL=nats://nats:4222     # NATS server
+KEY_STORE_DIR=/data/keys       # Encrypted key share storage
+KEY_STORE_PASSWORD=<from-vault> # Key store encryption password
+NODE_SIGNING_KEY=<hex-32-bytes> # Ed25519 key for NATS envelope auth
+GATEWAY_PUBKEY=<hex-32-bytes>   # Gateway's Ed25519 pubkey (for SignAuthorization)
+```
+
+**Key points:**
+- Each node stores only its own key share — no single node holds the full key.
+- `NODE_SIGNING_KEY` is used for Ed25519 signed envelopes on NATS transport (SEC-007).
+- `GATEWAY_PUBKEY` enables independent verification of `SignAuthorization` proofs (DEC-012).
+- Nodes should be deployed across separate failure domains (availability zones / clouds) for resilience.
+
+---
+
+## Secrets Management (HashiCorp Vault)
+
+Set `SECRETS_BACKEND=vault` on the gateway to load secrets from Vault at startup.
+See `docs/API_REFERENCE.md#secrets-management` for full configuration.
+
+```bash
+# Minimal production gateway — no plaintext secrets
+export SECRETS_BACKEND=vault
+export VAULT_ADDR=https://vault.internal:8200
+export VAULT_ROLE_ID=<role-id>
+export VAULT_SECRET_ID=<secret-id>
+```
+
+For MPC nodes, inject `KEY_STORE_PASSWORD` and `NODE_SIGNING_KEY` via Vault or your cloud's native secrets manager.
+
+---
+
 ## Configuration Reference
 
 | Environment Variable | Description | Default |
@@ -158,7 +198,6 @@ kubectl apply -f infra/k8s/
 | `PORT` | HTTP listen port | `3000` |
 | `NETWORK` | Chain network: mainnet, testnet, devnet | `testnet` |
 | `JWT_SECRET` | HMAC secret for JWT validation | (required in prod) |
-| `API_KEYS` | Comma-separated API keys | (empty) |
 | `NATS_URL` | NATS server URL | `nats://localhost:4222` |
 | `PARTY_ID` | MPC party identifier | (auto from hostname) |
 | `RATE_LIMIT_RPS` | Max requests/second per IP | `100` |
@@ -171,7 +210,6 @@ kubectl apply -f infra/k8s/
 Before going to production:
 
 - [ ] Change `JWT_SECRET` from default to a strong random value (32+ bytes)
-- [ ] Set `API_KEYS` to known, rotatable service keys
 - [ ] Enable TLS via ingress (cert-manager + Let's Encrypt)
 - [ ] Use sealed-secrets or external secrets operator for K8s secrets
 - [ ] Enable KMS envelope encryption for key shares (AWS KMS / GCP Cloud KMS / Azure Key Vault)

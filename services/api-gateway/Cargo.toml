@@ -17,6 +17,9 @@ path = "src/main.rs"
 mpc-wallet-core = { path = "../../crates/mpc-wallet-core" }
 mpc-wallet-chains = { path = "../../crates/mpc-wallet-chains" }
 
+# Async
+async-trait = { workspace = true }
+
 # Web framework
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace"] }
@@ -32,18 +35,27 @@ tokio = { workspace = true }
 # Auth
 jsonwebtoken = { workspace = true }
 
-# Crypto — key exchange, signatures
+# Distributed storage
+redis = { workspace = true }
+async-nats = { workspace = true }
+futures = { workspace = true }
+
+# Crypto — key exchange, signatures, AEAD
 sha2 = { workspace = true }
 ed25519-dalek = { workspace = true }
 x25519-dalek = { workspace = true }
 hkdf = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
+chacha20poly1305 = { workspace = true }
 
 # Observability
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 prometheus = "0.13"
+
+# Secrets management
+reqwest = { workspace = true }
 
 # Utilities
 uuid = { workspace = true }

@@ -44,10 +44,11 @@ Vaultex is a **Rust workspace** for building enterprise-grade **threshold multi-
 
 **Why Vaultex?**
 
-- **Zero single point of failure** — compromise 1 server, attacker gets nothing
+- **Zero single point of failure** — gateway holds 0 shares, each node holds exactly 1. Compromise any single server = attacker gets nothing usable
 - **Multi-chain** — 50 blockchains across 8 ecosystems: EVM, Bitcoin, Substrate, Move, Cosmos, UTXO, TON/TRON, Starknet
-- **Enterprise controls** — RBAC, policy engine, approval workflows, audit trail
+- **Enterprise controls** — RBAC, ABAC, MFA, policy engine, approval workflows, audit trail
 - **Proactive security** — key refresh rotates shares without changing addresses
+- **Production-ready infra** — HashiCorp Vault secrets, Redis sessions, NATS transport, Docker + K8s deployment
 
 ---
 
@@ -75,8 +76,17 @@ Vaultex is a **Rust workspace** for building enterprise-grade **threshold multi-
 git clone https://github.com/itoonx/vaultex-mpc-rust.git
 cd vaultex-mpc-rust
 
-cargo test --workspace     # 325 tests, ~4 seconds
-./scripts/demo.sh          # interactive end-to-end demo
+# Run unit + integration tests (no infra needed)
+cargo test --workspace              # 507 tests, ~4 seconds
+
+# Start full production stack locally (Vault + Redis + NATS + 3 MPC nodes + gateway)
+./scripts/local-infra.sh up         # 1-shot: builds, provisions, starts everything
+
+# Run E2E tests against live infra
+./scripts/local-infra.sh test       # distributed keygen + sign via NATS
+
+# Interactive CLI demo (single-process, no infra needed)
+./scripts/demo.sh
 ```
 
 ---
@@ -94,6 +104,7 @@ cargo test --workspace     # 325 tests, ~4 seconds
 | **Enterprise** | RBAC, ABAC, MFA, policy engine, approval workflows, audit ledger |
 | **Simulation** | Pre-sign risk scoring for all chains |
 | **Operations** | Multi-cloud constraints, RPC failover, chaos framework, DR |
+| **MPC Nodes** | Distributed architecture — each node holds 1 share, gateway orchestrates |
 
 ---
 
@@ -324,8 +335,163 @@ A typical enterprise deployment uses all three methods simultaneously:
 | **Sign authorization** | MPC nodes independently verify gateway proof before signing |
 | **Audit trail** | Encrypted request context (ChaCha20-Poly1305) + millisecond timeline |
 | **Mainnet safety** | `SERVER_SIGNING_KEY` + `CLIENT_KEYS_FILE` required on mainnet |
+| **Secrets management** | KMS/HSM recommended — `KmsSigner` + `KeyEncryptionProvider` traits ready |
+
+> **Production:** Never store secrets (`JWT_SECRET`, `SERVER_SIGNING_KEY`, `SESSION_ENCRYPTION_KEY`) as plaintext env vars or config files. Use AWS Secrets Manager, GCP Secret Manager, HashiCorp Vault, or Kubernetes External Secrets. For highest security, use KMS/HSM so signing keys never leave the hardware boundary — see [`docs/API_REFERENCE.md#secrets-management`](docs/API_REFERENCE.md#secrets-management).
 
 > Full API reference: [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | Protocol spec: [`specs/AUTH_SPEC.md`](specs/AUTH_SPEC.md)
+
+### Error Responses
+
+All API errors return structured JSON with a machine-readable `code` for programmatic handling:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "NOT_FOUND",
+    "message": "wallet 550e8400 not found"
+  }
+}
+```
+
+| Code | HTTP | When |
+|------|------|------|
+| `AUTH_FAILED` | 401 | Invalid/expired token, revoked key |
+| `AUTH_RATE_LIMITED` | 429 | Rate limit exceeded |
+| `PERMISSION_DENIED` | 403 | Insufficient RBAC role |
+| `MFA_REQUIRED` | 403 | Admin+MFA operation without MFA |
+| `INVALID_INPUT` | 400 | Bad request params (hex, format) |
+| `NOT_FOUND` | 404 | Wallet/resource not found |
+| `KEY_FROZEN` | 422 | Wallet frozen, signing blocked |
+| `POLICY_DENIED` | 422 | Policy check failed |
+| `INTERNAL_ERROR` | 500 | Server error |
+
+> Full error code reference: [`docs/API_REFERENCE.md#error-codes`](docs/API_REFERENCE.md#error-codes)
+
+### MPC Node Architecture (Production — DEC-015)
+
+In production, the gateway holds **zero key shares**. Each MPC node is a standalone process that holds exactly 1 share, stored in an encrypted file store (AES-256-GCM + Argon2id). All coordination happens via NATS.
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                         Production Deployment                          │
+│                                                                        │
+│   ┌─────────────┐        ┌──────────┐        ┌──────────┐            │
+│   │  Clients     │ ──────│   API     │ ──────│  Vault    │            │
+│   │ (SDK/Web/App)│  HTTPS │ Gateway  │ Vault  │ (Secrets) │            │
+│   └─────────────┘        │ (0 shares│        └──────────┘            │
+│                           │  RBAC +  │                                 │
+│                           │  Policy) │        ┌──────────┐            │
+│                           └────┬─────┘ ──────│  Redis    │            │
+│                                │       Redis  │ (Sessions)│            │
+│                     NATS Control Channels      └──────────┘            │
+│                    ┌───────────┼───────────┐                           │
+│                    │           │           │                            │
+│              ┌─────▼────┐ ┌───▼─────┐ ┌───▼─────┐                    │
+│              │  MPC      │ │  MPC    │ │  MPC    │                    │
+│              │  Node 1   │ │  Node 2 │ │  Node 3 │                    │
+│              │           │ │         │ │         │                    │
+│              │ share s₁  │ │ share s₂│ │ share s₃│  ← encrypted     │
+│              │ KeyStore  │ │ KeyStore│ │ KeyStore│    on disk        │
+│              │ (AES-GCM) │ │ (AES)  │ │ (AES)  │                    │
+│              └─────┬─────┘ └───┬─────┘ └───┬─────┘                    │
+│                    │           │           │                            │
+│                    └───────────┼───────────┘                           │
+│                     NATS Protocol Channels                             │
+│                      (SignedEnvelope + seq_no)                         │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**Security guarantees:**
+- No single process can reconstruct the private key
+- Attacker must compromise ≥ threshold nodes simultaneously
+- Gateway compromise = 0 shares leaked (only metadata)
+- Each node verifies `SignAuthorization` before signing (DEC-012)
+
+**NATS channels:**
+
+| Channel | Purpose |
+|---------|---------|
+| `mpc.control.keygen.{group_id}` | Gateway → nodes: initiate keygen ceremony |
+| `mpc.control.sign.{group_id}` | Gateway → nodes: sign request + SignAuthorization proof |
+| `mpc.control.freeze.{group_id}` | Gateway → nodes: freeze/unfreeze key group |
+| `mpc.{session_id}.party.{party_id}` | Node ↔ node: MPC protocol messages (SignedEnvelope) |
+
+**Sign flow (DEC-012):**
+
+```
+1. Client → Gateway:  POST /v1/wallets/:id/sign { message: "0xdead..." }
+2. Gateway:           Auth (mTLS/JWT) → RBAC check → Policy check → Approvals
+3. Gateway:           Create SignAuthorization (Ed25519 signed proof)
+4. Gateway → NATS:    Publish SignRequest + SignAuthorization to signer nodes
+5. Each Node:         Verify SignAuthorization → Load share from KeyStore
+6. Nodes ↔ Nodes:     MPC sign protocol via NATS (SignedEnvelope + seq_no)
+7. Coordinator:       Assemble final signature → Reply to gateway
+8. Gateway → Client:  Return { signature: { r, s, recovery_id } }
+```
+
+### Secrets Management (HashiCorp Vault)
+
+Production secrets are loaded from **HashiCorp Vault** at gateway startup. No plaintext secrets in environment variables or config files.
+
+```bash
+# Production: secrets from Vault (recommended)
+export SECRETS_BACKEND=vault
+export VAULT_ADDR=https://vault.internal:8200
+export VAULT_ROLE_ID=<approle-role-id>
+export VAULT_SECRET_ID=<approle-secret-id>
+
+# Development: plaintext env vars (NEVER in production)
+export JWT_SECRET=$(openssl rand -hex 32)
+```
+
+Vault stores: `jwt_secret`, `server_signing_key`, `session_encryption_key`, `redis_url`
+
+Supports: Vault Token auth (dev/CI) and AppRole auth (production).
+
+> Full Vault configuration: [`docs/API_REFERENCE.md#secrets-management`](docs/API_REFERENCE.md#secrets-management)
+
+### Infrastructure & Deployment
+
+**Local development (1 command):**
+```bash
+./scripts/local-infra.sh up    # Vault + Redis + NATS + 3 MPC nodes + gateway
+./scripts/local-infra.sh test  # Run E2E tests
+./scripts/local-infra.sh down  # Tear down everything
+```
+
+**Docker (production):**
+```bash
+docker compose -f infra/docker/docker-compose.yml up -d
+# Starts: NATS + 3 MPC nodes (separate containers) + gateway
+# Each node has its own persistent volume for encrypted key shares
+```
+
+**Kubernetes:**
+- StatefulSet for MPC nodes (stable DNS: `mpc-node-0.mpc-node.svc`)
+- Deployment for gateway
+- NATS cluster via Helm chart
+- Secrets via External Secrets Operator → Vault
+- See `infra/k8s/` for manifests
+
+### Testing
+
+| Layer | Tests | What it proves |
+|-------|-------|---------------|
+| **Unit** (507) | `cargo test --workspace` | Protocol correctness, chain providers, auth, policy |
+| **Signature Verification** (14) | All 50 chains | MPC signature verifies cryptographically per chain |
+| **E2E — Gateway** (7) | Vault secrets, Redis sessions, auth, chain endpoints | Infrastructure integration |
+| **E2E — Distributed** (2) | 3 nodes keygen + 2 nodes sign via NATS | **True MPC: each node holds 1 share, gateway holds 0** |
+| **E2E — NATS** (6) | Transport connectivity, message round-trip, protocol | NATS SignedEnvelope + session isolation |
+| **Benchmarks** (~35) | `cargo bench --workspace` | Performance baselines for all operations |
+
+```bash
+cargo test --workspace                           # 507 unit tests (~4s)
+cargo test --test signature_verification         # 14 sig verification tests
+./scripts/local-infra.sh test                    # E2E with live infra
+cargo bench --workspace                          # Performance benchmarks
+```
 
 ---
 
@@ -448,15 +614,24 @@ A typical enterprise deployment uses all three methods simultaneously:
 
 ## Performance
 
-| Operation | Latency | Config |
-|-----------|---------|--------|
-| GG20 Keygen | **44 µs** | 2-of-3, local transport |
-| GG20 Sign | **188 µs** | 2 signers |
-| ChaCha20 Encrypt 1KB | **4 µs** | per-message |
-| AES-256-GCM 1KB | **5 µs** | key store |
-| Argon2id Derive | **72 ms** | 64MiB (intentional) |
+| Category | Operation | Latency | Config |
+|----------|-----------|---------|--------|
+| **Protocol** | GG20 Keygen | **44 µs** | 2-of-3, local transport |
+| | GG20 Sign | **188 µs** | 2 signers |
+| | FROST Ed25519 Keygen | **~50 µs** | 2-of-3 |
+| **Auth** | Ed25519 Sign | **~9 µs** | handshake transcript |
+| | X25519 ECDH | **< 1 µs** | key exchange |
+| | SignAuthorization create+verify | **~20 µs** | Ed25519 sign + verify |
+| **Chain** | EVM Address Derivation | **~4 µs** | Keccak256 + checksum |
+| | Solana Address (Base58) | **~2 µs** | Ed25519 pubkey |
+| **Crypto** | ChaCha20-Poly1305 1KB | **~4 µs** | per-message encryption |
+| | AES-256-GCM 1KB | **~5 µs** | key store encryption |
+| | Argon2id Derive | **72 ms** | 64MiB memory-hard (intentional) |
 
-Run benchmarks: `cargo bench -p mpc-wallet-core --bench mpc_benchmarks`
+```bash
+cargo bench -p mpc-wallet-core --bench mpc_benchmarks   # Protocol + auth + crypto
+cargo bench -p mpc-wallet-chains --bench chain_benchmarks # Chain operations
+```
 
 ---
 
@@ -464,14 +639,23 @@ Run benchmarks: `cargo bench -p mpc-wallet-core --bench mpc_benchmarks`
 
 ```
 crates/
-  mpc-wallet-core/     ← MPC protocols, transport, key store, policy, identity
-  mpc-wallet-chains/   ← Chain adapters: 50 chains across 8 ecosystems
-  mpc-wallet-cli/      ← CLI binary
+  mpc-wallet-core/     ← MPC protocols, transport, key store, policy, identity, RPC messages
+  mpc-wallet-chains/   ← Chain providers: 50 chains across 8 ecosystems
+  mpc-wallet-cli/      ← CLI binary (keygen, sign, simulate, audit-verify)
 services/
-  api-gateway/         ← REST API server, auth (key exchange + JWT + mTLS), RBAC
+  api-gateway/         ← REST API server, auth, MpcOrchestrator (ZERO shares)
+  mpc-node/            ← Standalone MPC node (1 party, 1 share, NATS + EncryptedFileStore)
+infra/
+  docker/              ← Dockerfile (multi-target: gateway + node), docker-compose.yml
+  local/               ← Local dev .env + docker-compose (Vault + Redis + NATS)
+  k8s/                 ← Kubernetes manifests (StatefulSet, Ingress, Secrets)
+  terraform/           ← Multi-cloud provisioning (AWS, GCP, Azure)
+scripts/
+  local-infra.sh       ← 1-shot: Vault + Redis + NATS + 3 nodes + gateway
+  demo.sh              ← Interactive CLI demo (single-process, no infra)
 specs/                 ← AUTH_SPEC.md, SIGN_AUTHORIZATION_SPEC.md
-retro/                 ← Decision records, lessons learned, security audits
-docs/                  ← Architecture, security, CLI guide, API reference
+retro/                 ← Decision records (DEC-001..015), lessons, security audits
+docs/                  ← Architecture, API reference, CLI guide, deployment
 ```
 
 ---
@@ -479,9 +663,10 @@ docs/                  ← Architecture, security, CLI guide, API reference
 ## Metrics
 
 ```
-  Chains:    50          Tests:     ~450 pass
-  Protocols: 6           CI:        fmt + clippy + test + audit
-  Sprints:   20          Findings:  0 CRITICAL | 0 HIGH open
+  Chains:    50          Tests:     507 + 15 E2E
+  Protocols: 6           CI:        fmt + clippy + test + audit + E2E
+  Sprints:   15          Findings:  0 CRITICAL | 0 HIGH open
+  Decisions: 15          Benchmarks: ~35
 ```
 
 ---

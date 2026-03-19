@@ -19,7 +19,8 @@ crates/
   mpc-wallet-chains/  ← Chain providers: EVM, Bitcoin, Solana, Sui
   mpc-wallet-cli/     ← CLI binary (demo only)
 services/
-  api-gateway/        ← REST API server, auth middleware, route handlers
+  api-gateway/        ← REST API server, auth middleware, MpcOrchestrator
+  mpc-node/           ← Standalone MPC node (1 party, 1 share, NATS + KeyStore)
 docs/
   AGENTS.md           ← Agent roles, ownership, instructions (READ THIS NEXT)
   SPRINT.md           ← Current sprint tasks + Gate Status table
@@ -94,49 +95,87 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 14 — all epics complete, CI green)
+## Current State (as of Sprint 15 — production readiness, CI green)
 
-### Auth System (key-exchange handshake)
+### Auth System (3 methods, Redis-ready)
 
-Three auth methods — middleware checks in order: `X-Session-Token` → `X-API-Key` → `Authorization: Bearer`.
-If a header is **present** but invalid, auth fails immediately — no fall-through to the next method.
+Three auth methods — priority: **mTLS → Session JWT → Bearer JWT**.
+If a header is **present** but invalid, auth fails immediately — no fall-through.
 
-**Key-exchange handshake** (primary method for SDK clients):
-- `POST /v1/auth/hello` — ClientHello (X25519 ephemeral key + Ed25519 key ID), rate-limited (10 req/sec per key_id)
-- `POST /v1/auth/verify` — ClientAuth (Ed25519 signature over transcript) → returns session token
-- `POST /v1/auth/refresh-session` — extend session TTL
-- `GET /v1/auth/revoked-keys` — key revocation list
-- `POST /v1/auth/revoke-key` — dynamic key revocation (admin)
+```
+mTLS          = Machine → Machine   (TLS cert identity, service-to-service)
+Session JWT   = App → Server        (HS256 signed with key-exchange derived key)
+Bearer JWT    = Human → System      (RS256/ES256 from IdP like Auth0/Okta)
+```
 
-Properties: mutual auth, forward secrecy (per-session X25519 ECDH), ChaCha20-Poly1305 AEAD, HKDF-SHA256 KDF.
+**Endpoints:**
+- `POST /v1/auth/hello` — ClientHello (X25519 + Ed25519), rate-limited 10 req/sec
+- `POST /v1/auth/verify` — ClientAuth → session token
+- `POST /v1/auth/refresh-session` — extend TTL (configurable via SESSION_TTL)
+- `GET /v1/auth/revoked-keys` — revocation list
+- `POST /v1/auth/revoke-key` — dynamic revocation (admin-only, behind auth)
 
 **Architecture (`services/api-gateway/`):**
 ```
 src/
-  lib.rs              ← Library crate (public modules, build_router())
-  main.rs             ← Binary entry point (uses lib, starts prune task)
+  lib.rs              ← Library crate (build_router())
+  main.rs             ← Binary (loads config, connects Redis if configured)
   auth/
-    types.rs          ← Message types, AuthenticatedSession (Zeroize+ZeroizeOnDrop), transcript hashing
-    handshake.rs      ← Server-side handshake state machine
+    types.rs          ← AuthenticatedSession (Zeroize+ZeroizeOnDrop), transcript hashing
+    handshake.rs      ← Server-side handshake state machine (session_ttl param)
     client.rs         ← Client SDK (HandshakeClient)
-    session.rs        ← SessionStore (100k cap, lazy prune, background prune every 60s)
-  routes/
-    auth.rs           ← Handshake endpoints + dynamic revoke-key
+    session.rs        ← SessionBackend trait + InMemoryBackend + SessionStore facade
+    session_redis.rs  ← RedisSessionBackend (encrypted keys, ChaCha20-Poly1305)
+    session_jwt.rs    ← Session JWT: create/extract_session_id/verify_with_key
+    redis_backend.rs  ← RealRedisClient + RedisReplayBackend + RedisRevocationBackend
+    mtls.rs           ← MtlsServiceRegistry + MtlsIdentity (cert-based auth)
+    signer.rs         ← AuthSigner trait + LocalSigner (Ed25519)
+    kms_signer.rs     ← KmsSigner stub (AWS KMS placeholder)
+  routes/auth.rs      ← Handshake + revoke-key endpoints
   middleware/
-    auth.rs           ← 3-method auth middleware (presence-based, no fall-through)
-    hmac.rs           ← HMAC request signing for POST mutations
+    auth.rs           ← 3-method middleware (mTLS → Session JWT → Bearer JWT)
     rate_limit.rs     ← Token-bucket rate limiter (per-key)
-  state.rs            ← AppState, API key HMAC hashing, RwLock revoked keys, client registry
-  config.rs           ← AppConfig, env loading, for_test()
+  state.rs            ← AppState, ReplayCacheBackend trait, RevocationBackend trait
+  config.rs           ← BackendType enum (Memory|Redis), env loading
 tests/
-  auth_security_audit.rs ← 57 security-focused integration tests
+  auth_security_audit.rs ← 46 security integration tests
 ```
 
-**Security audit (2026-03-17):** 57 attack tests, report at `docs/SECURITY_AUDIT_AUTH.md`.
-All HIGH/MEDIUM findings resolved: rate limiting wired, session store capped + pruned, dynamic revocation added, non-UTF8 fall-through fixed, session keys zeroized on drop.
-Remaining LOW/INFO: HMAC 30s replay window (accepted), all-zeros X25519 key (accepted), hardcoded session TTL, 422 vs 401 on downgrade.
+**Redis integration (SESSION_BACKEND=redis):**
+- Sessions: encrypted with ChaCha20-Poly1305 (KEK from SESSION_ENCRYPTION_KEY) before Redis storage
+- Replay cache: Redis SET NX EX (atomic, TTL-based)
+- Revoked keys: Redis SET (SADD/SISMEMBER)
+- All backends are trait-based: `SessionBackend`, `ReplayCacheBackend`, `RevocationBackend`
+- SCAN used instead of KEYS (non-blocking)
 
-Full spec: `specs/AUTH_SPEC.md` (28 sections, 1,067 lines)
+**KMS/HSM readiness:**
+- `AuthSigner` trait: `LocalSigner` (current) or `KmsSigner` (AWS KMS stub)
+- `KeyEncryptionProvider` trait: `LocalKeyEncryption` or future HSM backend
+- See `specs/REDIS_KMS_MIGRATION_SPEC.md`
+
+Full spec: `specs/AUTH_SPEC.md` (28 sections) | Migration: `specs/REDIS_KMS_MIGRATION_SPEC.md`
+
+### MPC Node Architecture (DEC-015 — Sprint 15)
+
+Production architecture: Gateway holds ZERO key shares. Each MPC node holds exactly 1 share.
+
+```
+Gateway (orchestrator — MpcOrchestrator, NO shares)
+    │ NATS control channels
+    ├── MPC Node 1 (share 1, EncryptedFileStore)
+    ├── MPC Node 2 (share 2, EncryptedFileStore)
+    └── MPC Node 3 (share 3, EncryptedFileStore)
+```
+
+**Crates:**
+- `services/mpc-node/` — standalone MPC node binary (Party ID + KeyStore + NATS)
+- `services/api-gateway/src/orchestrator.rs` — MpcOrchestrator (NATS pub/sub, metadata only)
+- `crates/mpc-wallet-core/src/rpc/` — shared NATS RPC messages (KeygenReq/Resp, SignReq/Resp)
+
+**NATS Control Channels:**
+- `mpc.control.keygen.{group_id}` — orchestrator → nodes keygen request
+- `mpc.control.sign.{group_id}` — orchestrator → nodes sign request (with SignAuthorization)
+- `mpc.control.freeze.{group_id}` — orchestrator → nodes freeze/unfreeze
 
 ### Sign Authorization (MPC node independent verification)
 
@@ -158,11 +197,11 @@ Gateway (creates proof)    →    MPC Node (verifies before sign)
 
 ### Tests on `main`
 ```
-233 tests pass  (cargo test --workspace)  1 ignored (NATS live-server test)
+507 tests pass (cargo test --workspace) + 15 E2E (--ignored, need live infra)
 cargo fmt        clean
 cargo clippy     clean (0 warnings, -D warnings)
 cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
-CI pipeline      ALL GREEN (fmt + clippy + test + audit)
+CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 ```
 
 ### Sprint Status
@@ -173,8 +212,19 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit)
 - **Sprint 12:** COMPLETE — GG20 key resharing, multi-cloud ops (distribution + quorum risk)
 - **Sprint 13:** COMPLETE — FROST reshare, DR plan, RPC failover, chaos framework
 - **Sprint 14:** COMPLETE — JetStream ACL (E5), WORM storage config (F4), CI fixes (clippy + audit)
+- **Sprint 15:** COMPLETE — Production readiness (standard errors, Vault, NatsTransport fix, sig verification, gateway↔node split, benchmarks, CI E2E)
 
 **All 10 epics: 100% COMPLETE**
+
+### New in Sprint 15
+- `services/mpc-node/` — Epic DEC-015: standalone MPC node binary (NATS + EncryptedFileStore + SignAuthorization)
+- `services/api-gateway/src/orchestrator.rs` — MpcOrchestrator replaces WalletStore (gateway holds 0 shares)
+- `services/api-gateway/src/errors.rs` — Standard ApiError + ErrorCode (structured JSON errors)
+- `services/api-gateway/src/vault.rs` — HashiCorp Vault integration (SECRETS_BACKEND=vault)
+- `crates/mpc-wallet-core/src/rpc/` — Shared NATS RPC protocol messages
+- NatsTransport: eager subscription + broadcast support (L-008 fix)
+- 14 signature verification tests covering all 50 chains
+- CI: 5 jobs (fmt, clippy, test, audit, E2E with Vault+Redis+NATS)
 
 ### New in Sprint 12–14
 - `mpc_wallet_core::protocol` — Epic H2: GG20 key resharing (change threshold + add/remove parties)
@@ -287,6 +337,9 @@ Full findings log → `docs/SECURITY_FINDINGS.md`
 | DEC-010 | Split api-gateway into lib.rs + main.rs for integration test access |
 | DEC-011 | Session keys use `Zeroize + ZeroizeOnDrop`; revoked_keys behind `RwLock` for dynamic revocation |
 | DEC-012 | Sign Authorization: MPC nodes independently verify gateway proof before signing |
+| DEC-013 | Remove API keys — simplify to 3 auth methods (mTLS, Session JWT, Bearer JWT) |
+| DEC-014 | Redis + KMS/HSM migration: trait-based backends, encrypted session storage |
+| DEC-015 | Split MPC nodes from gateway — each node holds exactly 1 share, gateway holds 0 |
 
 Full decision log → `docs/DECISIONS.md` and `retro/decisions/`
 
