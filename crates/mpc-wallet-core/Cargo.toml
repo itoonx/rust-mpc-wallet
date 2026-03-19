@@ -9,6 +9,7 @@ description = "MPC wallet core: protocols, key storage, and transport"
 default = ["gg20-distributed"]
 gg20-simulation = []
 gg20-distributed = []
+local-transport = []
 
 [dependencies]
 # MPC protocols
@@ -65,3 +66,4 @@ redis = { workspace = true }
 [[bench]]
 name = "mpc_benchmarks"
 harness = false
+required-features = ["local-transport"]

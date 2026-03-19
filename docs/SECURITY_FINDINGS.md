@@ -31,11 +31,11 @@
 | SEC-011 | MEDIUM | Sui transaction serialization uses JSON instead of BCS — rejected by Sui nodes |
 | SEC-012 | MEDIUM | EVM finalization does not enforce low-S ECDSA normalization |
 | SEC-013 | MEDIUM | FROST protocols trust self-reported `from` field for party ID mapping |
-| SEC-014 | LOW | `LocalTransport` has no `#[cfg(test)]` gate — can be used in production accidentally |
+| SEC-014 | LOW | ~~`LocalTransport` has no `#[cfg(test)]` gate — can be used in production accidentally~~ **RESOLVED** by T-S17-02 (R2) |
 | SEC-015 | LOW | `KeyShare` derives `Debug` — `share_data` bytes visible in log output |
 | SEC-016 | LOW | Bitcoin `SerializableTx::to_tx()` uses `.unwrap()` — panics on malformed input |
 | SEC-017 | LOW | Solana tx builder does not validate `from` address matches signing pubkey |
-| SEC-018 | LOW | `rustls-pemfile` (transitive via `async-nats`) is unmaintained (RUSTSEC-2025-0134) |
+| SEC-018 | LOW | ~~`rustls-pemfile` (transitive via `async-nats`) is unmaintained (RUSTSEC-2025-0134)~~ **MITIGATED** by T-S17-02 (R2) |
 | SEC-019 | LOW | `quinn-proto 0.11.13` — known DoS vulnerability RUSTSEC-2026-0037 (CVSS 8.7) |
 | SEC-020 | INFO | FROST protocols correctly avoid full key reconstruction (positive finding) |
 | SEC-021 | INFO | AES-256-GCM uses fresh random salt + nonce per write — no reuse risk (positive finding) |
@@ -389,7 +389,7 @@
   the struct. Consider adding a `#[cfg(any(test, feature = "demo"))]` gate so the type is
   only available in test/demo builds. Alternatively, emit a `tracing::warn!` at construction
   noting the transport is insecure.
-- **Status:** Open
+- **Status:** **RESOLVED** by T-S17-02 — `local` module gated behind `#[cfg(any(test, feature = "local-transport"))]` in `transport/mod.rs`. CLI enables the feature explicitly. Production builds without the feature cannot access `LocalTransport`.
 
 ---
 
@@ -462,7 +462,7 @@
   will not be patched by the crate maintainer.
 - **Recommendation:** Upgrade `async-nats` to a version that depends on a maintained
   PEM parsing library when available.
-- **Status:** Open
+- **Status:** **MITIGATED** by T-S17-02 — `async-nats` 0.38.0 is the latest 0.38.x; upgrading to 0.46.0 requires major API migration (tracked separately). Advisory RUSTSEC-2025-0134 documented in `.cargo/audit.toml` with rationale. No security vulnerability — only unmaintained status.
 
 ---
 
