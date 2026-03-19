@@ -95,7 +95,7 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 25 — Delegation + Org hierarchy)
+## Current State (as of Sprint 26 — Milestone 4 COMPLETE)
 
 ### Auth System (3 methods, Redis-ready)
 
@@ -197,7 +197,7 @@ Gateway (creates proof)    →    MPC Node (verifies before sign)
 
 ### Tests on `main`
 ```
-720 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
+748 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
 cargo fmt        clean
 cargo clippy     clean (0 warnings, -D warnings)
 cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
@@ -223,8 +223,9 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 - **Sprint 23:** COMPLETE — SGX Prototype (design doc, MockEnclaveProvider, AttestationVerifier, R6 audit APPROVED)
 - **Sprint 24:** COMPLETE — Policy DSL (PolicyRule composable types, JSON parser, recursive AND/OR/NOT evaluator, EvaluationContext)
 - **Sprint 25:** COMPLETE — Key Delegation + Org Hierarchy (DelegationToken, Organization/Team/Vault model, team-scoped RBAC)
+- **Sprint 26:** COMPLETE — Address Whitelist + Velocity Limits + Webhook System (24h cool-down, multi-window velocity, HMAC-SHA256 webhooks)
 
-**All 10 epics: 100% COMPLETE | M1: DONE | M2: DONE | M3: DONE | Milestone 4 (Policy v2): Sprint 26 remaining**
+**M1: DONE | M2: DONE | M3: DONE | M4 (Policy v2 + Delegation): DONE | Next: M5 (DeFi + Screening)**
 
 ### New in Sprint 22
 - AES-256-GCM key wrapping replaces XOR placeholder in `KeyEncryptionProvider` (R2)
