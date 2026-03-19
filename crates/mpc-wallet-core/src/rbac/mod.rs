@@ -3,6 +3,8 @@
 //! Provides [`ApiRole`] for RBAC, [`AbacAttributes`] for attribute-based checks,
 //! [`AuthContext`] combining both, and [`Permissions`] for authorization gates.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::CoreError;
@@ -44,6 +46,8 @@ pub struct AuthContext {
     pub attributes: AbacAttributes,
     /// MFA verification status (Epic A4).
     pub mfa_verified: bool,
+    /// Team-scoped roles: team_id -> roles granted in that team.
+    pub team_roles: HashMap<String, Vec<ApiRole>>,
 }
 
 impl AuthContext {
@@ -56,6 +60,7 @@ impl AuthContext {
             roles,
             attributes: AbacAttributes::default(),
             mfa_verified: false,
+            team_roles: HashMap::new(),
         }
     }
 
@@ -71,7 +76,22 @@ impl AuthContext {
             roles,
             attributes,
             mfa_verified,
+            team_roles: HashMap::new(),
         }
+    }
+
+    /// Check whether this user has the given role in a specific team.
+    ///
+    /// Global admins implicitly have access to every team.
+    pub fn has_team_role(&self, team_id: &str, role: ApiRole) -> bool {
+        // Global admin overrides — admin has every role in every team.
+        if self.roles.contains(&ApiRole::Admin) {
+            return true;
+        }
+        self.team_roles
+            .get(team_id)
+            .map(|roles| roles.contains(&role))
+            .unwrap_or(false)
     }
 }
 
@@ -100,6 +120,24 @@ impl Permissions {
             ));
         }
         Ok(())
+    }
+
+    /// Check whether the user has the required role in a specific team.
+    ///
+    /// Global admins pass this check for any team.
+    pub fn check_team_access(
+        ctx: &AuthContext,
+        team_id: &str,
+        required: ApiRole,
+    ) -> Result<(), CoreError> {
+        if ctx.has_team_role(team_id, required) {
+            Ok(())
+        } else {
+            Err(CoreError::Unauthorized(format!(
+                "user '{}' lacks required role in team '{}'",
+                ctx.user_id, team_id
+            )))
+        }
     }
 
     /// Admin + MFA: manage signing policy (Epic A4).
@@ -260,6 +298,56 @@ mod tests {
             true,
         );
         assert!(Permissions::can_manage_policy_mfa(&ctx).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Team-scoped RBAC tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_team_role_check_pass() {
+        let mut ctx = AuthContext::new("alice", vec![ApiRole::Viewer]);
+        ctx.team_roles
+            .insert("team-1".into(), vec![ApiRole::Initiator]);
+        assert!(ctx.has_team_role("team-1", ApiRole::Initiator));
+        assert!(Permissions::check_team_access(&ctx, "team-1", ApiRole::Initiator).is_ok());
+    }
+
+    #[test]
+    fn test_team_role_check_fail() {
+        let mut ctx = AuthContext::new("bob", vec![ApiRole::Viewer]);
+        ctx.team_roles
+            .insert("team-1".into(), vec![ApiRole::Viewer]);
+        assert!(!ctx.has_team_role("team-1", ApiRole::Admin));
+        assert!(Permissions::check_team_access(&ctx, "team-1", ApiRole::Admin).is_err());
+    }
+
+    #[test]
+    fn test_team_role_different_team() {
+        let mut ctx = AuthContext::new("carol", vec![ApiRole::Viewer]);
+        ctx.team_roles
+            .insert("team-a".into(), vec![ApiRole::Initiator]);
+        // Role in team-a does NOT grant access to team-b.
+        assert!(!ctx.has_team_role("team-b", ApiRole::Initiator));
+        assert!(Permissions::check_team_access(&ctx, "team-b", ApiRole::Initiator).is_err());
+    }
+
+    #[test]
+    fn test_team_role_admin_overrides() {
+        // Global admin should have access to ANY team, even without explicit team_roles.
+        let ctx = AuthContext::new("super-admin", vec![ApiRole::Admin]);
+        assert!(ctx.has_team_role("team-x", ApiRole::Initiator));
+        assert!(ctx.has_team_role("team-x", ApiRole::Approver));
+        assert!(ctx.has_team_role("team-x", ApiRole::Admin));
+        assert!(Permissions::check_team_access(&ctx, "team-x", ApiRole::Initiator).is_ok());
+    }
+
+    #[test]
+    fn test_empty_team_roles_default() {
+        // User with no team roles should fail team access checks.
+        let ctx = AuthContext::new("dave", vec![ApiRole::Initiator]);
+        assert!(!ctx.has_team_role("team-1", ApiRole::Initiator));
+        assert!(Permissions::check_team_access(&ctx, "team-1", ApiRole::Initiator).is_err());
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod errors;
 pub mod middleware;
 pub mod models;
 pub mod orchestrator;
+pub mod org;
 pub mod routes;
 pub mod state;
 pub mod vault;
