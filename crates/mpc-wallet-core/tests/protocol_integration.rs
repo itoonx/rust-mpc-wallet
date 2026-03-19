@@ -980,6 +980,7 @@ fn test_sign_authorization_mandatory_verification() {
             .unwrap()
             .as_secs();
         AuthorizationPayload {
+            authorization_id: format!("auth-{now}-test"),
             requester_id: "user-sec025".into(),
             wallet_id: "wallet-sec025".into(),
             message_hash: hex::encode(Sha256::digest(msg)),

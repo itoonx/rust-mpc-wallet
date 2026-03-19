@@ -210,6 +210,7 @@ pub async fn sign_message(
     let policy_hash = hex::encode(Sha256::digest(b""));
 
     let payload = AuthorizationPayload {
+        authorization_id: uuid::Uuid::new_v4().to_string(),
         requester_id: ctx.user_id.clone(),
         wallet_id: wallet_id.clone(),
         message_hash,

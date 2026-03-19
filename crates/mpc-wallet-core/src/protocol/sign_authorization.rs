@@ -38,6 +38,12 @@ pub const MAX_AUTHORIZATION_AGE_SECS: u64 = 120; // 2 minutes
 /// The authorization payload — signed by the gateway.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorizationPayload {
+    /// Unique authorization ID for replay dedup within the TTL window (SEC-025).
+    ///
+    /// Each MPC node MUST track seen `authorization_id` values and reject any
+    /// duplicate within `MAX_AUTHORIZATION_AGE_SECS`. This prevents a captured
+    /// authorization from being replayed to sign the same message twice.
+    pub authorization_id: String,
     /// Who requested the sign (user ID from auth context).
     pub requester_id: String,
     /// Which wallet is being signed.
@@ -112,6 +118,14 @@ impl SignAuthorization {
         expected_gateway_pubkey: &VerifyingKey,
         message_to_sign: &[u8],
     ) -> Result<(), CoreError> {
+        // 0. Verify authorization_id is present (SEC-025 replay dedup).
+        if self.payload.authorization_id.is_empty() {
+            return Err(CoreError::Protocol(
+                "sign authorization: missing authorization_id — required for replay protection"
+                    .into(),
+            ));
+        }
+
         // 1. Verify gateway pubkey matches expected.
         if self.gateway_pubkey.len() != 32 {
             return Err(CoreError::Protocol(
@@ -211,6 +225,7 @@ mod tests {
             .unwrap()
             .as_secs();
         AuthorizationPayload {
+            authorization_id: format!("auth-{now}-test"),
             requester_id: "user-123".into(),
             wallet_id: "wallet-abc".into(),
             message_hash: hex::encode(Sha256::digest(message)),
@@ -366,5 +381,35 @@ mod tests {
         let auth = SignAuthorization::create(payload, &key);
         let result = auth.verify(&key.verifying_key(), message);
         assert!(result.is_ok(), "zero-required approvals should pass");
+    }
+
+    #[test]
+    fn test_empty_authorization_id_rejected() {
+        let key = test_key();
+        let message = b"hello world";
+        let mut payload = valid_payload(message);
+        payload.authorization_id = String::new();
+
+        let auth = SignAuthorization::create(payload, &key);
+        let result = auth.verify(&key.verifying_key(), message);
+        assert!(result.is_err());
+        assert!(
+            format!("{result:?}").contains("missing authorization_id"),
+            "should reject empty authorization_id for replay protection"
+        );
+    }
+
+    #[test]
+    fn test_authorization_id_present_in_payload() {
+        let key = test_key();
+        let message = b"hello world";
+        let payload = valid_payload(message);
+        assert!(
+            !payload.authorization_id.is_empty(),
+            "authorization_id must be populated"
+        );
+
+        let auth = SignAuthorization::create(payload.clone(), &key);
+        assert_eq!(auth.payload.authorization_id, payload.authorization_id);
     }
 }

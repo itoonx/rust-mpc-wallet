@@ -50,7 +50,10 @@ fn party_to_identifier(party: PartyId) -> Result<frost::Identifier, CoreError> {
 /// measure ensuring the self-reported `from` field matches a party we
 /// expect in the protocol, preventing a compromised-but-authenticated peer
 /// from injecting messages for a party ID it does not own.
-fn validate_sender(msg: &crate::transport::ProtocolMessage, expected: &HashSet<PartyId>) -> Result<(), CoreError> {
+fn validate_sender(
+    msg: &crate::transport::ProtocolMessage,
+    expected: &HashSet<PartyId>,
+) -> Result<(), CoreError> {
     if !expected.contains(&msg.from) {
         return Err(CoreError::Protocol(format!(
             "FROST: unexpected sender party {} — not in expected set",

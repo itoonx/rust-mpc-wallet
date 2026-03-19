@@ -393,6 +393,7 @@ fn bench_auth(c: &mut Criterion) {
         let msg_bytes = [0xABu8; 32];
         b.iter(|| {
             let payload = AuthorizationPayload {
+                authorization_id: "bench-auth-001".into(),
                 requester_id: "bench-user".into(),
                 wallet_id: "bench-wallet".into(),
                 message_hash: msg_hash_hex.clone(),

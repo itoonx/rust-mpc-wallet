@@ -1056,8 +1056,8 @@ async fn simulation_sign(
     // wiped from memory as soon as signing completes.
     let secret = Zeroizing::new(lagrange_interpolate(&collected_shares));
 
-    let secret_key = SecretKey::from_bytes(&secret.to_repr())
-        .map_err(|e| CoreError::Crypto(e.to_string()))?;
+    let secret_key =
+        SecretKey::from_bytes(&secret.to_repr()).map_err(|e| CoreError::Crypto(e.to_string()))?;
     let signing_key = k256::ecdsa::SigningKey::from(secret_key);
 
     use k256::ecdsa::signature::Signer;
