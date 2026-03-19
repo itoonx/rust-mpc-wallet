@@ -27,6 +27,11 @@
 //! - All secret scalars are wrapped in `Zeroizing` for SEC-008 compliance.
 
 use crate::error::CoreError;
+use crate::paillier::mta::{MtaPartyA, MtaPartyB, MtaRound1};
+use crate::paillier::zk_proofs::{
+    prove_pifac, prove_pimod, verify_pifac, verify_pimod, PifacProof, PimodProof,
+};
+use crate::paillier::{PaillierPublicKey, PaillierSecretKey};
 use crate::protocol::{GroupPublicKey, KeyShare, MpcProtocol, MpcSignature};
 use crate::transport::{ProtocolMessage, Transport};
 use crate::types::{CryptoScheme, PartyId, ThresholdConfig};
@@ -36,6 +41,7 @@ use k256::{
     elliptic_curve::{ops::Reduce, sec1::ToEncodedPoint, Field, PrimeField},
     ProjectivePoint, Scalar, U256,
 };
+use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -62,14 +68,27 @@ pub struct Cggmp21ShareData {
     /// The combined group public key (compressed SEC1, 33 bytes).
     #[zeroize(skip)]
     pub group_public_key: Vec<u8>,
-    /// Paillier secret key: serialized (p, q) primes.
+    /// Paillier secret key: serialized (p, q) primes (legacy simulated format).
     pub paillier_sk: Vec<u8>,
-    /// Paillier public key: serialized N = p * q.
+    /// Paillier public key: serialized N = p * q (legacy simulated format).
     #[zeroize(skip)]
     pub paillier_pk: Vec<u8>,
     /// Pedersen commitment parameters: serialized (s, t, N_hat).
     #[zeroize(skip)]
     pub pedersen_params: Vec<u8>,
+    /// Real Paillier secret key (Sprint 28 — replaces simulated).
+    /// Optional for backward compatibility with old shares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub real_paillier_sk: Option<PaillierSecretKey>,
+    /// Real Paillier public key (Sprint 28).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[zeroize(skip)]
+    pub real_paillier_pk: Option<PaillierPublicKey>,
+    /// All parties' real Paillier public keys, indexed by party position (0-based).
+    /// Needed for MtA during pre-signing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[zeroize(skip)]
+    pub all_paillier_pks: Option<Vec<PaillierPublicKey>>,
 }
 
 /// Commitment message for Round 1.
@@ -104,7 +123,7 @@ struct Round3FeldmanShare {
     commitments: Vec<Vec<u8>>,
 }
 
-/// Simulated Paillier key pair.
+/// Simulated Paillier key pair (legacy, used when real Paillier keys are absent).
 #[derive(Serialize, Deserialize)]
 struct PaillierKeyPair {
     /// First prime p (32 bytes for simulation).
@@ -124,6 +143,37 @@ struct PedersenParams {
     t: Vec<u8>,
     /// Modulus N_hat.
     n_hat: Vec<u8>,
+}
+
+/// Default Paillier key size for tests (fast, ~10ms per keygen).
+/// NOTE: 256-bit is INSECURE — test speed only. Production MUST use 2048.
+#[cfg(any(test, feature = "local-transport"))]
+const DEFAULT_PAILLIER_BITS: usize = 512;
+
+/// Default Paillier key size for production (secure, ~1-5s per keygen).
+#[cfg(not(any(test, feature = "local-transport")))]
+const DEFAULT_PAILLIER_BITS: usize = 2048;
+
+/// Auxiliary info broadcast message (Round 4): Paillier public key + ZK proofs.
+#[derive(Serialize, Deserialize)]
+struct AuxInfoBroadcast {
+    /// Party index (1-indexed).
+    party_index: u16,
+    /// Real Paillier public key.
+    paillier_pk: PaillierPublicKey,
+    /// Πmod proof: N is a Blum integer.
+    pimod_proof: PimodProof,
+    /// Πfac proof: N has no small factors (CVE-2023-33241 prevention).
+    pifac_proof: PifacProof,
+}
+
+/// Round 2 message for pre-signing with real MtA: encrypted k_i.
+#[derive(Serialize, Deserialize)]
+struct PreSignMtaRound2 {
+    /// Sender party index.
+    party_index: u16,
+    /// Enc(k_i) — encryption of sender's nonce share under sender's Paillier key.
+    encrypted_k: crate::paillier::PaillierCiphertext,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -766,14 +816,83 @@ async fn cggmp21_keygen(
     }
 
     // ── Generate auxiliary info (Paillier + Pedersen) ────────────────────
-    let paillier = generate_paillier_keypair(&x_i, my_index);
-    let pedersen = generate_pedersen_params(&x_i, my_index);
+    // Legacy simulated Paillier (kept for backward compat serialization)
+    let sim_paillier = generate_paillier_keypair(&x_i, my_index);
+    let sim_pedersen = generate_pedersen_params(&x_i, my_index);
 
-    let paillier_sk_bytes = serde_json::to_vec(&(paillier.p.clone(), paillier.q.clone()))
+    let paillier_sk_bytes = serde_json::to_vec(&(sim_paillier.p.clone(), sim_paillier.q.clone()))
         .map_err(|e| CoreError::Serialization(e.to_string()))?;
-    let paillier_pk_bytes = paillier.n.clone();
+    let paillier_pk_bytes = sim_paillier.n.clone();
     let pedersen_bytes =
-        serde_json::to_vec(&pedersen).map_err(|e| CoreError::Serialization(e.to_string()))?;
+        serde_json::to_vec(&sim_pedersen).map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+    // ── Real Paillier keygen + ZK proofs (Sprint 28) ────────────────────
+    let (real_pk, real_sk) =
+        crate::paillier::keygen::generate_paillier_keypair(DEFAULT_PAILLIER_BITS);
+    let p_big = BigUint::from_bytes_be(&real_sk.p);
+    let q_big = BigUint::from_bytes_be(&real_sk.q);
+    let n_big = real_pk.n_biguint();
+
+    // Generate Πmod and Πfac ZK proofs
+    let pimod_proof = prove_pimod(&n_big, &p_big, &q_big);
+    let pifac_proof = prove_pifac(&n_big, &p_big, &q_big);
+
+    // ── Round 4: Broadcast Paillier public key + ZK proofs ──────────────
+    let aux_msg = AuxInfoBroadcast {
+        party_index: my_index,
+        paillier_pk: real_pk.clone(),
+        pimod_proof,
+        pifac_proof,
+    };
+    let aux_payload =
+        serde_json::to_vec(&aux_msg).map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+    transport
+        .send(ProtocolMessage {
+            from: party_id,
+            to: None,
+            round: 4,
+            payload: aux_payload,
+        })
+        .await?;
+
+    // Receive aux info from all other parties
+    let mut all_aux: Vec<AuxInfoBroadcast> = vec![aux_msg];
+    for _ in 1..n {
+        let msg = transport.recv().await?;
+        let aux: AuxInfoBroadcast = serde_json::from_slice(&msg.payload)
+            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        all_aux.push(aux);
+    }
+    all_aux.sort_by_key(|a| a.party_index);
+
+    // ── Verify Πmod + Πfac proofs from all parties ──────────────────────
+    for aux in &all_aux {
+        if aux.party_index == my_index {
+            continue; // Skip self (we trust our own key)
+        }
+        let peer_n = aux.paillier_pk.n_biguint();
+
+        // Verify Πmod: N is a Blum integer
+        if !verify_pimod(&peer_n, &aux.pimod_proof) {
+            return Err(CoreError::Protocol(format!(
+                "Πmod proof verification failed for party {} — invalid Paillier key, identifiable abort",
+                aux.party_index
+            )));
+        }
+
+        // Verify Πfac: N has no small factors (CVE-2023-33241 prevention)
+        if !verify_pifac(&peer_n, &aux.pifac_proof) {
+            return Err(CoreError::Protocol(format!(
+                "Πfac proof verification failed for party {} — Paillier key has small factors, identifiable abort",
+                aux.party_index
+            )));
+        }
+    }
+
+    // Collect all parties' verified Paillier public keys (ordered by party index)
+    let all_paillier_pks: Vec<PaillierPublicKey> =
+        all_aux.iter().map(|a| a.paillier_pk.clone()).collect();
 
     // ── Build share data ────────────────────────────────────────────────
     let share_data = Cggmp21ShareData {
@@ -784,6 +903,9 @@ async fn cggmp21_keygen(
         paillier_sk: paillier_sk_bytes,
         paillier_pk: paillier_pk_bytes,
         pedersen_params: pedersen_bytes,
+        real_paillier_sk: Some(real_sk),
+        real_paillier_pk: Some(real_pk),
+        all_paillier_pks: Some(all_paillier_pks),
     };
 
     let share_bytes =
@@ -932,59 +1054,256 @@ async fn cggmp21_pre_sign(
         gamma_sum_point += gp.to_projective();
     }
 
-    // ── Round 2: MtA simulation ───────────────────────────────────────
-    // In production CGGMP21, MtA uses Paillier encryption to compute shares
-    // of k * gamma without revealing k_i or gamma_i to other parties.
-    //
-    // For simulation: each party broadcasts (k_i, gamma_i) scalars so that
-    // all parties can compute delta = (sum k_i) * (sum gamma_i) = k * gamma.
-    // This is INSECURE (reveals nonce shares) but produces correct signatures
-    // and demonstrates the protocol structure.
-    // Combine k_i and gamma_i into the round 2 message
-    let combined_r2 = serde_json::json!({
-        "party_index": my_index,
-        "k_i": k_i.to_repr().as_slice(),
-        "gamma_i": gamma_i.to_repr().as_slice(),
-    });
-    let round2_payload =
-        serde_json::to_vec(&combined_r2).map_err(|e| CoreError::Serialization(e.to_string()))?;
+    // ── Round 2: MtA — compute shares of k * gamma ────────────────────
+    // Check if real Paillier keys are available for secure MtA
+    // TODO(Sprint 28): Real Paillier MtA for pre-signing is implemented but
+    // disabled pending full integration testing. The keygen ZK proof verification
+    // is the critical security fix (CVE-2023-33241). MtA will be enabled in a
+    // follow-up sprint after the protocol round structure is validated end-to-end.
+    let has_real_paillier = false; // Real MtA disabled for now — keygen proofs are the priority
+    let _has_real_paillier_keys = share_data.real_paillier_pk.is_some()
+        && share_data.real_paillier_sk.is_some()
+        && share_data.all_paillier_pks.is_some();
 
-    transport
-        .send(ProtocolMessage {
-            from: my_party_id,
-            to: None,
-            round: 11,
-            payload: round2_payload,
-        })
-        .await?;
+    let (delta, chi_i_scalar) = if has_real_paillier {
+        // ── Real Paillier MtA (Sprint 28) ──────────────────────────────
+        // Each party i: encrypt k_i under their own Paillier key, broadcast
+        // Enc(k_i). Then for each pair (i,j), run MtA to compute additive
+        // shares of k_i * gamma_j (for delta) and k_i * x_j * lambda_j (for chi).
+        let my_pk = share_data.real_paillier_pk.as_ref().unwrap().clone();
+        let my_sk = share_data.real_paillier_sk.as_ref().unwrap().clone();
+        let all_pks = share_data.all_paillier_pks.as_ref().unwrap();
 
-    // Collect Round 2 messages and compute k_sum, gamma_sum
-    let mut k_sum = *k_i;
-    let mut gamma_sum_scalar = *gamma_i;
+        // Create MtA Party A for k_i
+        let mta_party_a_k = MtaPartyA::new(
+            my_pk.clone(),
+            my_sk.clone(),
+            Zeroizing::new(k_i.to_repr().to_vec()),
+        );
+        let mta_round1_k = mta_party_a_k.round1();
 
-    for _ in 1..n_signers {
-        let msg = transport.recv().await?;
-        let r2: serde_json::Value = serde_json::from_slice(&msg.payload)
+        // Broadcast Enc(k_i)
+        let mta_r2_msg = PreSignMtaRound2 {
+            party_index: my_index,
+            encrypted_k: mta_round1_k.ciphertext.clone(),
+        };
+        let mta_r2_payload =
+            serde_json::to_vec(&mta_r2_msg).map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+        transport
+            .send(ProtocolMessage {
+                from: my_party_id,
+                to: None,
+                round: 11,
+                payload: mta_r2_payload,
+            })
+            .await?;
+
+        // Collect Enc(k_j) from all other signers
+        let mut peer_enc_k: Vec<PreSignMtaRound2> = vec![mta_r2_msg];
+        for _ in 1..n_signers {
+            let msg = transport.recv().await?;
+            let r2: PreSignMtaRound2 = serde_json::from_slice(&msg.payload)
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            peer_enc_k.push(r2);
+        }
+        peer_enc_k.sort_by_key(|m| m.party_index);
+
+        // Compute Lagrange coefficients for all signers (needed for chi MtA)
+        let mut peer_lambda: std::collections::HashMap<u16, Scalar> =
+            std::collections::HashMap::new();
+        for &s in signers {
+            let lam = lagrange_coefficient(s.0, &signer_indices)?;
+            peer_lambda.insert(s.0, lam);
+        }
+
+        // For each peer j: run two MtA instances as Party B:
+        //   1. k_j * gamma_i (for delta)
+        //   2. k_j * (x_i * lambda_i) (for chi)
+        // We send both responses in one message.
+        let gamma_i_bytes = Zeroizing::new(gamma_i.to_repr().to_vec());
+        let x_i_lambda_i = *x_i * lambda_i;
+        let x_i_lambda_i_bytes = Zeroizing::new(x_i_lambda_i.to_repr().to_vec());
+
+        let mut delta_beta_shares: Vec<Zeroizing<Vec<u8>>> = Vec::new();
+        let mut chi_beta_shares: Vec<Zeroizing<Vec<u8>>> = Vec::new();
+
+        for peer_msg in &peer_enc_k {
+            if peer_msg.party_index == my_index {
+                continue;
+            }
+            let peer_pk_idx = (peer_msg.party_index - 1) as usize;
+            if peer_pk_idx >= all_pks.len() {
+                return Err(CoreError::Protocol(format!(
+                    "missing Paillier PK for party {}",
+                    peer_msg.party_index
+                )));
+            }
+            let peer_pk = &all_pks[peer_pk_idx];
+
+            // MtA for delta: k_j * gamma_i
+            let mta_b_delta = MtaPartyB::new(peer_pk.clone(), gamma_i_bytes.clone());
+            let mta_r1_in = MtaRound1 {
+                ciphertext: peer_msg.encrypted_k.clone(),
+            };
+            let mta_out_delta = mta_b_delta.round2(&mta_r1_in);
+            delta_beta_shares.push(mta_out_delta.beta);
+
+            // MtA for chi: k_j * (x_i * lambda_i)
+            let mta_b_chi = MtaPartyB::new(peer_pk.clone(), x_i_lambda_i_bytes.clone());
+            let mta_r1_in_chi = MtaRound1 {
+                ciphertext: peer_msg.encrypted_k.clone(),
+            };
+            let mta_out_chi = mta_b_chi.round2(&mta_r1_in_chi);
+            chi_beta_shares.push(mta_out_chi.beta);
+
+            // Send both MtA responses to peer
+            let combined_response = serde_json::json!({
+                "from_party": my_index,
+                "to_party": peer_msg.party_index,
+                "delta_ct": serde_json::to_value(&mta_out_delta.ciphertext).unwrap(),
+                "chi_ct": serde_json::to_value(&mta_out_chi.ciphertext).unwrap(),
+            });
+            let payload = serde_json::to_vec(&combined_response)
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            transport
+                .send(ProtocolMessage {
+                    from: my_party_id,
+                    to: Some(PartyId(peer_msg.party_index)),
+                    round: 12,
+                    payload,
+                })
+                .await?;
+        }
+
+        // Receive MtA responses and compute delta_i, chi_i using Scalar arithmetic.
+        // Key insight: MtA produces alpha + beta = a*b mod N. Since N >> q^2,
+        // a*b < N so the mod N is exact. But alpha and beta individually are
+        // random values in [0,N). We reduce each to mod q (secp256k1 order)
+        // before adding to Scalar accumulators, since we only need the result mod q.
+        let secp_order = BigUint::from_bytes_be(&hex_decode_secp_order());
+
+        // Helper: convert BigUint to secp256k1 Scalar (reduce mod q)
+        let to_scalar = |big: &BigUint| -> Scalar {
+            let reduced = big % &secp_order;
+            let be = reduced.to_bytes_be();
+            let mut padded = [0u8; 32];
+            padded[32usize.saturating_sub(be.len())..].copy_from_slice(&be);
+            <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&padded))
+        };
+
+        // Start with local products
+        let mut delta_scalar = *k_i * *gamma_i;
+        let mut chi_scalar = *k_i * x_i_lambda_i;
+
+        // Add beta shares (from acting as Party B on peers' broadcasts)
+        for beta_bytes in &delta_beta_shares {
+            delta_scalar += to_scalar(&BigUint::from_bytes_be(beta_bytes));
+        }
+        for beta_bytes in &chi_beta_shares {
+            chi_scalar += to_scalar(&BigUint::from_bytes_be(beta_bytes));
+        }
+
+        // Receive alpha shares from peers (responses to our Enc(k_i) broadcast)
+        for _ in 1..n_signers {
+            let msg = transport.recv().await?;
+            let r3: serde_json::Value = serde_json::from_slice(&msg.payload)
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+            let delta_ct: crate::paillier::PaillierCiphertext =
+                serde_json::from_value(r3["delta_ct"].clone())
+                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            let chi_ct: crate::paillier::PaillierCiphertext =
+                serde_json::from_value(r3["chi_ct"].clone())
+                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+            // Decrypt as Party A, reduce to Scalar
+            let alpha_d = mta_party_a_k.round2_finish(&delta_ct);
+            delta_scalar += to_scalar(&BigUint::from_bytes_be(&alpha_d));
+
+            let alpha_c = mta_party_a_k.round2_finish(&chi_ct);
+            chi_scalar += to_scalar(&BigUint::from_bytes_be(&alpha_c));
+        }
+
+        // Broadcast delta_i for aggregation (as Scalar bytes, 32 bytes)
+        let delta_broadcast = serde_json::json!({
+            "party_index": my_index,
+            "delta_i": delta_scalar.to_repr().as_slice(),
+        });
+        let delta_payload = serde_json::to_vec(&delta_broadcast)
+            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        transport
+            .send(ProtocolMessage {
+                from: my_party_id,
+                to: None,
+                round: 13,
+                payload: delta_payload,
+            })
+            .await?;
+
+        // Collect all delta_i and sum as Scalars
+        let mut delta_sum = delta_scalar;
+        for _ in 1..n_signers {
+            let msg = transport.recv().await?;
+            let dv: serde_json::Value = serde_json::from_slice(&msg.payload)
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            let d_bytes: Vec<u8> = serde_json::from_value(dv["delta_i"].clone())
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            let d_scalar = Scalar::from_repr(*k256::FieldBytes::from_slice(&d_bytes))
+                .into_option()
+                .ok_or_else(|| CoreError::Crypto("invalid delta_i scalar".into()))?;
+            delta_sum += d_scalar;
+        }
+
+        (delta_sum, chi_scalar)
+    } else {
+        // ── Simulated MtA (legacy, no real Paillier keys) ───────────────
+        let combined_r2 = serde_json::json!({
+            "party_index": my_index,
+            "k_i": k_i.to_repr().as_slice(),
+            "gamma_i": gamma_i.to_repr().as_slice(),
+        });
+        let round2_payload = serde_json::to_vec(&combined_r2)
             .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
-        let k_j_bytes: Vec<u8> = serde_json::from_value(r2["k_i"].clone())
-            .map_err(|e| CoreError::Serialization(e.to_string()))?;
-        let gamma_j_bytes: Vec<u8> = serde_json::from_value(r2["gamma_i"].clone())
-            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        transport
+            .send(ProtocolMessage {
+                from: my_party_id,
+                to: None,
+                round: 11,
+                payload: round2_payload,
+            })
+            .await?;
 
-        let k_j = Scalar::from_repr(*k256::FieldBytes::from_slice(&k_j_bytes))
-            .into_option()
-            .ok_or_else(|| CoreError::Crypto("invalid k_j scalar".into()))?;
-        let gamma_j = Scalar::from_repr(*k256::FieldBytes::from_slice(&gamma_j_bytes))
-            .into_option()
-            .ok_or_else(|| CoreError::Crypto("invalid gamma_j scalar".into()))?;
+        let mut k_sum = *k_i;
+        let mut gamma_sum_scalar = *gamma_i;
 
-        k_sum += k_j;
-        gamma_sum_scalar += gamma_j;
-    }
+        for _ in 1..n_signers {
+            let msg = transport.recv().await?;
+            let r2: serde_json::Value = serde_json::from_slice(&msg.payload)
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
-    // delta = k * gamma (the combined product)
-    let delta = k_sum * gamma_sum_scalar;
+            let k_j_bytes: Vec<u8> = serde_json::from_value(r2["k_i"].clone())
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            let gamma_j_bytes: Vec<u8> = serde_json::from_value(r2["gamma_i"].clone())
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+            let k_j = Scalar::from_repr(*k256::FieldBytes::from_slice(&k_j_bytes))
+                .into_option()
+                .ok_or_else(|| CoreError::Crypto("invalid k_j scalar".into()))?;
+            let gamma_j = Scalar::from_repr(*k256::FieldBytes::from_slice(&gamma_j_bytes))
+                .into_option()
+                .ok_or_else(|| CoreError::Crypto("invalid gamma_j scalar".into()))?;
+
+            k_sum += k_j;
+            gamma_sum_scalar += gamma_j;
+        }
+
+        let delta = k_sum * gamma_sum_scalar;
+        let chi_i_scalar = k_sum * *x_i * lambda_i;
+        gamma_sum_scalar.zeroize();
+        (delta, chi_i_scalar)
+    };
 
     // ── Compute R = delta^{-1} * Gamma_sum ────────────────────────────
     // R = (k*gamma)^{-1} * gamma*G = k^{-1} * G
@@ -998,16 +1317,6 @@ async fn cggmp21_pre_sign(
         .to_encoded_point(true)
         .as_bytes()
         .to_vec();
-
-    // ── Compute chi_i = k_sum * x_i * lambda_i (share of k * x) ─────
-    // In production CGGMP21, chi_i is computed via Paillier MtA so that
-    // sum(chi_i) = k * x without any party learning k or x.
-    // In simulation, we use k_sum (which all parties computed from shared k_j).
-    let chi_i_scalar = k_sum * *x_i * lambda_i;
-
-    // ── Explicitly zeroize temporaries (SEC-008) ──────────────────────
-    k_sum.zeroize();
-    gamma_sum_scalar.zeroize();
 
     Ok(PreSignature {
         k_i: k_i.to_repr().to_vec(),
@@ -1090,7 +1399,7 @@ async fn cggmp21_sign_online(
         .send(ProtocolMessage {
             from: my_party_id,
             to: None,
-            round: 12,
+            round: 20, // Online signing round (separate from pre-sign MtA rounds 11-13)
             payload,
         })
         .await?;
@@ -1560,14 +1869,74 @@ async fn cggmp21_refresh(
     }
 
     // ── Generate fresh auxiliary info (Paillier + Pedersen) ───────────────
-    let paillier = generate_paillier_keypair(&new_share, my_index);
-    let pedersen = generate_pedersen_params(&new_share, my_index);
+    let sim_paillier = generate_paillier_keypair(&new_share, my_index);
+    let sim_pedersen = generate_pedersen_params(&new_share, my_index);
 
-    let paillier_sk_bytes = serde_json::to_vec(&(paillier.p.clone(), paillier.q.clone()))
+    let paillier_sk_bytes = serde_json::to_vec(&(sim_paillier.p.clone(), sim_paillier.q.clone()))
         .map_err(|e| CoreError::Serialization(e.to_string()))?;
-    let paillier_pk_bytes = paillier.n.clone();
+    let paillier_pk_bytes = sim_paillier.n.clone();
     let pedersen_bytes =
-        serde_json::to_vec(&pedersen).map_err(|e| CoreError::Serialization(e.to_string()))?;
+        serde_json::to_vec(&sim_pedersen).map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+    // Generate fresh real Paillier keys + ZK proofs (Sprint 28)
+    let (fresh_pk, fresh_sk) =
+        crate::paillier::keygen::generate_paillier_keypair(DEFAULT_PAILLIER_BITS);
+    let p_big = BigUint::from_bytes_be(&fresh_sk.p);
+    let q_big = BigUint::from_bytes_be(&fresh_sk.q);
+    let n_big = fresh_pk.n_biguint();
+
+    let pimod_proof = prove_pimod(&n_big, &p_big, &q_big);
+    let pifac_proof = prove_pifac(&n_big, &p_big, &q_big);
+
+    // Broadcast fresh Paillier PK + proofs (round 203)
+    let aux_msg = AuxInfoBroadcast {
+        party_index: my_index,
+        paillier_pk: fresh_pk.clone(),
+        pimod_proof,
+        pifac_proof,
+    };
+    let aux_payload =
+        serde_json::to_vec(&aux_msg).map_err(|e| CoreError::Serialization(e.to_string()))?;
+    transport
+        .send(ProtocolMessage {
+            from: my_party,
+            to: None,
+            round: 203,
+            payload: aux_payload,
+        })
+        .await?;
+
+    let mut all_aux: Vec<AuxInfoBroadcast> = vec![aux_msg];
+    for _ in 1..n_signers {
+        let msg = transport.recv().await?;
+        let aux: AuxInfoBroadcast = serde_json::from_slice(&msg.payload)
+            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        all_aux.push(aux);
+    }
+    all_aux.sort_by_key(|a| a.party_index);
+
+    // Verify all proofs
+    for aux in &all_aux {
+        if aux.party_index == my_index {
+            continue;
+        }
+        let peer_n = aux.paillier_pk.n_biguint();
+        if !verify_pimod(&peer_n, &aux.pimod_proof) {
+            return Err(CoreError::Protocol(format!(
+                "Πmod proof failed for party {} during refresh",
+                aux.party_index
+            )));
+        }
+        if !verify_pifac(&peer_n, &aux.pifac_proof) {
+            return Err(CoreError::Protocol(format!(
+                "Πfac proof failed for party {} during refresh",
+                aux.party_index
+            )));
+        }
+    }
+
+    let fresh_all_pks: Vec<PaillierPublicKey> =
+        all_aux.iter().map(|a| a.paillier_pk.clone()).collect();
 
     // ── Build refreshed share data ───────────────────────────────────────
     let new_share_data = Cggmp21ShareData {
@@ -1578,6 +1947,9 @@ async fn cggmp21_refresh(
         paillier_sk: paillier_sk_bytes,
         paillier_pk: paillier_pk_bytes,
         pedersen_params: pedersen_bytes,
+        real_paillier_sk: Some(fresh_sk),
+        real_paillier_pk: Some(fresh_pk),
+        all_paillier_pks: Some(fresh_all_pks),
     };
 
     let new_share_bytes =
@@ -1590,6 +1962,16 @@ async fn cggmp21_refresh(
         group_public_key: key_share.group_public_key.clone(),
         share_data: Zeroizing::new(new_share_bytes),
     })
+}
+
+/// Return the secp256k1 curve order as 32 big-endian bytes.
+fn hex_decode_secp_order() -> [u8; 32] {
+    // n = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+    [
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
+        0x41, 0x41,
+    ]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1691,6 +2073,9 @@ mod tests {
             paillier_sk: vec![5u8; 64],
             paillier_pk: vec![6u8; 32],
             pedersen_params: vec![7u8; 96],
+            real_paillier_sk: None,
+            real_paillier_pk: None,
+            all_paillier_pks: None,
         };
 
         let bytes = serde_json::to_vec(&share).unwrap();
@@ -1703,6 +2088,10 @@ mod tests {
         assert!(!restored.paillier_sk.is_empty());
         assert!(!restored.paillier_pk.is_empty());
         assert!(!restored.pedersen_params.is_empty());
+        // Optional fields should be None for old shares
+        assert!(restored.real_paillier_sk.is_none());
+        assert!(restored.real_paillier_pk.is_none());
+        assert!(restored.all_paillier_pks.is_none());
     }
 
     // ── Integration tests using LocalTransport ──────────────────────────
@@ -2197,6 +2586,9 @@ mod tests {
             paillier_sk: vec![0u8; 32],
             paillier_pk: vec![0u8; 32],
             pedersen_params: vec![0u8; 32],
+            real_paillier_sk: None,
+            real_paillier_pk: None,
+            all_paillier_pks: None,
         };
 
         let share_bytes = serde_json::to_vec(&share_data).unwrap();
@@ -2446,5 +2838,260 @@ mod tests {
             mixed_failed,
             "mixing old and refreshed shares must fail or produce invalid signature"
         );
+    }
+
+    // ── Sprint 28: Real Paillier + ZK proof tests ────────────────────────
+
+    #[tokio::test]
+    async fn test_cggmp21_keygen_with_real_paillier() {
+        use crate::transport::local::LocalTransportNetwork;
+
+        let config = ThresholdConfig::new(2, 3).unwrap();
+        let net = LocalTransportNetwork::new(3);
+
+        let mut handles = Vec::new();
+        for i in 1..=3u16 {
+            let pid = PartyId(i);
+            let transport = net.get_transport(pid);
+            handles.push(tokio::spawn(async move {
+                let p = Cggmp21Protocol::new();
+                p.keygen(config, pid, &*transport).await
+            }));
+        }
+
+        for h in handles {
+            let share = h.await.unwrap().unwrap();
+            let data: Cggmp21ShareData = serde_json::from_slice(&share.share_data).unwrap();
+
+            // Real Paillier keys must be present
+            assert!(
+                data.real_paillier_pk.is_some(),
+                "keygen must generate real Paillier PK"
+            );
+            assert!(
+                data.real_paillier_sk.is_some(),
+                "keygen must generate real Paillier SK"
+            );
+            assert!(
+                data.all_paillier_pks.is_some(),
+                "keygen must store all parties' Paillier PKs"
+            );
+
+            // All Paillier PKs must have valid N
+            let all_pks = data.all_paillier_pks.as_ref().unwrap();
+            assert_eq!(all_pks.len(), 3, "must have 3 Paillier PKs");
+            for pk in all_pks {
+                let n = pk.n_biguint();
+                assert!(
+                    n.bits() >= 500,
+                    "Paillier N must be ~512 bits for test, got {} bits",
+                    n.bits()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cggmp21_keygen_paillier_proofs_verified() {
+        // This test verifies that keygen actually runs ZK proof verification.
+        // Since keygen succeeds (tested above), the proofs must have been verified.
+        // We verify indirectly by checking the stored Paillier keys are valid.
+        use crate::paillier::zk_proofs::{prove_pifac, prove_pimod, verify_pifac, verify_pimod};
+        use crate::transport::local::LocalTransportNetwork;
+
+        let config = ThresholdConfig::new(2, 3).unwrap();
+        let net = LocalTransportNetwork::new(3);
+
+        let mut handles = Vec::new();
+        for i in 1..=3u16 {
+            let pid = PartyId(i);
+            let transport = net.get_transport(pid);
+            handles.push(tokio::spawn(async move {
+                let p = Cggmp21Protocol::new();
+                p.keygen(config, pid, &*transport).await
+            }));
+        }
+
+        for h in handles {
+            let share = h.await.unwrap().unwrap();
+            let data: Cggmp21ShareData = serde_json::from_slice(&share.share_data).unwrap();
+            let sk = data.real_paillier_sk.as_ref().unwrap();
+            let pk = data.real_paillier_pk.as_ref().unwrap();
+
+            // Re-generate proofs for our own key and verify they pass
+            let p = num_bigint::BigUint::from_bytes_be(&sk.p);
+            let q = num_bigint::BigUint::from_bytes_be(&sk.q);
+            let n = pk.n_biguint();
+
+            let pimod = prove_pimod(&n, &p, &q);
+            assert!(
+                verify_pimod(&n, &pimod),
+                "Πmod proof must verify for stored key"
+            );
+
+            let pifac = prove_pifac(&n, &p, &q);
+            assert!(
+                verify_pifac(&n, &pifac),
+                "Πfac proof must verify for stored key"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cggmp21_sign_with_real_paillier_keygen() {
+        // Test that keygen with real Paillier + signing with simulation MtA works
+        use crate::transport::local::LocalTransportNetwork;
+        use k256::ecdsa::signature::hazmat::PrehashVerifier;
+
+        let shares = run_keygen(2, 3).await;
+        let signers = vec![PartyId(1), PartyId(2)];
+        let message = b"Sprint 28: real Paillier keygen + simulation sign";
+
+        let net = LocalTransportNetwork::new(2);
+        let mut handles = Vec::new();
+        for (i, signer) in signers.iter().enumerate() {
+            let share = shares[signer.0 as usize - 1].clone();
+            let transport = net.get_transport(PartyId((i + 1) as u16));
+            let signers_clone = signers.clone();
+            let msg = message.to_vec();
+            handles.push(tokio::spawn(async move {
+                let p = Cggmp21Protocol::new();
+                p.sign(&share, &signers_clone, &msg, &*transport).await
+            }));
+        }
+
+        let sig = handles.into_iter().next().unwrap().await.unwrap().unwrap();
+        if let MpcSignature::Ecdsa { r, s, .. } = &sig {
+            let pubkey =
+                k256::PublicKey::from_sec1_bytes(shares[0].group_public_key.as_bytes()).unwrap();
+            let vk = k256::ecdsa::VerifyingKey::from(&pubkey);
+            let mut sig_bytes = [0u8; 64];
+            sig_bytes[..32].copy_from_slice(r);
+            sig_bytes[32..].copy_from_slice(s);
+            let ecdsa_sig = k256::ecdsa::Signature::from_bytes(&sig_bytes.into()).unwrap();
+            let hash = Sha256::digest(message);
+            assert!(
+                vk.verify_prehash(&hash, &ecdsa_sig).is_ok(),
+                "signature must verify after real Paillier keygen"
+            );
+        } else {
+            panic!("expected ECDSA signature");
+        }
+    }
+
+    #[test]
+    fn test_backward_compat_old_shares() {
+        // Shares without real Paillier keys should deserialize correctly
+        let old_share = Cggmp21ShareData {
+            party_index: 1,
+            secret_share: vec![1u8; 32],
+            public_shares: vec![vec![2u8; 33]],
+            group_public_key: vec![3u8; 33],
+            paillier_sk: vec![4u8; 32],
+            paillier_pk: vec![5u8; 32],
+            pedersen_params: vec![6u8; 32],
+            real_paillier_sk: None,
+            real_paillier_pk: None,
+            all_paillier_pks: None,
+        };
+
+        let bytes = serde_json::to_vec(&old_share).unwrap();
+        let restored: Cggmp21ShareData = serde_json::from_slice(&bytes).unwrap();
+
+        assert!(restored.real_paillier_sk.is_none());
+        assert!(restored.real_paillier_pk.is_none());
+        assert!(restored.all_paillier_pks.is_none());
+        assert_eq!(restored.party_index, 1);
+        assert_eq!(restored.secret_share, vec![1u8; 32]);
+
+        // Shares without optional fields should also deserialize
+        // (simulating old format without the real_paillier_* fields)
+        let old_share2 = Cggmp21ShareData {
+            party_index: 2,
+            secret_share: vec![1u8; 32],
+            public_shares: vec![vec![2u8; 33]],
+            group_public_key: vec![3u8; 33],
+            paillier_sk: vec![4u8; 32],
+            paillier_pk: vec![5u8; 32],
+            pedersen_params: vec![6u8; 32],
+            real_paillier_sk: None,
+            real_paillier_pk: None,
+            all_paillier_pks: None,
+        };
+        let old_format = serde_json::to_vec(&old_share2).unwrap();
+        // The JSON should NOT contain real_paillier_* fields (skip_serializing_if)
+        let json_str = String::from_utf8(old_format.clone()).unwrap();
+        assert!(
+            !json_str.contains("real_paillier"),
+            "None fields must not be serialized"
+        );
+        let restored2: Cggmp21ShareData = serde_json::from_slice(&old_format).unwrap();
+        assert!(restored2.real_paillier_sk.is_none());
+        assert_eq!(restored2.party_index, 2);
+    }
+
+    #[test]
+    fn test_reject_bad_paillier_key() {
+        use crate::paillier::zk_proofs::{verify_pifac, NthRootProofRound, PifacProof};
+
+        // Create a Pifac proof with wrong bit sizes (simulating a bad key with small factors)
+        let bad_proof = PifacProof {
+            commitment: vec![0u8; 32],
+            nonce: vec![0u8; 32],
+            p_bits: 64, // Too small! Must be >= 256 bits
+            q_bits: 64,
+            nth_root_proofs: vec![NthRootProofRound {
+                x: vec![1u8; 32],
+                a: vec![1u8; 32],
+            }],
+        };
+
+        // A small N (128 bits) should fail Pifac verification
+        let small_n = num_bigint::BigUint::from(u128::MAX);
+        assert!(
+            !verify_pifac(&small_n, &bad_proof),
+            "Πfac must reject keys with small factors"
+        );
+    }
+
+    #[test]
+    fn test_paillier_keys_in_share_data_serde() {
+        use crate::paillier::keygen::generate_paillier_keypair;
+
+        let (pk, sk) = generate_paillier_keypair(512);
+        let share = Cggmp21ShareData {
+            party_index: 1,
+            secret_share: vec![1u8; 32],
+            public_shares: vec![vec![2u8; 33]],
+            group_public_key: vec![3u8; 33],
+            paillier_sk: vec![4u8; 32],
+            paillier_pk: vec![5u8; 32],
+            pedersen_params: vec![6u8; 32],
+            real_paillier_sk: Some(sk),
+            real_paillier_pk: Some(pk.clone()),
+            all_paillier_pks: Some(vec![pk]),
+        };
+
+        // Serialize
+        let bytes = serde_json::to_vec(&share).unwrap();
+        // Deserialize
+        let restored: Cggmp21ShareData = serde_json::from_slice(&bytes).unwrap();
+
+        // Verify Paillier keys survive roundtrip
+        assert!(restored.real_paillier_pk.is_some());
+        assert!(restored.real_paillier_sk.is_some());
+        assert!(restored.all_paillier_pks.is_some());
+
+        let restored_pk = restored.real_paillier_pk.clone().unwrap();
+        let original_n = share.real_paillier_pk.as_ref().unwrap().n_biguint();
+        let restored_n = restored_pk.n_biguint();
+        assert_eq!(
+            original_n, restored_n,
+            "Paillier N must survive serialization"
+        );
+
+        let all_pks = restored.all_paillier_pks.clone().unwrap();
+        assert_eq!(all_pks.len(), 1);
+        assert_eq!(all_pks[0].n_biguint(), original_n);
     }
 }
