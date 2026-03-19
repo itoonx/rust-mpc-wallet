@@ -77,7 +77,7 @@ git clone https://github.com/itoonx/vaultex-mpc-rust.git
 cd vaultex-mpc-rust
 
 # 运行单元 + 集成测试（无需基础设施）
-cargo test --workspace              # 507 个测试，约 4 秒
+cargo test --workspace              # 540 个测试，约 4 秒
 
 # 在本地启动完整生产栈（Vault + Redis + NATS + 3 个 MPC 节点 + 网关）
 ./scripts/local-infra.sh up         # 一键：构建、配置、启动全部
@@ -446,7 +446,7 @@ docker compose -f infra/docker/docker-compose.yml up -d
 
 | 层级 | 测试数 | 验证内容 |
 |------|-------|---------|
-| **单元测试** (507) | `cargo test --workspace` | 协议正确性、链提供器、认证、策略 |
+| **单元测试** (540) | `cargo test --workspace` | 协议正确性、链提供器、认证、策略 |
 | **签名验证** (14) | 全部 50 条链 | MPC 签名的密码学正确性 |
 | **E2E — 网关** (7) | Vault、Redis、认证、链端点 | 基础设施集成 |
 | **E2E — 分布式** (2) | 3 节点 keygen + 2 节点 sign | **真正的 MPC：每节点 1 份额，网关 0 份额** |
@@ -621,9 +621,9 @@ docs/                  ← 架构、API 参考、CLI 指南、部署
 ## 指标
 
 ```
-  链:       50           测试:      507 + 15 E2E
+  链:       50           测试:      540 + 16 E2E
   协议:     6            CI:        fmt + clippy + test + audit + E2E
-  Sprint:   15           漏洞:      0 CRITICAL | 0 HIGH 未解决
+  Sprint:   17           漏洞:      0 CRITICAL | 0 HIGH 未解决
   决策:     15           基准测试:   ~35
 ```
 

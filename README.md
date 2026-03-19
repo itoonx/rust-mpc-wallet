@@ -77,7 +77,7 @@ git clone https://github.com/itoonx/vaultex-mpc-rust.git
 cd vaultex-mpc-rust
 
 # Run unit + integration tests (no infra needed)
-cargo test --workspace              # 507 tests, ~4 seconds
+cargo test --workspace              # 540 tests, ~4 seconds
 
 # Start full production stack locally (Vault + Redis + NATS + 3 MPC nodes + gateway)
 ./scripts/local-infra.sh up         # 1-shot: builds, provisions, starts everything
@@ -479,7 +479,7 @@ docker compose -f infra/docker/docker-compose.yml up -d
 
 | Layer | Tests | What it proves |
 |-------|-------|---------------|
-| **Unit** (507) | `cargo test --workspace` | Protocol correctness, chain providers, auth, policy |
+| **Unit** (540) | `cargo test --workspace` | Protocol correctness, chain providers, auth, policy |
 | **Signature Verification** (14) | All 50 chains | MPC signature verifies cryptographically per chain |
 | **E2E — Gateway** (7) | Vault secrets, Redis sessions, auth, chain endpoints | Infrastructure integration |
 | **E2E — Distributed** (2) | 3 nodes keygen + 2 nodes sign via NATS | **True MPC: each node holds 1 share, gateway holds 0** |
@@ -487,7 +487,7 @@ docker compose -f infra/docker/docker-compose.yml up -d
 | **Benchmarks** (~35) | `cargo bench --workspace` | Performance baselines for all operations |
 
 ```bash
-cargo test --workspace                           # 507 unit tests (~4s)
+cargo test --workspace                           # 540 unit tests (~4s)
 cargo test --test signature_verification         # 14 sig verification tests
 ./scripts/local-infra.sh test                    # E2E with live infra
 cargo bench --workspace                          # Performance benchmarks
@@ -663,9 +663,9 @@ docs/                  ← Architecture, API reference, CLI guide, deployment
 ## Metrics
 
 ```
-  Chains:    50          Tests:     507 + 15 E2E
+  Chains:    50          Tests:     540 + 16 E2E
   Protocols: 6           CI:        fmt + clippy + test + audit + E2E
-  Sprints:   15          Findings:  0 CRITICAL | 0 HIGH open
+  Sprints:   17          Findings:  0 CRITICAL | 0 HIGH open
   Decisions: 15          Benchmarks: ~35
 ```
 

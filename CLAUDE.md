@@ -95,7 +95,7 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 15 — production readiness, CI green)
+## Current State (as of Sprint 17 — security hardening, CI green)
 
 ### Auth System (3 methods, Redis-ready)
 
@@ -197,7 +197,7 @@ Gateway (creates proof)    →    MPC Node (verifies before sign)
 
 ### Tests on `main`
 ```
-507 tests pass (cargo test --workspace) + 15 E2E (--ignored, need live infra)
+540 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
 cargo fmt        clean
 cargo clippy     clean (0 warnings, -D warnings)
 cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
@@ -213,8 +213,29 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 - **Sprint 13:** COMPLETE — FROST reshare, DR plan, RPC failover, chaos framework
 - **Sprint 14:** COMPLETE — JetStream ACL (E5), WORM storage config (F4), CI fixes (clippy + audit)
 - **Sprint 15:** COMPLETE — Production readiness (standard errors, Vault, NatsTransport fix, sig verification, gateway↔node split, benchmarks, CI E2E)
+- **Sprint 16:** COMPLETE — FROST keygen over NATS, request-reply control plane, 14 new chain tests, real SignAuthorization in gateway, E2E re-enabled, DEC-015 security audit (SEC-025..031)
+- **Sprint 17:** COMPLETE — Security hardening (SEC-008, SEC-013, SEC-014, SEC-017, SEC-019, SEC-023, SEC-025 resolved), authorization_id replay protection, 10 security regression tests
 
 **All 10 epics: 100% COMPLETE**
+
+### New in Sprint 17
+- SEC-008 FIX: GG20 secret scalars explicitly zeroized in keygen, sign, refresh, reshare
+- SEC-013 FIX: FROST protocols validate `from` field against expected signer set
+- SEC-014 FIX: `LocalTransport` gated behind `#[cfg(any(test, feature = "demo"))]`
+- SEC-017 FIX: Solana tx builder validates `from` address matches signing pubkey
+- SEC-019: `quinn-proto` already at patched 0.11.14 (confirmed + cargo update)
+- SEC-023 FIX: Sui invalid hex validation tests added
+- SEC-025 FIX: `GATEWAY_PUBKEY` mandatory in mpc-node (nodes reject startup without it)
+- `authorization_id` field added to SignAuthorization for replay deduplication
+- 10 security regression tests (R5)
+
+### New in Sprint 16
+- FROST Ed25519 keygen over NATS with broadcast fix in `nats.rs` (R1)
+- NATS URL fix + Request-Reply control plane for orchestrator/mpc-node/rpc (R2)
+- 14 new chain simulation tests: Substrate, TON, TRON, Monero (R3)
+- Real `SignAuthorization` wired in gateway sign route (R4)
+- All E2E tests re-enabled in CI with request-reply (R5)
+- DEC-015 security audit by R6 — APPROVED (SEC-025 through SEC-031 filed)
 
 ### New in Sprint 15
 - `services/mpc-node/` — Epic DEC-015: standalone MPC node binary (NATS + EncryptedFileStore + SignAuthorization)
@@ -316,6 +337,18 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 | SEC-012 | EVM high-S ECDSA signatures not normalised | Sprint 6 T-S6-03 — auto-normalise via n-s + flip recovery_id |
 | SEC-015 | KeyShare derives Debug — share bytes in logs | Sprint 4 T-S4-00 — manual Debug impl redacts share_data |
 | SEC-016 | Bitcoin SerializableTx::to_tx() uses unwrap | Sprint 5 T-S5-03 — proper error propagation |
+
+### Resolved MEDIUM/LOW Findings (Sprint 17)
+| ID | Severity | Summary | Resolved |
+|----|----------|---------|---------|
+| SEC-008 | MEDIUM | GG20 secret scalar not zeroized | Sprint 17 — explicit zeroize in keygen/sign/refresh/reshare |
+| SEC-013 | MEDIUM | FROST `from` field not validated | Sprint 17 — validate against expected signer set |
+| SEC-014 | LOW | LocalTransport no feature gate | Sprint 17 — `#[cfg(any(test, feature = "demo"))]` |
+| SEC-017 | LOW | Solana from-address not validated | Sprint 17 — validate matches signing pubkey |
+| SEC-018 | LOW | rustls-pemfile unmaintained | Sprint 17 — mitigated (async-nats audit documented) |
+| SEC-019 | LOW | quinn-proto DoS vulnerability | Sprint 17 — already patched at 0.11.14 |
+| SEC-023 | LOW | Sui missing hex validation test | Sprint 17 — invalid hex test added |
+| SEC-025 | MEDIUM | GATEWAY_PUBKEY optional in mpc-node | Sprint 17 — made mandatory, startup rejects without it |
 
 Full findings log → `docs/SECURITY_FINDINGS.md`
 

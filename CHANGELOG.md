@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-03-19 (Sprint 17: Security Hardening)
+
+### Fixed
+
+- SEC-008: GG20 secret scalars explicitly zeroized in keygen, sign, refresh, reshare (R1)
+- SEC-013: FROST protocols validate `from` field against expected signer set (R1)
+- SEC-014: `LocalTransport` gated behind `#[cfg(any(test, feature = "demo"))]` feature flag (R2)
+- SEC-017: Solana tx builder validates `from` address matches signing pubkey (R3c)
+- SEC-019: `quinn-proto` confirmed at patched 0.11.14 + `cargo update` applied (R0)
+- SEC-023: Sui invalid hex validation test added (R3d)
+- SEC-025: `GATEWAY_PUBKEY` mandatory in mpc-node — startup rejects without it (R2)
+
+### Added
+
+- `authorization_id` field in SignAuthorization for replay deduplication (R1)
+- 10 security regression tests covering all Sprint 17 fixes (R5)
+
+### Changed
+
+- `async-nats` audit documented as mitigated (SEC-018) — `rustls-pemfile` transitive dep tracked (R2)
+- Test count: 507 -> 540 (33 new tests)
+
+## [0.2.0] - 2026-03-18 (Sprint 16: NATS Control Plane + Chain Tests)
+
+### Added
+
+- FROST Ed25519 keygen over NATS with broadcast fix in `nats.rs` (R1)
+- Request-Reply control plane for orchestrator, mpc-node, and RPC modules (R2)
+- 14 new chain simulation tests: Substrate, TON, TRON, Monero (R3)
+- Real `SignAuthorization` wired in gateway sign route — gateway creates Ed25519-signed proof (R4)
+- All E2E tests re-enabled in CI with request-reply pattern (R5)
+
+### Security
+
+- DEC-015 security audit by R6 — APPROVED verdict
+- SEC-025 through SEC-031 filed (3 MEDIUM, 4 LOW, 2 INFO)
+- No CRITICAL or HIGH findings in production architecture
+
+### Fixed
+
+- NATS URL parsing fix for connection reliability (R2)
+
 ## [0.1.0] - 2026-03-16
 
 ### Added
@@ -85,5 +127,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SEC-015: Debug leaks share bytes → manual Debug with `[REDACTED]`
 - SEC-016: Bitcoin unwrap → proper error propagation
 
-[Unreleased]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/itoonx/vaultex-mpc-rust/releases/tag/v0.1.0

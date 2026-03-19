@@ -25,22 +25,22 @@
 
 | ID | Severity | Summary |
 |----|----------|---------|
-| SEC-008 | MEDIUM | GG20 reconstructed `Scalar` not explicitly zeroized before drop |
+| SEC-008 | MEDIUM | ~~GG20 reconstructed `Scalar` not explicitly zeroized before drop~~ **RESOLVED** by T-S17-01 (R1) — explicit zeroize in keygen/sign/refresh/reshare |
 | SEC-009 | MEDIUM | Bitcoin Taproot sighash uses empty `prev_out.script_pubkey` — produces invalid transactions |
 | SEC-010 | MEDIUM | ~~Solana `tx_hash` is only first 8 bytes of signature — not a real Solana tx ID~~ **RESOLVED** by T-07 (R3c) |
 | SEC-011 | MEDIUM | Sui transaction serialization uses JSON instead of BCS — rejected by Sui nodes |
 | SEC-012 | MEDIUM | EVM finalization does not enforce low-S ECDSA normalization |
-| SEC-013 | MEDIUM | FROST protocols trust self-reported `from` field for party ID mapping |
+| SEC-013 | MEDIUM | ~~FROST protocols trust self-reported `from` field for party ID mapping~~ **RESOLVED** by T-S17-01 (R1) — validate `from` against expected signer set |
 | SEC-014 | LOW | ~~`LocalTransport` has no `#[cfg(test)]` gate — can be used in production accidentally~~ **RESOLVED** by T-S17-02 (R2) |
 | SEC-015 | LOW | `KeyShare` derives `Debug` — `share_data` bytes visible in log output |
 | SEC-016 | LOW | Bitcoin `SerializableTx::to_tx()` uses `.unwrap()` — panics on malformed input |
-| SEC-017 | LOW | Solana tx builder does not validate `from` address matches signing pubkey |
+| SEC-017 | LOW | ~~Solana tx builder does not validate `from` address matches signing pubkey~~ **RESOLVED** by T-S17-03 (R3c) — validate from address matches signing pubkey |
 | SEC-018 | LOW | ~~`rustls-pemfile` (transitive via `async-nats`) is unmaintained (RUSTSEC-2025-0134)~~ **MITIGATED** by T-S17-02 (R2) |
-| SEC-019 | LOW | `quinn-proto 0.11.13` — known DoS vulnerability RUSTSEC-2026-0037 (CVSS 8.7) |
+| SEC-019 | LOW | ~~`quinn-proto 0.11.13` — known DoS vulnerability RUSTSEC-2026-0037 (CVSS 8.7)~~ **RESOLVED** by T-S17-05 (R0) — already patched at 0.11.14 + cargo update |
 | SEC-020 | INFO | FROST protocols correctly avoid full key reconstruction (positive finding) |
 | SEC-021 | INFO | AES-256-GCM uses fresh random salt + nonce per write — no reuse risk (positive finding) |
 | SEC-022 | INFO | Git history scan found no committed secrets (positive finding) |
-| SEC-023 | LOW | T-06 (R3d): invalid-hex test case missing — no dedicated test for `0x` + 64 non-hex chars path |
+| SEC-023 | LOW | ~~T-06 (R3d): invalid-hex test case missing — no dedicated test for `0x` + 64 non-hex chars path~~ **RESOLVED** by T-S17-04 (R3d) — invalid hex validation test added |
 
 ---
 
@@ -243,7 +243,8 @@
   explicitly on it before it goes out of scope. Wrap `signing_key` in a guard that calls
   `zeroize()`. This is moot if SEC-001 is fixed (the scalar wouldn't exist), but should be
   addressed regardless as a defense-in-depth measure.
-- **Status:** Open
+- **Status:** Resolved
+- **Resolved in commit:** `58671b5` (T-S17-01, R1) — explicit zeroize of secret scalars in GG20 keygen, sign, refresh, and reshare paths. Gated behind `#[cfg(feature = "gg20-simulation")]`.
 
 ---
 
@@ -367,7 +368,8 @@
 - **Recommendation:** Validate that the `from` field matches the cryptographic identity of
   the sender (requires SEC-007 to be addressed at the transport level first). Add explicit
   validation that duplicate `from` IDs are rejected in the `BTreeMap` insertion loop.
-- **Status:** Open
+- **Status:** Resolved
+- **Resolved in commit:** `1503b68` (T-S17-01, R1) — validate FROST `from` field against expected signer set before inserting into BTreeMap.
 
 ---
 
@@ -444,7 +446,8 @@
 - **Impact:** Incorrectly constructed transactions that waste signing operations.
 - **Recommendation:** Pass the `GroupPublicKey` to `build_solana_transaction` and validate
   that `from_bytes` equals the Ed25519 public key bytes before building the transaction.
-- **Status:** Open
+- **Status:** Resolved
+- **Resolved in commit:** `dc5488a` (T-S17-03, R3c) — validate Solana `from` address matches signing pubkey before transaction construction.
 
 ---
 
@@ -481,7 +484,8 @@
   CVSS score.
 - **Recommendation:** Update `alloy` to a version that depends on `quinn-proto >= 0.11.14`,
   or add a `[patch.crates-io]` override to pin `quinn-proto` to the fixed version.
-- **Status:** Open
+- **Status:** Resolved
+- **Resolved in commit:** `4b588c3` (T-S17-05, R0) — `quinn-proto` already at patched version 0.11.14 + `cargo update` applied to all dependencies.
 
 ---
 
@@ -696,7 +700,8 @@ RPC call. Retrospectively APPROVED.
   security posture.
 - **Recommendation:** Add one test: `"0x" + "zz" * 32` (64 non-hex chars) → assert `is_err()`.
   One line change to the test file.
-- **Status:** Open
+- **Status:** Resolved
+- **Resolved in commit:** `0e95ad3` (T-S17-04, R3d) — invalid hex validation test added for Sui addresses.
 - **Owner:** R3d
 
 ---
@@ -1110,7 +1115,7 @@ Full security audit of the DEC-015 distributed architecture introduced in Sprint
 
 | ID | Severity | Summary | Status |
 |----|----------|---------|--------|
-| SEC-025 | MEDIUM | MPC nodes skip SignAuthorization verification when GATEWAY_PUBKEY is not configured | OPEN |
+| SEC-025 | MEDIUM | ~~MPC nodes skip SignAuthorization verification when GATEWAY_PUBKEY is not configured~~ **RESOLVED** by T-S17-02 (R2) — GATEWAY_PUBKEY mandatory, startup rejects without it | RESOLVED |
 | SEC-026 | MEDIUM | Control plane messages (mpc.control.*) are plain JSON — no SignedEnvelope, no authentication | OPEN |
 | SEC-027 | MEDIUM | Orchestrator generates ephemeral peer keys during keygen/sign — nodes receive wrong keys | OPEN |
 | SEC-028 | LOW | NodeConfig.key_store_password is plain String — not Zeroizing after EncryptedFileStore init | OPEN |
@@ -1148,6 +1153,8 @@ Full security audit of the DEC-015 distributed architecture introduced in Sprint
   2. At minimum, log a WARN on every sign request when `GATEWAY_PUBKEY` is None.
   3. Consider adding a `--allow-unsigned` flag that must be explicitly set for dev/test use.
   4. Document `GATEWAY_PUBKEY` as a mandatory deployment requirement.
+- **Status:** Resolved
+- **Resolved in commit:** `8f298df` (T-S17-02, R2) — `GATEWAY_PUBKEY` is now mandatory; mpc-node panics on startup if not set. No `--allow-unsigned` bypass exists.
 
 ---
 
