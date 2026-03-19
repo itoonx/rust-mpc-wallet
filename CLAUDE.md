@@ -95,7 +95,7 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 22 — KMS/HSM integration, Milestone 3 in progress)
+## Current State (as of Sprint 23 — SGX prototype, Milestone 3 COMPLETE)
 
 ### Auth System (3 methods, Redis-ready)
 
@@ -197,7 +197,7 @@ Gateway (creates proof)    →    MPC Node (verifies before sign)
 
 ### Tests on `main`
 ```
-639 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
+657 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
 cargo fmt        clean
 cargo clippy     clean (0 warnings, -D warnings)
 cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
@@ -220,8 +220,9 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 - **Sprint 20:** COMPLETE — CGGMP21 Signing (pre-signing phase, online 1-round signing, identifiable abort, low-s normalization, 7 new signing tests)
 - **Sprint 21:** COMPLETE — CGGMP21 Integration (key refresh, 50 chains wired, 32 protocol tests, R6 audit APPROVED)
 - **Sprint 22:** COMPLETE — KMS/HSM Integration (AES-256-GCM key wrapping, KMS envelope encryption interface, Vault credential rotation, secret refresher)
+- **Sprint 23:** COMPLETE — SGX Prototype (design doc, MockEnclaveProvider, AttestationVerifier, R6 audit APPROVED)
 
-**All 10 epics: 100% COMPLETE | M1: DONE | M2: DONE | Milestone 3 (HSM/KMS): IN PROGRESS**
+**All 10 epics: 100% COMPLETE | M1: DONE | M2: DONE | M3 (HSM/SGX): DONE | Milestone 4 (Policy v2): NEXT**
 
 ### New in Sprint 22
 - AES-256-GCM key wrapping replaces XOR placeholder in `KeyEncryptionProvider` (R2)
