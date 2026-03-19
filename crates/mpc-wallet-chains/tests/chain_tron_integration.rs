@@ -82,3 +82,29 @@ fn test_registry_creates_tron() {
     let provider = registry.provider(Chain::Tron).unwrap();
     assert_eq!(provider.chain(), Chain::Tron);
 }
+
+#[test]
+fn test_tron_deterministic_address() {
+    let provider = mpc_wallet_chains::tron::TronProvider::new();
+    let addr1 = provider.derive_address(&secp256k1_pubkey()).unwrap();
+    let addr2 = provider.derive_address(&secp256k1_pubkey()).unwrap();
+    assert_eq!(addr1, addr2, "same pubkey must produce same address");
+}
+
+#[test]
+fn test_tron_address_length() {
+    let provider = mpc_wallet_chains::tron::TronProvider::new();
+    let addr = provider.derive_address(&secp256k1_pubkey()).unwrap();
+    assert_eq!(addr.len(), 34, "TRON base58 address must be 34 characters");
+}
+
+#[test]
+fn test_tron_address_base58_valid() {
+    let provider = mpc_wallet_chains::tron::TronProvider::new();
+    let addr = provider.derive_address(&secp256k1_pubkey()).unwrap();
+    // Base58 charset: no 0, O, I, l
+    assert!(
+        !addr.contains('0') && !addr.contains('O') && !addr.contains('I') && !addr.contains('l'),
+        "TRON address must be valid base58 (no 0, O, I, l)"
+    );
+}

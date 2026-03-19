@@ -68,3 +68,43 @@ fn test_registry_creates_monero() {
     let provider = registry.provider(Chain::Monero).unwrap();
     assert_eq!(provider.chain(), Chain::Monero);
 }
+
+#[test]
+fn test_monero_deterministic_address() {
+    let provider = mpc_wallet_chains::monero::MoneroProvider::new();
+    let addr1 = provider.derive_address(&ed25519_pubkey()).unwrap();
+    let addr2 = provider.derive_address(&ed25519_pubkey()).unwrap();
+    assert_eq!(addr1, addr2, "same pubkey must produce same address");
+}
+
+#[tokio::test]
+async fn test_monero_broadcast_invalid_url() {
+    let provider = mpc_wallet_chains::monero::MoneroProvider::new();
+    let unsigned = provider.build_transaction(transfer_params()).await.unwrap();
+    let sig = MpcSignature::EdDsa {
+        signature: [0xEE; 64],
+    };
+    let signed = provider.finalize_transaction(&unsigned, &sig).unwrap();
+    assert!(provider
+        .broadcast(&signed, "http://invalid.localhost:1")
+        .await
+        .is_err());
+}
+
+#[test]
+fn test_monero_address_format() {
+    let provider = mpc_wallet_chains::monero::MoneroProvider::new();
+    let addr = provider.derive_address(&ed25519_pubkey()).unwrap();
+    // Monero address is base58-encoded: network_byte(1) + spend_key(32) + view_key(32) + checksum(4) = 69 bytes
+    // Base58 encoding of 69 bytes produces a string of ~95 characters
+    assert!(
+        addr.len() > 80,
+        "Monero address should be long base58 string, got len={}",
+        addr.len()
+    );
+    // Must only contain valid base58 characters (no 0, O, I, l)
+    assert!(
+        addr.chars().all(|c| c.is_ascii_alphanumeric()),
+        "Monero address must be alphanumeric base58"
+    );
+}

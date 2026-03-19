@@ -102,3 +102,43 @@ fn test_substrate_different_addresses_per_chain() {
         "Polkadot and Kusama must have different SS58 addresses"
     );
 }
+
+#[test]
+fn test_astar_address() {
+    let provider = mpc_wallet_chains::substrate::SubstrateProvider::astar();
+    let addr = provider.derive_address(&ed25519_pubkey()).unwrap();
+    assert!(!addr.is_empty());
+    assert_eq!(provider.chain(), Chain::Astar);
+}
+
+#[test]
+fn test_acala_address() {
+    let provider = mpc_wallet_chains::substrate::SubstrateProvider::acala();
+    let addr = provider.derive_address(&ed25519_pubkey()).unwrap();
+    assert!(!addr.is_empty());
+    assert_eq!(provider.chain(), Chain::Acala);
+}
+
+#[test]
+fn test_phala_address() {
+    let provider = mpc_wallet_chains::substrate::SubstrateProvider::phala();
+    let addr = provider.derive_address(&ed25519_pubkey()).unwrap();
+    assert!(!addr.is_empty());
+    assert_eq!(provider.chain(), Chain::Phala);
+}
+
+#[test]
+fn test_interlay_address() {
+    let provider = mpc_wallet_chains::substrate::SubstrateProvider::interlay();
+    let addr = provider.derive_address(&ed25519_pubkey()).unwrap();
+    assert!(!addr.is_empty());
+    assert_eq!(provider.chain(), Chain::Interlay);
+}
+
+#[test]
+fn test_substrate_deterministic_address() {
+    let provider = mpc_wallet_chains::substrate::SubstrateProvider::polkadot();
+    let addr1 = provider.derive_address(&ed25519_pubkey()).unwrap();
+    let addr2 = provider.derive_address(&ed25519_pubkey()).unwrap();
+    assert_eq!(addr1, addr2, "same pubkey must produce same address");
+}

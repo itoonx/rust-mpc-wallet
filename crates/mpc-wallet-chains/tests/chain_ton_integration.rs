@@ -79,3 +79,32 @@ fn test_registry_creates_ton() {
     let provider = registry.provider(Chain::Ton).unwrap();
     assert_eq!(provider.chain(), Chain::Ton);
 }
+
+#[test]
+fn test_ton_deterministic_address() {
+    let provider = mpc_wallet_chains::ton::TonProvider::new();
+    let addr1 = provider.derive_address(&ed25519_pubkey()).unwrap();
+    let addr2 = provider.derive_address(&ed25519_pubkey()).unwrap();
+    assert_eq!(addr1, addr2, "same pubkey must produce same address");
+}
+
+#[test]
+fn test_ton_cell_hash_consistency() {
+    let cell = mpc_wallet_chains::ton::cell::build_transfer_cell(0, &[0xAB; 32], 1_000_000, true);
+    let hash1 = cell.hash();
+    let hash2 = cell.hash();
+    assert_eq!(hash1, hash2, "cell hash must be deterministic");
+    assert_eq!(hash1.len(), 32, "cell hash must be 32 bytes");
+}
+
+#[tokio::test]
+async fn test_ton_rejects_ecdsa_signature() {
+    let provider = mpc_wallet_chains::ton::TonProvider::new();
+    let unsigned = provider.build_transaction(transfer_params()).await.unwrap();
+    let sig = MpcSignature::Ecdsa {
+        r: vec![0; 32],
+        s: vec![0; 32],
+        recovery_id: 0,
+    };
+    assert!(provider.finalize_transaction(&unsigned, &sig).is_err());
+}
