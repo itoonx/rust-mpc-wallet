@@ -10,6 +10,7 @@ default = ["gg20-distributed"]
 gg20-simulation = []
 gg20-distributed = []
 local-transport = []
+aws-kms = []
 
 [dependencies]
 # MPC protocols
