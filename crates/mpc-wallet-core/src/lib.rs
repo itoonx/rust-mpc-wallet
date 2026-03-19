@@ -26,6 +26,12 @@ pub mod approvals;
 /// Use [`audit::AuditLedger`] to record every signing event. Call
 /// [`audit::AuditLedger::verify`] to check tamper-evident chain integrity.
 pub mod audit;
+/// Enclave attestation verification and TEE provider abstraction.
+///
+/// Provides [`enclave::AttestationVerifier`] for validating remote attestation
+/// reports against trusted measurements, and [`enclave::MockAttestationVerifier`]
+/// for test/CI environments without real TEE hardware.
+pub mod enclave;
 /// Error types returned by all core operations.
 pub mod error;
 /// JWT-based identity validation (Epic A).
