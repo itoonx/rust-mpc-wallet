@@ -53,6 +53,8 @@
 //! `gg20-simulation` feature which is **disabled by default** (SEC-001).
 
 use crate::error::CoreError;
+use crate::paillier::zk_proofs::{prove_pifac, prove_pimod, verify_pifac, verify_pimod};
+use crate::paillier::{PaillierPublicKey, PaillierSecretKey};
 use crate::protocol::{GroupPublicKey, KeyShare, MpcProtocol, MpcSignature};
 use crate::transport::{ProtocolMessage, Transport};
 use crate::types::{CryptoScheme, PartyId, ThresholdConfig};
@@ -66,6 +68,7 @@ use k256::{
     elliptic_curve::{Field, PrimeField},
     ProjectivePoint, Scalar,
 };
+use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
@@ -85,6 +88,34 @@ struct Gg20ShareData {
     x: u16,
     /// This party's Shamir share value `f(x)` as 32 bytes big-endian scalar.
     y: Vec<u8>,
+    /// Real Paillier secret key (Sprint 28, optional for backward compat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    real_paillier_sk: Option<PaillierSecretKey>,
+    /// Real Paillier public key (Sprint 28, optional for backward compat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[zeroize(skip)]
+    real_paillier_pk: Option<PaillierPublicKey>,
+    /// All parties' verified Paillier public keys (Sprint 28).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[zeroize(skip)]
+    all_paillier_pks: Option<Vec<PaillierPublicKey>>,
+}
+
+/// Default Paillier key size for tests (fast, ~10ms).
+#[cfg(any(test, feature = "local-transport"))]
+const GG20_PAILLIER_BITS: usize = 512;
+
+/// Default Paillier key size for production (secure, ~1-5s).
+#[cfg(not(any(test, feature = "local-transport")))]
+const GG20_PAILLIER_BITS: usize = 2048;
+
+/// GG20 auxiliary info broadcast (Paillier PK + ZK proofs).
+#[derive(Serialize, Deserialize)]
+struct Gg20AuxInfoBroadcast {
+    party_index: u16,
+    paillier_pk: PaillierPublicKey,
+    pimod_proof: crate::paillier::zk_proofs::PimodProof,
+    pifac_proof: crate::paillier::zk_proofs::PifacProof,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -291,46 +322,42 @@ async fn distributed_keygen(
 ) -> Result<KeyShare, CoreError> {
     use k256::elliptic_curve::sec1::ToEncodedPoint;
 
-    if party_id == PartyId(1) {
+    // ── Phase 1: Shamir share distribution ──────────────────────────────
+    let (share_data_base, group_pubkey_bytes) = if party_id == PartyId(1) {
         // ── Dealer: all scalar work before first .await ───────────────────
-        // SEC-008 FIX: wrap dealer secret in Zeroizing so it is wiped after
-        // Shamir splitting completes.
         let secret = Zeroizing::new(Scalar::random(&mut rand::thread_rng()));
 
-        // Compute group public key = x · G (compressed 33-byte SEC1).
         let public_point = (ProjectivePoint::GENERATOR * *secret).to_affine();
         let public_key = k256::PublicKey::from_affine(public_point)
             .map_err(|e| CoreError::Crypto(e.to_string()))?;
         let group_pubkey_bytes = public_key.to_encoded_point(true).as_bytes().to_vec();
 
-        // Shamir split — yields raw f(i) for each party.
         let shamir_shares = shamir_split(&secret, config.threshold, config.total_parties);
 
-        // Build outgoing messages (raw Shamir shares, NOT Lagrange-weighted).
-        // The full `secret` is used only here and is not transmitted.
         let mut messages: Vec<(PartyId, Vec<u8>)> = Vec::new();
-        let mut my_share_payload: Option<Vec<u8>> = None;
+        let mut my_share_data: Option<Gg20ShareData> = None;
 
         for &(x, ref y) in &shamir_shares {
-            let share_data = Gg20ShareData {
+            let sd = Gg20ShareData {
                 x,
                 y: y.to_repr().to_vec(),
+                real_paillier_sk: None,
+                real_paillier_pk: None,
+                all_paillier_pks: None,
             };
-            let share_bytes = serde_json::to_vec(&share_data)
+            let share_bytes =
+                serde_json::to_vec(&sd).map_err(|e| CoreError::Serialization(e.to_string()))?;
+            let msg_payload = serde_json::to_vec(&(share_bytes, group_pubkey_bytes.clone()))
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
-            let msg_payload =
-                serde_json::to_vec(&(share_bytes.clone(), group_pubkey_bytes.clone()))
-                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
             let target = PartyId(x);
             if target == party_id {
-                my_share_payload = Some(share_bytes);
+                my_share_data = Some(sd);
             } else {
                 messages.push((target, msg_payload));
             }
         }
 
-        // ── Async: send shares to all other parties ───────────────────────
         for (target, payload) in messages {
             transport
                 .send(ProtocolMessage {
@@ -342,37 +369,99 @@ async fn distributed_keygen(
                 .await?;
         }
 
-        let share_bytes = my_share_payload
+        let sd = my_share_data
             .ok_or_else(|| CoreError::Crypto("party 1 missing in share list".into()))?;
-
-        Ok(KeyShare {
-            scheme: CryptoScheme::Gg20Ecdsa,
-            party_id,
-            config,
-            group_public_key: GroupPublicKey::Secp256k1(group_pubkey_bytes),
-            // SEC-004 root fix (T-S4-00): wrap in Zeroizing so key bytes are wiped on drop
-            share_data: zeroize::Zeroizing::new(share_bytes),
-        })
+        (sd, group_pubkey_bytes)
     } else {
-        // ── Non-dealer: receive share from Party 1 ────────────────────────
         let msg = transport.recv().await?;
         let (share_bytes, group_pubkey_bytes): (Vec<u8>, Vec<u8>) =
             serde_json::from_slice(&msg.payload)
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
-        // Validate deserialization.
-        let _: Gg20ShareData = serde_json::from_slice(&share_bytes)
+        let sd: Gg20ShareData = serde_json::from_slice(&share_bytes)
             .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        (sd, group_pubkey_bytes)
+    };
 
-        Ok(KeyShare {
-            scheme: CryptoScheme::Gg20Ecdsa,
-            party_id,
-            config,
-            group_public_key: GroupPublicKey::Secp256k1(group_pubkey_bytes),
-            // SEC-004 root fix (T-S4-00): wrap in Zeroizing so key bytes are wiped on drop
-            share_data: zeroize::Zeroizing::new(share_bytes),
+    // ── Phase 2: Paillier key generation + ZK proof exchange (Sprint 28) ──
+    let (real_pk, real_sk) = crate::paillier::keygen::generate_paillier_keypair(GG20_PAILLIER_BITS);
+    let p_big = BigUint::from_bytes_be(&real_sk.p);
+    let q_big = BigUint::from_bytes_be(&real_sk.q);
+    let n_big = real_pk.n_biguint();
+
+    let pimod_proof = prove_pimod(&n_big, &p_big, &q_big);
+    let pifac_proof = prove_pifac(&n_big, &p_big, &q_big);
+
+    let aux_msg = Gg20AuxInfoBroadcast {
+        party_index: party_id.0,
+        paillier_pk: real_pk.clone(),
+        pimod_proof,
+        pifac_proof,
+    };
+    let aux_payload =
+        serde_json::to_vec(&aux_msg).map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+    transport
+        .send(ProtocolMessage {
+            from: party_id,
+            to: None,
+            round: 2,
+            payload: aux_payload,
         })
+        .await?;
+
+    let n = config.total_parties;
+    let mut all_aux: Vec<Gg20AuxInfoBroadcast> = vec![aux_msg];
+    for _ in 1..n {
+        let msg = transport.recv().await?;
+        let aux: Gg20AuxInfoBroadcast = serde_json::from_slice(&msg.payload)
+            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        all_aux.push(aux);
     }
+    all_aux.sort_by_key(|a| a.party_index);
+
+    // Verify Πmod + Πfac proofs from all parties
+    for aux in &all_aux {
+        if aux.party_index == party_id.0 {
+            continue;
+        }
+        let peer_n = aux.paillier_pk.n_biguint();
+        if !verify_pimod(&peer_n, &aux.pimod_proof) {
+            return Err(CoreError::Protocol(format!(
+                "GG20: Πmod proof failed for party {} — invalid Paillier key",
+                aux.party_index
+            )));
+        }
+        if !verify_pifac(&peer_n, &aux.pifac_proof) {
+            return Err(CoreError::Protocol(format!(
+                "GG20: Πfac proof failed for party {} — Paillier key has small factors",
+                aux.party_index
+            )));
+        }
+    }
+
+    let all_paillier_pks: Vec<PaillierPublicKey> =
+        all_aux.iter().map(|a| a.paillier_pk.clone()).collect();
+
+    // Build final share data with Paillier keys
+    let final_share_data = Gg20ShareData {
+        x: share_data_base.x,
+        y: share_data_base.y.clone(),
+        real_paillier_sk: Some(real_sk),
+        real_paillier_pk: Some(real_pk),
+        all_paillier_pks: Some(all_paillier_pks),
+    };
+
+    let share_bytes = serde_json::to_vec(&final_share_data)
+        .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+    Ok(KeyShare {
+        scheme: CryptoScheme::Gg20Ecdsa,
+        party_id,
+        config,
+        group_public_key: GroupPublicKey::Secp256k1(group_pubkey_bytes),
+        share_data: zeroize::Zeroizing::new(share_bytes),
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -728,9 +817,13 @@ async fn distributed_refresh(
     let new_y = *old_y + delta;
 
     // Build new Gg20ShareData with updated share value, same x-coordinate.
+    // Preserve existing Paillier keys from old share (refresh doesn't change them).
     let new_share_data = Gg20ShareData {
         x: my_share.x,
         y: new_y.to_repr().to_vec(),
+        real_paillier_sk: my_share.real_paillier_sk.clone(),
+        real_paillier_pk: my_share.real_paillier_pk.clone(),
+        all_paillier_pks: my_share.all_paillier_pks.clone(),
     };
     let new_share_bytes = serde_json::to_vec(&new_share_data)
         .map_err(|e| CoreError::Serialization(format!("serialize refreshed share: {e}")))?;
@@ -881,9 +974,13 @@ async fn distributed_reshare(
         }
 
         // Build new Gg20ShareData with new share value.
+        // Paillier keys are not carried over during reshare (new group).
         let new_share_data = Gg20ShareData {
             x: my_party.0,
             y: new_share_scalar.to_repr().to_vec(),
+            real_paillier_sk: None,
+            real_paillier_pk: None,
+            all_paillier_pks: None,
         };
         let new_share_bytes = serde_json::to_vec(&new_share_data)
             .map_err(|e| CoreError::Serialization(format!("serialize reshared share: {e}")))?;
@@ -943,6 +1040,9 @@ async fn simulation_keygen(
             let share_data = Gg20ShareData {
                 x,
                 y: y.to_repr().to_vec(),
+                real_paillier_sk: None,
+                real_paillier_pk: None,
+                all_paillier_pks: None,
             };
             let payload = serde_json::to_vec(&share_data)
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
@@ -970,6 +1070,9 @@ async fn simulation_keygen(
         let share_data = Gg20ShareData {
             x: my_share.0,
             y: my_share.1.to_repr().to_vec(),
+            real_paillier_sk: None,
+            real_paillier_pk: None,
+            all_paillier_pks: None,
         };
 
         Ok(KeyShare {
@@ -1171,5 +1274,92 @@ mod tests {
 
         let reconstructed3 = lagrange_interpolate(&[shares[1], shares[2]]);
         assert_eq!(secret, reconstructed3);
+    }
+
+    // ── Sprint 28: GG20 Paillier key tests ──────────────────────────────
+
+    #[cfg(not(feature = "gg20-simulation"))]
+    #[tokio::test]
+    async fn test_gg20_keygen_with_paillier() {
+        use crate::transport::local::LocalTransportNetwork;
+
+        let config = ThresholdConfig::new(2, 3).unwrap();
+        let net = LocalTransportNetwork::new(3);
+
+        let mut handles = Vec::new();
+        for i in 1..=3u16 {
+            let pid = PartyId(i);
+            let transport = net.get_transport(pid);
+            handles.push(tokio::spawn(async move {
+                let p = Gg20Protocol::new();
+                p.keygen(config, pid, &*transport).await
+            }));
+        }
+
+        for h in handles {
+            let share = h.await.unwrap().unwrap();
+            let data: Gg20ShareData = serde_json::from_slice(&share.share_data).unwrap();
+
+            // Real Paillier keys must be present in new keygen
+            assert!(
+                data.real_paillier_pk.is_some(),
+                "GG20 keygen must generate real Paillier PK"
+            );
+            assert!(
+                data.real_paillier_sk.is_some(),
+                "GG20 keygen must generate real Paillier SK"
+            );
+            assert!(
+                data.all_paillier_pks.is_some(),
+                "GG20 keygen must store all parties' Paillier PKs"
+            );
+
+            let all_pks = data.all_paillier_pks.as_ref().unwrap();
+            assert_eq!(all_pks.len(), 3, "must have 3 Paillier PKs");
+        }
+    }
+
+    #[cfg(not(feature = "gg20-simulation"))]
+    #[tokio::test]
+    async fn test_gg20_paillier_proof_verification() {
+        use crate::paillier::zk_proofs::{prove_pifac, prove_pimod, verify_pifac, verify_pimod};
+        use crate::transport::local::LocalTransportNetwork;
+
+        let config = ThresholdConfig::new(2, 3).unwrap();
+        let net = LocalTransportNetwork::new(3);
+
+        let mut handles = Vec::new();
+        for i in 1..=3u16 {
+            let pid = PartyId(i);
+            let transport = net.get_transport(pid);
+            handles.push(tokio::spawn(async move {
+                let p = Gg20Protocol::new();
+                p.keygen(config, pid, &*transport).await
+            }));
+        }
+
+        for h in handles {
+            let share = h.await.unwrap().unwrap();
+            let data: Gg20ShareData = serde_json::from_slice(&share.share_data).unwrap();
+            let pk = data.real_paillier_pk.as_ref().unwrap();
+            let sk = data.real_paillier_sk.as_ref().unwrap();
+
+            // Verify the stored key produces valid ZK proofs
+            let p = num_bigint::BigUint::from_bytes_be(&sk.p);
+            let q = num_bigint::BigUint::from_bytes_be(&sk.q);
+            let n = pk.n_biguint();
+
+            let pimod = prove_pimod(&n, &p, &q);
+            assert!(
+                verify_pimod(&n, &pimod),
+                "Πmod must verify for GG20 Paillier key"
+            );
+
+            let pifac = prove_pifac(&n, &p, &q);
+            assert!(
+                verify_pifac(&n, &pifac),
+                "Πfac must verify for GG20 Paillier key"
+            );
+        }
     }
 }
