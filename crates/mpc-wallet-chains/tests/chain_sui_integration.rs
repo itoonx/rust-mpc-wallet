@@ -295,6 +295,63 @@ fn test_sui_validate_address_invalid_hex_chars() {
     );
 }
 
+/// SEC-023: validate_sui_address must reject uppercase hex (Sui uses lowercase).
+#[test]
+fn test_sui_validate_address_invalid_hex_uppercase_mixed() {
+    // Contains uppercase 'G' — not valid hex
+    let bad = "0xGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG";
+    let result = mpc_wallet_chains::sui::tx::validate_sui_address(bad);
+    assert!(
+        result.is_err(),
+        "address with non-hex chars (uppercase G) must fail: {:?}",
+        result
+    );
+}
+
+/// SEC-023: build_transaction must reject invalid hex in sender address.
+#[tokio::test]
+async fn test_sui_build_transaction_rejects_invalid_hex_sender() {
+    let provider =
+        mpc_wallet_chains::sui::SuiProvider::with_pubkey(GroupPublicKey::Ed25519(vec![1u8; 32]));
+    let params = TransactionParams {
+        to: "0x0000000000000000000000000000000000000000000000000000000000000002".to_string(),
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({
+            "sender": "0xZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+        })),
+    };
+    let result = provider.build_transaction(params).await;
+    assert!(
+        result.is_err(),
+        "build_transaction must reject sender with invalid hex chars: {:?}",
+        result
+    );
+}
+
+/// SEC-023: build_transaction must reject invalid hex in recipient (to) address.
+#[tokio::test]
+async fn test_sui_build_transaction_rejects_invalid_hex_recipient() {
+    let provider =
+        mpc_wallet_chains::sui::SuiProvider::with_pubkey(GroupPublicKey::Ed25519(vec![1u8; 32]));
+    let params = TransactionParams {
+        to: "0xXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX".to_string(),
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({
+            "sender": "0x0000000000000000000000000000000000000000000000000000000000000001"
+        })),
+    };
+    let result = provider.build_transaction(params).await;
+    assert!(
+        result.is_err(),
+        "build_transaction must reject recipient with invalid hex chars: {:?}",
+        result
+    );
+}
+
 // ============================================================================
 // Sui BCS serialization tests (T-S2-04)
 // ============================================================================
