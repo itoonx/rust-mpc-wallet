@@ -205,6 +205,102 @@ impl Default for PolicyStore {
     }
 }
 
+// ── Extended Velocity Limits (Sprint 26) ─────────────────────────────────────
+
+/// Time window for velocity tracking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VelocityWindow {
+    /// 1 hour (3600 seconds).
+    Hourly,
+    /// 24 hours (86400 seconds).
+    Daily,
+    /// 7 days (604800 seconds).
+    Weekly,
+    /// 30 days (2592000 seconds).
+    Monthly,
+}
+
+impl VelocityWindow {
+    /// Returns the window duration in seconds.
+    pub fn duration_secs(&self) -> u64 {
+        match self {
+            VelocityWindow::Hourly => 3600,
+            VelocityWindow::Daily => 86400,
+            VelocityWindow::Weekly => 604_800,
+            VelocityWindow::Monthly => 2_592_000,
+        }
+    }
+}
+
+/// Map type for velocity tracking: (scope, window) -> list of (timestamp, amount).
+type VelocityMap = HashMap<(String, VelocityWindow), Vec<(u64, u64)>>;
+
+/// Tracks spending velocity per scope (key_group/team/org) per time window.
+///
+/// Uses `RwLock<VelocityMap>` where each entry maps `(scope, window)` to a
+/// list of `(timestamp, amount)` records. Expired entries are pruned on each
+/// `check` call.
+pub struct VelocityTracker {
+    /// (scope, window) -> list of (timestamp_secs, amount).
+    entries: RwLock<VelocityMap>,
+}
+
+impl VelocityTracker {
+    /// Create a new empty velocity tracker.
+    pub fn new() -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    /// Record a spending event for the given scope and window.
+    pub fn record(&self, scope: &str, amount: u64, window: VelocityWindow) {
+        let now = Self::now();
+        let mut entries = self.entries.write().unwrap();
+        entries
+            .entry((scope.to_string(), window))
+            .or_default()
+            .push((now, amount));
+    }
+
+    /// Check whether spending `amount` in the given scope/window would exceed `limit`.
+    ///
+    /// Returns `true` if the total (existing + proposed) is within the limit.
+    /// Expired entries are pruned during this check.
+    pub fn check(&self, scope: &str, amount: u64, window: VelocityWindow, limit: u64) -> bool {
+        let now = Self::now();
+        let cutoff = now.saturating_sub(window.duration_secs());
+
+        let mut entries = self.entries.write().unwrap();
+        let key = (scope.to_string(), window);
+
+        // Prune expired entries
+        if let Some(records) = entries.get_mut(&key) {
+            records.retain(|(ts, _)| *ts >= cutoff);
+        }
+
+        let current_total: u64 = entries
+            .get(&key)
+            .map(|records| records.iter().map(|(_, amt)| amt).sum())
+            .unwrap_or(0);
+
+        current_total + amount <= limit
+    }
+}
+
+impl Default for VelocityTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,5 +689,82 @@ mod template_tests {
         let store = PolicyStore::new();
         store.load(PolicyTemplate::Exchange.build()).unwrap();
         assert!(store.check("ethereum", "0xabc", 1000).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod velocity_tracker_tests {
+    use super::*;
+
+    #[test]
+    fn test_record_and_check_under_limit() {
+        let tracker = VelocityTracker::new();
+        tracker.record("team-a", 500, VelocityWindow::Daily);
+        assert!(tracker.check("team-a", 400, VelocityWindow::Daily, 1000));
+    }
+
+    #[test]
+    fn test_check_over_limit() {
+        let tracker = VelocityTracker::new();
+        tracker.record("team-a", 800, VelocityWindow::Daily);
+        assert!(!tracker.check("team-a", 300, VelocityWindow::Daily, 1000));
+    }
+
+    #[test]
+    fn test_hourly_window() {
+        let tracker = VelocityTracker::new();
+        tracker.record("team-a", 100, VelocityWindow::Hourly);
+        assert!(tracker.check("team-a", 50, VelocityWindow::Hourly, 200));
+        assert!(!tracker.check("team-a", 150, VelocityWindow::Hourly, 200));
+    }
+
+    #[test]
+    fn test_weekly_window() {
+        let tracker = VelocityTracker::new();
+        tracker.record("org-1", 5000, VelocityWindow::Weekly);
+        assert!(tracker.check("org-1", 4000, VelocityWindow::Weekly, 10000));
+        assert!(!tracker.check("org-1", 6000, VelocityWindow::Weekly, 10000));
+    }
+
+    #[test]
+    fn test_monthly_window() {
+        let tracker = VelocityTracker::new();
+        tracker.record("org-1", 10000, VelocityWindow::Monthly);
+        assert!(tracker.check("org-1", 5000, VelocityWindow::Monthly, 20000));
+        assert!(!tracker.check("org-1", 15000, VelocityWindow::Monthly, 20000));
+    }
+
+    #[test]
+    fn test_multi_scope_independent() {
+        let tracker = VelocityTracker::new();
+        tracker.record("team-a", 900, VelocityWindow::Daily);
+        tracker.record("team-b", 100, VelocityWindow::Daily);
+
+        // team-a is near limit
+        assert!(!tracker.check("team-a", 200, VelocityWindow::Daily, 1000));
+        // team-b is well under
+        assert!(tracker.check("team-b", 800, VelocityWindow::Daily, 1000));
+    }
+
+    #[test]
+    fn test_exact_limit_allowed() {
+        let tracker = VelocityTracker::new();
+        tracker.record("scope", 500, VelocityWindow::Daily);
+        assert!(tracker.check("scope", 500, VelocityWindow::Daily, 1000));
+        assert!(!tracker.check("scope", 501, VelocityWindow::Daily, 1000));
+    }
+
+    #[test]
+    fn test_empty_tracker_allows() {
+        let tracker = VelocityTracker::new();
+        assert!(tracker.check("any-scope", 1000, VelocityWindow::Daily, 1000));
+    }
+
+    #[test]
+    fn test_window_duration_values() {
+        assert_eq!(VelocityWindow::Hourly.duration_secs(), 3600);
+        assert_eq!(VelocityWindow::Daily.duration_secs(), 86400);
+        assert_eq!(VelocityWindow::Weekly.duration_secs(), 604_800);
+        assert_eq!(VelocityWindow::Monthly.duration_secs(), 2_592_000);
     }
 }

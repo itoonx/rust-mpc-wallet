@@ -10,6 +10,8 @@ pub mod org;
 pub mod routes;
 pub mod state;
 pub mod vault;
+pub mod webhooks;
+pub mod whitelist;
 
 use axum::{
     http::{header, HeaderName, Method},

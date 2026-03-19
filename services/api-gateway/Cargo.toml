@@ -42,6 +42,8 @@ futures = { workspace = true }
 
 # Crypto — key exchange, signatures, AEAD
 sha2 = { workspace = true }
+hmac = { workspace = true }
+subtle = "2"
 ed25519-dalek = { workspace = true }
 x25519-dalek = { workspace = true }
 hkdf = { workspace = true }
