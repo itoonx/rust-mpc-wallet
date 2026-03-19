@@ -39,7 +39,7 @@ struct NodeConfig {
     key_store_dir: PathBuf,
     key_store_password: String,
     signing_key: SigningKey,
-    gateway_pubkey: Option<ed25519_dalek::VerifyingKey>,
+    gateway_pubkey: ed25519_dalek::VerifyingKey,
 }
 
 impl NodeConfig {
@@ -64,11 +64,19 @@ impl NodeConfig {
         arr.copy_from_slice(&key_bytes);
         let signing_key = SigningKey::from_bytes(&arr);
 
-        let gateway_pubkey = std::env::var("GATEWAY_PUBKEY").ok().map(|hex| {
-            let bytes = hex::decode(&hex).expect("GATEWAY_PUBKEY must be valid hex");
-            assert_eq!(bytes.len(), 32);
-            ed25519_dalek::VerifyingKey::from_bytes(&bytes.try_into().unwrap()).unwrap()
-        });
+        let gateway_pubkey_hex = std::env::var("GATEWAY_PUBKEY").expect(
+            "GATEWAY_PUBKEY must be set — MPC nodes require gateway identity verification (DEC-012)",
+        );
+        let gateway_pubkey_bytes =
+            hex::decode(&gateway_pubkey_hex).expect("GATEWAY_PUBKEY must be valid hex");
+        assert_eq!(
+            gateway_pubkey_bytes.len(),
+            32,
+            "GATEWAY_PUBKEY must be 32 bytes"
+        );
+        let gateway_pubkey =
+            ed25519_dalek::VerifyingKey::from_bytes(&gateway_pubkey_bytes.try_into().unwrap())
+                .expect("GATEWAY_PUBKEY must be a valid Ed25519 public key");
 
         Self {
             party_id: PartyId(party_id),
@@ -400,49 +408,47 @@ async fn execute_sign(
         }
     };
 
-    // Verify SignAuthorization (DEC-012)
-    if let Some(ref gateway_pubkey) = config.gateway_pubkey {
-        let message_bytes = match hex::decode(&req.message_hex) {
-            Ok(b) => b,
-            Err(e) => {
-                return SignResponse {
-                    party_id: config.party_id.0,
-                    group_id: req.group_id.clone(),
-                    signature_json: None,
-                    success: false,
-                    error: Some(format!("invalid message hex: {e}")),
-                };
-            }
-        };
+    // Verify SignAuthorization (DEC-012) — mandatory, gateway_pubkey is always set
+    let message_bytes = match hex::decode(&req.message_hex) {
+        Ok(b) => b,
+        Err(e) => {
+            return SignResponse {
+                party_id: config.party_id.0,
+                group_id: req.group_id.clone(),
+                signature_json: None,
+                success: false,
+                error: Some(format!("invalid message hex: {e}")),
+            };
+        }
+    };
 
-        match serde_json::from_str::<mpc_wallet_core::protocol::sign_authorization::SignAuthorization>(
-            &req.sign_authorization,
-        ) {
-            Ok(auth) => {
-                if let Err(e) = auth.verify(gateway_pubkey, &message_bytes) {
-                    tracing::warn!(
-                        group_id = %req.group_id,
-                        "SignAuthorization verification FAILED: {e}"
-                    );
-                    return SignResponse {
-                        party_id: config.party_id.0,
-                        group_id: req.group_id.clone(),
-                        signature_json: None,
-                        success: false,
-                        error: Some(format!("SignAuthorization verification failed: {e}")),
-                    };
-                }
-                tracing::debug!("SignAuthorization verified");
-            }
-            Err(e) => {
+    match serde_json::from_str::<mpc_wallet_core::protocol::sign_authorization::SignAuthorization>(
+        &req.sign_authorization,
+    ) {
+        Ok(auth) => {
+            if let Err(e) = auth.verify(&config.gateway_pubkey, &message_bytes) {
+                tracing::warn!(
+                    group_id = %req.group_id,
+                    "SignAuthorization verification FAILED: {e}"
+                );
                 return SignResponse {
                     party_id: config.party_id.0,
                     group_id: req.group_id.clone(),
                     signature_json: None,
                     success: false,
-                    error: Some(format!("invalid SignAuthorization: {e}")),
+                    error: Some(format!("SignAuthorization verification failed: {e}")),
                 };
             }
+            tracing::debug!("SignAuthorization verified");
+        }
+        Err(e) => {
+            return SignResponse {
+                party_id: config.party_id.0,
+                group_id: req.group_id.clone(),
+                signature_json: None,
+                success: false,
+                error: Some(format!("invalid SignAuthorization: {e}")),
+            };
         }
     }
 
