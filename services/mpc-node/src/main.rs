@@ -165,7 +165,16 @@ async fn handle_keygen_requests(
     use futures::StreamExt;
 
     while let Some(msg) = sub.next().await {
-        let req: KeygenRequest = match serde_json::from_slice(&msg.payload) {
+        // SEC-026: Verify signed control message before processing
+        let inner_payload = match unwrap_signed_message(&msg.payload, &config.gateway_pubkey) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("keygen: rejecting unsigned/invalid control message: {e}");
+                continue;
+            }
+        };
+
+        let req: KeygenRequest = match serde_json::from_slice(&inner_payload) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("invalid keygen request: {e}");
@@ -349,7 +358,16 @@ async fn handle_sign_requests(
     use futures::StreamExt;
 
     while let Some(msg) = sub.next().await {
-        let req: SignRequest = match serde_json::from_slice(&msg.payload) {
+        // SEC-026: Verify signed control message before processing
+        let inner_payload = match unwrap_signed_message(&msg.payload, &config.gateway_pubkey) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("sign: rejecting unsigned/invalid control message: {e}");
+                continue;
+            }
+        };
+
+        let req: SignRequest = match serde_json::from_slice(&inner_payload) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("invalid sign request: {e}");
@@ -551,7 +569,16 @@ async fn handle_freeze_requests(
     use futures::StreamExt;
 
     while let Some(msg) = sub.next().await {
-        let req: FreezeRequest = match serde_json::from_slice(&msg.payload) {
+        // SEC-026: Verify signed control message before processing
+        let inner_payload = match unwrap_signed_message(&msg.payload, &config.gateway_pubkey) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("freeze: rejecting unsigned/invalid control message: {e}");
+                continue;
+            }
+        };
+
+        let req: FreezeRequest = match serde_json::from_slice(&inner_payload) {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("invalid freeze request: {e}");
@@ -598,6 +625,20 @@ async fn handle_freeze_requests(
             }
         }
     }
+}
+
+/// Unwrap and verify a signed control message from the gateway.
+///
+/// Parses bytes as `SignedControlMessage`, verifies the Ed25519 signature
+/// against the expected gateway public key, and returns the inner payload bytes.
+/// Rejects messages signed by unknown keys or with tampered payloads (SEC-026).
+fn unwrap_signed_message(
+    raw: &[u8],
+    gateway_pubkey: &ed25519_dalek::VerifyingKey,
+) -> Result<Vec<u8>, String> {
+    let signed: rpc::SignedControlMessage =
+        serde_json::from_slice(raw).map_err(|e| format!("not a SignedControlMessage: {e}"))?;
+    rpc::verify_control_message(&signed, gateway_pubkey)
 }
 
 /// Create MPC protocol instance for a given scheme.
