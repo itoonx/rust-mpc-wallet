@@ -51,6 +51,16 @@
 | SEC-041 | INFO | CGGMP21 commitment scheme is binding — SHA-256 commit-then-reveal verified (positive finding) |
 | SEC-042 | INFO | CGGMP21 low-s normalization correctly applied (positive finding) |
 | SEC-043 | INFO | CGGMP21 recovery ID correctly computed via brute-force verification (positive finding) |
+| SEC-044 | MEDIUM | `LocalKeyEncryption::derive_dek` uses ad-hoc SHA-256 concat instead of proper HKDF — no salt, no extraction step |
+| SEC-045 | MEDIUM | `DekCache::get` returns raw `[u8; 32]` — cached DEK copies not wrapped in `Zeroizing`, remain on stack/heap without zeroize-on-drop |
+| SEC-046 | LOW | `KmsClient` error messages include `key_arn` value — may expose internal AWS resource identifiers in logs |
+| SEC-047 | LOW | `VaultSecrets` fields are plain `String` — secret material (jwt_secret, signing key, encryption key) not wrapped in `Zeroizing<String>` |
+| SEC-048 | LOW | `SecretRefresher` uses `std::sync::Mutex` — if Vault HTTP call panics during config update, Mutex is poisoned and all future refreshes fail silently |
+| SEC-049 | INFO | AES-256-GCM wrapping uses `OsRng` for nonce generation — no nonce reuse risk (positive finding) |
+| SEC-050 | INFO | `LocalKeyEncryption::master_key` correctly wrapped in `Zeroizing<[u8; 32]>` (positive finding) |
+| SEC-051 | INFO | `DekCacheEntry::dek` correctly wrapped in `Zeroizing<[u8; 32]>` inside cache (positive finding) |
+| SEC-052 | INFO | KMS stub methods return errors, no plaintext key material in any error message (positive finding) |
+| SEC-053 | INFO | `KmsKeyEncryption` and `DekCache` correctly feature-gated behind `#[cfg(feature = "aws-kms")]` (positive finding) |
 
 ---
 
@@ -1735,3 +1745,205 @@ SEC-034 (MtA not gated) should be resolved before any production deployment by a
 abort) is a completeness gap that does not affect signature correctness.
 
 **APPROVED** for merge — no CRITICAL or HIGH findings. MEDIUM/LOW findings are tracked above.
+
+---
+
+## Sprint 22-23 Security Audit (KMS/HSM + SGX)
+
+**Auditor:** R6 (Security Agent)
+**Date:** 2026-03-19
+**Task:** T-S23-04
+**Scope:** Sprint 22 (KMS/HSM envelope encryption, Vault credential rotation) + Sprint 23 (SGX enclave design)
+
+### Sprint 23 files not yet implemented
+
+The following Sprint 23 files do not exist on this branch:
+- `crates/mpc-wallet-core/src/enclave/mod.rs` (EnclaveProvider trait)
+- `docs/SGX_DESIGN.md` (SGX design document)
+
+These were not delivered in the audited code. Checklist items 6 (SGX design), 7 (EnclaveProvider handle lifetime), and related enclave checks are **N/A** for this audit. They will be audited when delivered.
+
+### Files Audited
+
+1. `crates/mpc-wallet-core/src/key_store/hsm.rs` (561 lines)
+2. `services/api-gateway/src/auth/kms_signer.rs` (387 lines)
+3. `services/api-gateway/src/vault.rs` (682 lines)
+
+---
+
+### [MEDIUM] SEC-044: Ad-hoc DEK Derivation Instead of Proper HKDF
+
+- **ID:** SEC-044
+- **Date:** 2026-03-19
+- **Task:** T-S23-04 (R6 audit)
+- **File:** `crates/mpc-wallet-core/src/key_store/hsm.rs:84-93`
+- **Description:** `LocalKeyEncryption::derive_dek` uses `SHA-256(master_key || "dek-derivation-v1" || group_id)` as a key derivation function. While the doc comment says "HKDF-like derivation," this is NOT HKDF. Proper HKDF (RFC 5869) has two steps: (1) Extract — HMAC-SHA256 with a salt to produce a pseudorandom key, and (2) Expand — HMAC-based expansion with context info. The current implementation uses raw SHA-256 concatenation which:
+  - Has no salt (no domain separation from other SHA-256 uses)
+  - Has no extraction step (master key entropy is not concentrated)
+  - Is susceptible to length-extension attacks (SHA-256 is Merkle-Damgard)
+  For a 32-byte master key with good entropy, this is practically safe. But it violates the principle of using standardized KDFs.
+- **Impact:** Medium — no practical attack given high-entropy master keys, but deviates from cryptographic best practice. If master key has poor entropy distribution, this is weaker than HKDF.
+- **Recommendation:** Replace with proper HKDF using the `hkdf` crate (already available in the Rust crypto ecosystem): `Hkdf::<Sha256>::new(Some(salt), master_key).expand(info, &mut dek)`.
+- **Status:** Open
+- **Owner:** R2
+
+---
+
+### [MEDIUM] SEC-045: DEK Cache Returns Unwrapped Key Material
+
+- **ID:** SEC-045
+- **Date:** 2026-03-19
+- **Task:** T-S23-04 (R6 audit)
+- **File:** `crates/mpc-wallet-core/src/key_store/hsm.rs:191-199, 224-236`
+- **Description:** `DekCache::get()` returns `Option<[u8; 32]>` — a raw byte array copy of the DEK. Similarly, `cached_unwrap()` returns `Result<[u8; 32], CoreError>`. While the cached entries are stored in `Zeroizing<[u8; 32]>` (SEC-051, positive), the returned copies are plain `[u8; 32]` on the caller's stack. These copies are not zeroized on drop and may persist in memory after the caller finishes using them.
+  Note: `KeyEncryptionProvider::derive_dek()` and `unwrap_dek()` also return `[u8; 32]` — the trait interface itself does not enforce zeroization of returned keys.
+- **Impact:** Medium — DEK copies on the stack may survive in memory after use. In a process dump or cold boot attack, these could be recovered. The window is short (stack frame lifetime) but violates the defense-in-depth principle established by SEC-004/SEC-005.
+- **Recommendation:** Change return types to `Zeroizing<[u8; 32]>` for `DekCache::get()`, `cached_unwrap()`, and the `KeyEncryptionProvider` trait methods. This is a breaking trait change but aligns with the project's zeroization policy.
+- **Status:** Open
+- **Owner:** R0/R2
+
+---
+
+### [LOW] SEC-046: KMS Error Messages Expose Key ARN
+
+- **ID:** SEC-046
+- **Date:** 2026-03-19
+- **Task:** T-S23-04 (R6 audit)
+- **File:** `services/api-gateway/src/auth/kms_signer.rs:157-160, 182-185, 207-210`
+- **Description:** `KmsClient` stub error messages include `self.config.key_arn` in the error string, e.g., `"KMS wrap_key not available -- aws-sdk-kms not configured (key_arn=arn:aws:kms:us-east-1:123456:key/...)"`. While ARN is not a secret per se, it reveals AWS account ID, region, and key alias to anyone who can read logs or error responses.
+- **Impact:** Low — information disclosure of AWS infrastructure topology. Does not directly enable attack but aids reconnaissance.
+- **Recommendation:** Log the ARN at DEBUG level only. Error messages returned to callers should say "KMS not configured" without including the ARN.
+- **Status:** Open
+- **Owner:** R4
+
+---
+
+### [LOW] SEC-047: VaultSecrets Fields Not Zeroized
+
+- **ID:** SEC-047
+- **Date:** 2026-03-19
+- **Task:** T-S23-04 (R6 audit)
+- **File:** `services/api-gateway/src/vault.rs:63-69`
+- **Description:** `VaultSecrets` contains `Option<String>` fields for `jwt_secret`, `server_signing_key`, `session_encryption_key`, and `redis_url`. These are sensitive credentials fetched from Vault. They are stored as plain `String` values without `Zeroizing` wrapper. When `VaultSecrets` is dropped (after the refresher updates `AppConfig`), the secret strings may linger in heap memory.
+  Additionally, `AppConfig` itself stores these as plain `String` / `Option<String>` (config.rs), so the entire chain from Vault read to config storage lacks zeroization.
+- **Impact:** Low — secrets may persist in freed heap memory. Standard Rust allocator does not zero freed memory. Exploitable only via process memory dump.
+- **Recommendation:** Wrap sensitive fields in `Zeroizing<String>` or use `secrecy::SecretString`. This requires changes through `AppConfig` as well.
+- **Status:** Open
+- **Owner:** R4
+
+---
+
+### [LOW] SEC-048: Mutex Poisoning in SecretRefresher
+
+- **ID:** SEC-048
+- **Date:** 2026-03-19
+- **Task:** T-S23-04 (R6 audit)
+- **File:** `services/api-gateway/src/vault.rs:399-449`
+- **Description:** `SecretRefresher::start_background_refresh` uses `config.lock()` (std::sync::Mutex) to update AppConfig. If a panic occurs while the lock is held (e.g., from an unexpected error in field assignment), the Mutex becomes poisoned. The code handles `Err(e)` from `lock()` by logging a warning and continuing, which is correct for the poison case. However, since `std::sync::Mutex` poison permanently prevents future lock acquisition (unless explicitly handled), all subsequent refresh cycles would also fail to update config.
+  The current error handling IS adequate — it logs and retries. But the retry will also fail because the mutex stays poisoned.
+- **Impact:** Low — credential rotation stops working permanently after a panic (which should be rare). The gateway continues with stale credentials. In production, this would require a process restart.
+- **Recommendation:** Either use `parking_lot::Mutex` (which does not poison) or explicitly recover from poison via `lock().unwrap_or_else(|e| e.into_inner())`. The current retry-on-failure approach is correct in intent.
+- **Status:** Open
+- **Owner:** R4
+
+---
+
+### [INFO] SEC-049: AES-256-GCM Nonce Generation Uses OsRng (Positive Finding)
+
+- **ID:** SEC-049
+- **Date:** 2026-03-19
+- **Task:** T-S23-04 (R6 audit)
+- **File:** `crates/mpc-wallet-core/src/key_store/hsm.rs:102`
+- **Description:** `LocalKeyEncryption::wrap_dek` generates nonces via `Aes256Gcm::generate_nonce(&mut OsRng)`, which uses the OS CSPRNG. Each wrap call produces a fresh 96-bit random nonce. With 2^96 possible nonces and random selection, the birthday-bound collision probability is negligible for practical usage volumes. No counter or state tracking is needed.
+- **Impact:** None — positive finding. Nonce reuse is effectively impossible.
+- **Status:** Informational
+
+---
+
+### [INFO] SEC-050: Master Key Correctly Zeroized (Positive Finding)
+
+- **ID:** SEC-050
+- **Date:** 2026-03-19
+- **Task:** T-S23-04 (R6 audit)
+- **File:** `crates/mpc-wallet-core/src/key_store/hsm.rs:69-71`
+- **Description:** `LocalKeyEncryption::master_key` is `Zeroizing<[u8; 32]>`, which implements `ZeroizeOnDrop`. When the provider is dropped, the master KEK is securely zeroed in memory.
+- **Impact:** None — positive finding.
+- **Status:** Informational
+
+---
+
+### [INFO] SEC-051: DekCacheEntry Correctly Zeroized (Positive Finding)
+
+- **ID:** SEC-051
+- **Date:** 2026-03-19
+- **Task:** T-S23-04 (R6 audit)
+- **File:** `crates/mpc-wallet-core/src/key_store/hsm.rs:154-157`
+- **Description:** `DekCacheEntry::dek` is `Zeroizing<[u8; 32]>`. When cache entries are evicted or the cache is dropped, DEK bytes are securely zeroed. (Note: SEC-045 tracks the issue that copies returned to callers are not zeroized.)
+- **Impact:** None — positive finding.
+- **Status:** Informational
+
+---
+
+### [INFO] SEC-052: KMS Stubs Expose No Key Material (Positive Finding)
+
+- **ID:** SEC-052
+- **Date:** 2026-03-19
+- **Task:** T-S23-04 (R6 audit)
+- **File:** `services/api-gateway/src/auth/kms_signer.rs:52-54, 145-210`
+- **Description:** `KmsSigner::sign()` returns `Err(CoreError::Protocol("KMS signing not configured"))` — no key bytes in the error. `KmsClient` stub methods return errors with only the key ARN (tracked in SEC-046) but no plaintext key material. The `verifying_key` field (public key) is correctly exposed. No private key material appears in any error path.
+- **Impact:** None — positive finding.
+- **Status:** Informational
+
+---
+
+### [INFO] SEC-053: Feature Gates Correctly Applied (Positive Finding)
+
+- **ID:** SEC-053
+- **Date:** 2026-03-19
+- **Task:** T-S23-04 (R6 audit)
+- **File:** `crates/mpc-wallet-core/src/key_store/hsm.rs:153, 163, 170, 239, 259, 269, 290`
+- **Description:** All KMS-specific types (`DekCacheEntry`, `DekCache`, `KmsKeyEncryption`) and their implementations are behind `#[cfg(feature = "aws-kms")]`. The `aws-kms` feature is NOT in `default = []` in either `mpc-wallet-core/Cargo.toml` or `api-gateway/Cargo.toml`. This means KMS code is completely excluded from default builds. The `LocalKeyEncryption` (which works without KMS) is always available.
+- **Impact:** None — positive finding.
+- **Status:** Informational
+
+---
+
+### Audit Checklist Summary
+
+| # | Check | Result | Notes |
+|---|-------|--------|-------|
+| 1 | AES-256-GCM used correctly | PASS | Random nonce, auth tag verified, proper error on tamper (SEC-049) |
+| 2 | Nonce reuse impossible | PASS | OsRng per-wrap call, no counter state needed (SEC-049) |
+| 3 | Authentication tag verified | PASS | `cipher.decrypt()` fails on tampered ciphertext, tested (line 129) |
+| 4 | DEK cache leak risk | PARTIAL | Cache entries zeroized (SEC-051), but returned copies are not (SEC-045) |
+| 5 | DEK cache TTL enforced | PASS | Expired entries removed on `get()` and evicted on capacity (lines 194, 207-209) |
+| 6 | KMS stubs no plaintext exposure | PASS | No key material in errors (SEC-052); ARN exposed (SEC-046, LOW) |
+| 7 | Vault rotation race conditions | PASS | Mutex serializes config updates; sleep-then-read pattern is safe |
+| 8 | Secret refresher deadlock | PASS | Single Mutex, no nested locks, short critical section (field assignments only) |
+| 9 | Mutex poisoning handled | PARTIAL | Error logged and retried, but poison is permanent (SEC-048) |
+| 10 | SGX design enclave boundary | N/A | Sprint 23 enclave files not delivered |
+| 11 | EnclaveProvider handle lifetime | N/A | Sprint 23 enclave files not delivered |
+| 12 | Zeroization of secret material | PARTIAL | Master key and cache entries zeroized; returned DEKs and VaultSecrets are not (SEC-045, SEC-047) |
+| 13 | Feature gates KMS/SGX | PASS | `aws-kms` correctly gated, not in default features (SEC-053) |
+| 14 | DEK derivation correctness | PARTIAL | Works but uses ad-hoc SHA-256 instead of HKDF (SEC-044) |
+
+### Verdict
+
+```
+VERDICT: APPROVED (with tracked findings)
+Branch:  (Sprint 22-23 -- KMS/HSM + SGX)
+Task:    T-S23-04
+Auditor: R6
+```
+
+**No CRITICAL or HIGH findings.** The AES-256-GCM key wrapping implementation is correct: random nonces via OsRng, authentication tags properly verified, master key zeroized on drop, cache entries zeroized. KMS stubs are safe (no plaintext key exposure in errors). Vault credential rotation is race-condition free with proper Mutex serialization.
+
+**2 MEDIUM findings** (SEC-044: ad-hoc key derivation, SEC-045: DEK cache returns unwrapped copies) are tracked for resolution. SEC-044 is a cryptographic best-practice gap but does not enable practical attacks with high-entropy master keys. SEC-045 follows a pattern already tracked in the `KeyEncryptionProvider` trait interface.
+
+**3 LOW findings** (SEC-046: ARN in errors, SEC-047: VaultSecrets not zeroized, SEC-048: Mutex poisoning) are tracked for resolution in a future hardening sprint.
+
+**5 INFO positive findings** (SEC-049 through SEC-053) confirm correct nonce generation, master key zeroization, cache entry zeroization, clean error messages, and proper feature gating.
+
+**Sprint 23 enclave files (EnclaveProvider, SGX_DESIGN.md) were not delivered** and will be audited separately when available.
+
+**APPROVED** for merge -- no CRITICAL or HIGH findings. MEDIUM/LOW findings are tracked above.
