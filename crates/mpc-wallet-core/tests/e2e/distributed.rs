@@ -71,7 +71,7 @@ async fn run_node_keygen(
     // Wait for all parties to subscribe before starting keygen.
     // Without this, fast parties broadcast round 1 before slow parties subscribe,
     // causing message loss on CI runners.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Run keygen
     let protocol = Gg20Protocol::new();
@@ -169,7 +169,7 @@ async fn run_node_sign(
     let signers: Vec<PartyId> = req.signer_ids.iter().map(|&id| PartyId(id)).collect();
 
     // Wait for all signing parties to subscribe before starting.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     let protocol = Gg20Protocol::new();
     let sig = protocol
@@ -247,7 +247,7 @@ async fn test_distributed_keygen_3_nodes() {
     }
 
     // Give nodes time to connect to NATS + subscribe to control channel.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Orchestrator uses NATS request-reply: create inbox, subscribe, publish_with_reply.
     // Nodes respond to the inbox directly — no separate reply subject needed.
@@ -380,7 +380,7 @@ async fn test_distributed_keygen_then_sign() {
         }));
     }
 
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Orchestrator uses NATS request-reply pattern
     let nats = async_nats::connect(&url).await.unwrap();
@@ -456,7 +456,7 @@ async fn test_distributed_keygen_then_sign() {
         }));
     }
 
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     // Orchestrator uses NATS request-reply for sign phase
     let sign_inbox = nats.new_inbox();

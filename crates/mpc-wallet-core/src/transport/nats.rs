@@ -244,6 +244,25 @@ impl NatsTransport {
         })
     }
 
+    /// Wait until this transport's subscription is confirmed active on the NATS server.
+    ///
+    /// Uses double flush as a synchronization barrier: the first flush ensures the
+    /// SUB command reaches the server, the yield allows the server to process it,
+    /// and the second flush confirms the round-trip. This replaces fixed `sleep(2s)`
+    /// delays in tests (L-011 fix).
+    pub async fn wait_ready(&self) -> Result<(), CoreError> {
+        self.client
+            .flush()
+            .await
+            .map_err(|e| CoreError::Transport(format!("NATS flush failed: {e}")))?;
+        tokio::task::yield_now().await;
+        self.client
+            .flush()
+            .await
+            .map_err(|e| CoreError::Transport(format!("NATS flush failed: {e}")))?;
+        Ok(())
+    }
+
     /// Register a peer's Ed25519 verifying key for incoming envelope verification.
     ///
     /// Must be called for every party before `recv` is used, otherwise messages

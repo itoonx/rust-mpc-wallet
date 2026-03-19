@@ -46,7 +46,14 @@ jobs:
 
       # Tests (reuses clippy compilation — near-zero compile time)
       - name: Run tests
-        run: cargo test --workspace --features local-transport
+        run: |
+          cargo test --workspace --features local-transport 2>&1 | tee /tmp/test-output.txt
+          TEST_COUNT=$(grep "test result:" /tmp/test-output.txt | awk -F'[; ]' '{sum+=$4} END {print sum}')
+          echo "Total tests: $TEST_COUNT"
+          if [ "$TEST_COUNT" -lt 740 ]; then
+            echo "::error::Test count dropped below 740 (got $TEST_COUNT) — check for accidentally deleted tests"
+            exit 1
+          fi
 
       # Build gateway binary (reuses test compilation)
       - name: Build gateway
@@ -179,6 +186,6 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
           GATEWAY_URL: http://127.0.0.1:3000
         run: |
-          # Compile E2E tests (cache should make this fast)
-          cargo test -p mpc-wallet-core --test e2e_tests --features local-transport -- --ignored --test-threads=1 --skip test_nats_keygen_gg20_2of3 --skip test_nats_sign_gg20_direct
+          # All E2E tests — no skips (wait_ready() replaces sleep-based synchronization)
+          cargo test -p mpc-wallet-core --test e2e_tests --features local-transport -- --ignored --test-threads=1
           kill $(cat /tmp/gateway.pid) 2>/dev/null || true

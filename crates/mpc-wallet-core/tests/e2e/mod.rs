@@ -109,10 +109,10 @@ pub async fn nats_keygen(
         transports.push(transport);
     }
 
-    // Wait for all subscriptions to be fully active on the NATS server.
-    // Without this, fast parties may broadcast before slow parties subscribe,
-    // causing message loss on CI runners (slower than local dev machines).
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // Synchronization barrier: confirm all subscriptions are active on NATS server.
+    for transport in &transports {
+        transport.wait_ready().await.unwrap();
+    }
 
     // Phase 2: Now start keygen concurrently — all subscriptions are ready.
     let mut handles = Vec::new();
@@ -163,8 +163,10 @@ pub async fn nats_sign(
         transports.push((idx, transport));
     }
 
-    // Wait for all subscriptions to be active (CI timing fix).
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // Synchronization barrier: confirm all subscriptions are active.
+    for (_, transport) in &transports {
+        transport.wait_ready().await.unwrap();
+    }
 
     // Phase 2: Start signing concurrently.
     let mut handles = Vec::new();
