@@ -26,6 +26,12 @@ pub mod approvals;
 /// Use [`audit::AuditLedger`] to record every signing event. Call
 /// [`audit::AuditLedger::verify`] to check tamper-evident chain integrity.
 pub mod audit;
+/// Delegation tokens: Ed25519-signed scoped authority transfer.
+///
+/// Use [`delegation::DelegationToken`] to grant time-limited, scope-restricted
+/// signing authority from a delegator to a delegate. Supports chain, key group,
+/// amount limit, and combined scope restrictions.
+pub mod delegation;
 /// SGX/TDX enclave abstraction for hardware-isolated MPC signing (DEC-017).
 ///
 /// Defines the [`enclave::EnclaveProvider`] trait that abstracts over hardware
