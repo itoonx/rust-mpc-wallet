@@ -53,6 +53,12 @@ pub mod key_store;
 /// distinct cloud providers and regions. Use [`ops::assess_quorum_risk`] to evaluate
 /// signing quorum availability from node health reports.
 pub mod ops;
+/// Real Paillier cryptosystem with ZK proofs (CVE-2023-33241 fix).
+///
+/// Provides [`paillier::PaillierPublicKey`] and [`paillier::PaillierSecretKey`] for
+/// homomorphic encryption, safe prime key generation, and ZK proofs (Pimod, Pifac)
+/// that validate Paillier key structure to prevent small-factor attacks.
+pub mod paillier;
 /// Policy engine: signing policy schema, evaluator, and the "no policy → no sign" gate.
 ///
 /// Use [`policy::PolicyStore`] to load a [`policy::Policy`] and call
