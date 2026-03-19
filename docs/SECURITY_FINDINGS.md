@@ -16,10 +16,10 @@
 
 | ID | Summary | Owner |
 |----|---------|-------|
-| SEC-004 | `KeyShare.share_data` stored as plain `Vec<u8>` — **IN PROGRESS** T-S3-03 (`agent/r1-zeroize-shares`): all deserialization call sites wrap copies in `Zeroizing<Vec<u8>>`; root fix (changing field type in `protocol/mod.rs`) deferred to Sprint 4 (R0 owned) | R0 / R1 |
+| SEC-004 | ~~`KeyShare.share_data` stored as plain `Vec<u8>`~~ **RESOLVED** Sprint 4 (T-S4-00/T-S4-01) — `share_data` now `Zeroizing<Vec<u8>>`, Debug redacts, ZeroizeOnDrop on inner structs | — | R0 / R1 |
 | SEC-005 | ~~`EncryptedFileStore` holds password as plain `String`; derived AES key not zeroized~~ **RESOLVED** by T-S3-02 (`agent/r2-argon2`) — password wrapped in `Zeroizing<String>`, derived key in `Zeroizing<[u8; 32]>` | — | R2 |
 | SEC-006 | ~~Argon2 uses `default()` parameters — too weak for wallet-class key encryption~~ **RESOLVED** by T-S3-02 (`agent/r2-argon2`) — explicit `m_cost=65536` / `t_cost=3` / `p_cost=4` + salt upgraded to 32 bytes | — | R2 |
-| SEC-007 | `ProtocolMessage.from` is self-reported; no sender authentication in any transport | R2 / R0 |
+| SEC-007 | ~~`ProtocolMessage.from` is self-reported; no sender authentication in any transport~~ **RESOLVED** Sprint 6 (T-S6-01) — SignedEnvelope Ed25519 + seq_no on all NatsTransport messages | — | R2 / R0 |
 
 ## Open MEDIUM/LOW/INFO (non-blocking)
 
@@ -150,7 +150,8 @@
   impls `ZeroizeOnDrop`. (2) Remove `Debug` derive or implement it manually to redact
   `share_data`. (3) Remove `Clone` or implement it to clone into a `Zeroizing` wrapper.
   This requires R0 to update `protocol/mod.rs` with R1 coordination.
-- **Status:** Open
+- **Status:** Resolved
+- **Resolved in Sprint:** Sprint 4 (T-S4-00/T-S4-01) — `KeyShare.share_data` field type changed to `Zeroizing<Vec<u8>>`. Manual `Debug` impl redacts `share_data` to `"[REDACTED]"` (SEC-015). Inner structs (`Gg20ShareData`, `FrostEd25519ShareData`, `FrostSecp256k1ShareData`) all derive `ZeroizeOnDrop`. Confirmed by R6 audit Sprint 18.
 
 ---
 
@@ -220,7 +221,8 @@
   based on the channel identity. (2) For `NatsTransport`: include a cryptographic message
   authentication code (MAC) keyed to the sender's identity. (3) Define an authenticated
   message envelope at the Transport trait level.
-- **Status:** Open
+- **Status:** Resolved
+- **Resolved in Sprint:** Sprint 6 (T-S6-01) — `NatsTransport` wired with `SignedEnvelope` (Ed25519 signature + monotonic `seq_no` replay protection) on every `send()`/`recv()`. Peer key registry validates sender identity. `LocalTransport` gated behind `#[cfg(any(test, feature = "demo"))]` (SEC-014, Sprint 17). Confirmed by R6 audit Sprint 18.
 
 ---
 
@@ -1390,3 +1392,46 @@ do not block merge but should be addressed before production deployment:
 
 The LOW findings (SEC-028 through SEC-031) are defense-in-depth improvements that
 should be tracked for future sprints.
+
+---
+
+## R6 Audit: Sprint 17-18 Security Gate
+
+- **Date:** 2026-03-19
+- **Auditor:** R6 (Security Agent)
+- **Scope:** Sprint 17 security hardening + Sprint 18 changes
+
+### Sprint 17 Checklist — All Items Verified
+
+| ID | Finding | Status | Verification |
+|----|---------|--------|--------------|
+| SEC-008 | GG20 secret scalar not zeroized | RESOLVED | Explicit `zeroize()` calls confirmed in keygen, sign, refresh, reshare paths (R1, T-S17-01) |
+| SEC-013 | FROST `from` field not validated | RESOLVED | `from` validated against expected signer set in all FROST protocol rounds (R1, T-S17-01) |
+| SEC-014 | LocalTransport no feature gate | RESOLVED | `LocalTransport` gated behind `#[cfg(any(test, feature = "demo"))]` — cannot be used in production builds (R2, T-S17-02) |
+| SEC-017 | Solana from-address not validated | RESOLVED | Solana tx builder validates `from` address matches signing pubkey before building transaction (R3c, T-S17-03) |
+| SEC-025 | GATEWAY_PUBKEY optional in mpc-node | RESOLVED | `GATEWAY_PUBKEY` is now mandatory — mpc-node refuses to start without it, preventing nodes from running without authorization verification (R0, T-S17-05) |
+
+Additional Sprint 17 items confirmed:
+- SEC-019: `quinn-proto` already at patched version 0.11.14 (no action required)
+- SEC-023: Sui invalid hex validation test added (R3d, T-S17-04)
+- `authorization_id` field added to `SignAuthorization` for replay deduplication
+- 10 security regression tests added by R5 covering all Sprint 17 fixes
+
+### Sprint 18 — In-Progress Items
+
+| ID | Finding | Status | Notes |
+|----|---------|--------|-------|
+| SEC-026 | Control plane messages (mpc.control.*) not signed | IN PROGRESS | Control plane signing being added to NATS control channels; not yet merged |
+| — | AuthorizationCache for replay protection | IN PROGRESS | `authorization_id`-based deduplication cache being implemented in mpc-node to prevent SignAuthorization replay attacks |
+
+### Summary
+
+- **All CRITICAL findings:** RESOLVED (SEC-001, SEC-002, SEC-003, SEC-011)
+- **All HIGH findings:** RESOLVED (SEC-004 through SEC-007, SEC-009, SEC-012, SEC-015, SEC-016)
+- **All Sprint 17 MEDIUM/LOW fixes:** Verified and confirmed
+- **Sprint 18 work:** SEC-026 and AuthorizationCache in progress — neither is CRITICAL/HIGH
+- **No new CRITICAL or HIGH findings identified**
+
+### Verdict
+
+**APPROVED** — No CRITICAL or HIGH findings remain open. All Sprint 17 security hardening items have been verified. Sprint 18 in-progress items (SEC-026 control plane signing, AuthorizationCache) are defense-in-depth improvements that do not block the current gate.
