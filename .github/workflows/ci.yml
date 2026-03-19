@@ -155,6 +155,7 @@ jobs:
 
       # Run ALL E2E tests including distributed (request-reply eliminates timing issues)
       - name: Run E2E tests
+        timeout-minutes: 10
         env:
           NATS_URL: nats://127.0.0.1:4222
           REDIS_URL: redis://127.0.0.1:6379
