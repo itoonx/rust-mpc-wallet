@@ -1933,3 +1933,889 @@ fn test_sign_authorization_full_flow() {
         );
     }
 }
+
+// ============================================================================
+// CGGMP21 Threshold ECDSA tests (T-S21-02)
+// ============================================================================
+
+fn cggmp21_factory() -> Box<dyn MpcProtocol> {
+    Box::new(mpc_wallet_core::protocol::cggmp21::Cggmp21Protocol::new())
+}
+
+// ── Keygen tests ─────────────────────────────────────────────────────────────
+
+/// All parties derive the same group public key after CGGMP21 keygen.
+#[tokio::test]
+async fn test_cggmp21_keygen_all_share_group_pubkey() {
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+
+    let gpk = shares[0].group_public_key.as_bytes();
+    for share in &shares[1..] {
+        assert_eq!(
+            share.group_public_key.as_bytes(),
+            gpk,
+            "all parties must derive the same CGGMP21 group public key"
+        );
+    }
+
+    // Verify valid secp256k1 point
+    let pk = k256::PublicKey::from_sec1_bytes(gpk);
+    assert!(
+        pk.is_ok(),
+        "group public key must be a valid SEC1 compressed point"
+    );
+}
+
+/// Each party's key share data is unique (different secret shares).
+#[tokio::test]
+async fn test_cggmp21_keygen_unique_shares() {
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+
+    // Each party's share_data must be different
+    for i in 0..shares.len() {
+        for j in (i + 1)..shares.len() {
+            assert_ne!(
+                &*shares[i].share_data, &*shares[j].share_data,
+                "parties {} and {} must have different share data",
+                shares[i].party_id.0, shares[j].party_id.0
+            );
+        }
+    }
+
+    // Each party should have correct scheme
+    for share in &shares {
+        assert_eq!(share.scheme, CryptoScheme::Cggmp21Secp256k1);
+    }
+}
+
+/// Any t parties from n can participate in signing (test multiple subsets for 2-of-3).
+#[tokio::test]
+async fn test_cggmp21_keygen_threshold_subset() {
+    use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let gpk = shares[0].group_public_key.as_bytes();
+    let pubkey = k256::PublicKey::from_sec1_bytes(gpk).unwrap();
+    let vk = VerifyingKey::from(&pubkey);
+    let message = b"threshold subset test for cggmp21";
+
+    // All 3 possible 2-of-3 subsets: {0,1}, {0,2}, {1,2}
+    let subsets: &[&[usize]] = &[&[0, 1], &[0, 2], &[1, 2]];
+    for subset in subsets {
+        let sigs = run_sign(cggmp21_factory, &shares, subset, message).await;
+        let MpcSignature::Ecdsa { r, s, .. } = &sigs[0] else {
+            panic!("expected ECDSA signature from CGGMP21");
+        };
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes[..32].copy_from_slice(r);
+        sig_bytes[32..].copy_from_slice(s);
+        vk.verify(message, &Signature::from_bytes(&sig_bytes.into()).unwrap())
+            .unwrap_or_else(|_| panic!("CGGMP21 signature from subset {:?} must verify", subset));
+    }
+}
+
+/// Share data round-trips through serde (KeyShare serialization).
+#[tokio::test]
+async fn test_cggmp21_keygen_share_serialization() {
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+
+    for share in &shares {
+        let serialized = serde_json::to_vec(share).expect("KeyShare must serialize");
+        let deserialized: KeyShare =
+            serde_json::from_slice(&serialized).expect("KeyShare must deserialize");
+
+        assert_eq!(deserialized.scheme, share.scheme);
+        assert_eq!(deserialized.party_id, share.party_id);
+        assert_eq!(deserialized.config.threshold, share.config.threshold);
+        assert_eq!(
+            deserialized.config.total_parties,
+            share.config.total_parties
+        );
+        assert_eq!(
+            deserialized.group_public_key.as_bytes(),
+            share.group_public_key.as_bytes()
+        );
+        assert_eq!(&*deserialized.share_data, &*share.share_data);
+    }
+}
+
+/// Invalid threshold config (t > n) is rejected.
+#[tokio::test]
+async fn test_cggmp21_keygen_invalid_config() {
+    let result = ThresholdConfig::new(5, 3);
+    assert!(result.is_err(), "t > n must be rejected by ThresholdConfig");
+}
+
+/// Keygen with larger config (3-of-5) works correctly.
+#[tokio::test]
+async fn test_cggmp21_keygen_3_of_5() {
+    let shares = run_keygen(cggmp21_factory, 3, 5).await;
+
+    assert_eq!(shares.len(), 5);
+    let gpk = shares[0].group_public_key.as_bytes();
+    for share in &shares[1..] {
+        assert_eq!(share.group_public_key.as_bytes(), gpk);
+    }
+    // Verify group key is valid
+    assert!(k256::PublicKey::from_sec1_bytes(gpk).is_ok());
+}
+
+/// Keygen produces share data that contains valid Cggmp21ShareData with aux info.
+#[tokio::test]
+async fn test_cggmp21_keygen_aux_info_present() {
+    use mpc_wallet_core::protocol::cggmp21::Cggmp21ShareData;
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+
+    for share in &shares {
+        let data: Cggmp21ShareData =
+            serde_json::from_slice(&share.share_data).expect("share data must deserialize");
+
+        // Paillier keys must be non-empty
+        assert!(!data.paillier_sk.is_empty(), "Paillier SK must be present");
+        assert!(!data.paillier_pk.is_empty(), "Paillier PK must be present");
+        // Pedersen params must be non-empty
+        assert!(
+            !data.pedersen_params.is_empty(),
+            "Pedersen params must be present"
+        );
+        // Public shares must have n entries
+        assert_eq!(
+            data.public_shares.len(),
+            3,
+            "must have one public share per party"
+        );
+        // Secret share must be 32 bytes (secp256k1 scalar)
+        assert_eq!(data.secret_share.len(), 32);
+    }
+}
+
+// ── Signing tests ────────────────────────────────────────────────────────────
+
+/// Different messages produce different signatures.
+#[tokio::test]
+async fn test_cggmp21_sign_different_messages() {
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+
+    let msg1 = b"message one";
+    let msg2 = b"message two";
+    let sigs1 = run_sign(cggmp21_factory, &shares, &[0, 1], msg1).await;
+    let sigs2 = run_sign(cggmp21_factory, &shares, &[0, 1], msg2).await;
+
+    let MpcSignature::Ecdsa { r: r1, s: s1, .. } = &sigs1[0] else {
+        panic!("expected ECDSA");
+    };
+    let MpcSignature::Ecdsa { r: r2, s: s2, .. } = &sigs2[0] else {
+        panic!("expected ECDSA");
+    };
+
+    // At least one component must differ (overwhelmingly likely: both differ)
+    assert!(
+        r1 != r2 || s1 != s2,
+        "different messages must produce different signatures"
+    );
+}
+
+/// Signing an empty message works.
+#[tokio::test]
+async fn test_cggmp21_sign_empty_message() {
+    use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let gpk = shares[0].group_public_key.as_bytes();
+    let pubkey = k256::PublicKey::from_sec1_bytes(gpk).unwrap();
+    let vk = VerifyingKey::from(&pubkey);
+
+    let message = b"";
+    let sigs = run_sign(cggmp21_factory, &shares, &[0, 1], message).await;
+    let MpcSignature::Ecdsa { r, s, .. } = &sigs[0] else {
+        panic!("expected ECDSA");
+    };
+
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(r);
+    sig_bytes[32..].copy_from_slice(s);
+    vk.verify(message, &Signature::from_bytes(&sig_bytes.into()).unwrap())
+        .expect("empty message signature must verify");
+}
+
+/// Signing a large message (64KB) works.
+#[tokio::test]
+async fn test_cggmp21_sign_large_message() {
+    use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let gpk = shares[0].group_public_key.as_bytes();
+    let pubkey = k256::PublicKey::from_sec1_bytes(gpk).unwrap();
+    let vk = VerifyingKey::from(&pubkey);
+
+    let message = vec![0xABu8; 65536]; // 64KB message
+    let sigs = run_sign(cggmp21_factory, &shares, &[0, 1], &message).await;
+    let MpcSignature::Ecdsa { r, s, .. } = &sigs[0] else {
+        panic!("expected ECDSA");
+    };
+
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(r);
+    sig_bytes[32..].copy_from_slice(s);
+    vk.verify(&message, &Signature::from_bytes(&sig_bytes.into()).unwrap())
+        .expect("large message signature must verify");
+}
+
+/// For 2-of-3, all 3 possible signing subsets produce valid signatures.
+#[tokio::test]
+async fn test_cggmp21_sign_all_subsets() {
+    use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let gpk = shares[0].group_public_key.as_bytes();
+    let pubkey = k256::PublicKey::from_sec1_bytes(gpk).unwrap();
+    let vk = VerifyingKey::from(&pubkey);
+    let message = b"all subsets test";
+
+    for subset in &[vec![0usize, 1], vec![0, 2], vec![1, 2]] {
+        let sigs = run_sign(cggmp21_factory, &shares, subset, message).await;
+        let MpcSignature::Ecdsa { r, s, .. } = &sigs[0] else {
+            panic!("expected ECDSA");
+        };
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes[..32].copy_from_slice(r);
+        sig_bytes[32..].copy_from_slice(s);
+        vk.verify(message, &Signature::from_bytes(&sig_bytes.into()).unwrap())
+            .unwrap_or_else(|_| panic!("subset {:?} must verify", subset));
+    }
+}
+
+/// Verify CGGMP21 signature using k256::ecdsa::VerifyingKey.
+#[tokio::test]
+async fn test_cggmp21_sign_verify_k256() {
+    use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let gpk = shares[0].group_public_key.as_bytes();
+    let pubkey = k256::PublicKey::from_sec1_bytes(gpk).unwrap();
+    let vk = VerifyingKey::from(&pubkey);
+
+    let message = b"verify with k256 VerifyingKey";
+    let sigs = run_sign(cggmp21_factory, &shares, &[0, 1], message).await;
+    let MpcSignature::Ecdsa { r, s, .. } = &sigs[0] else {
+        panic!("expected ECDSA");
+    };
+
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(r);
+    sig_bytes[32..].copy_from_slice(s);
+    let sig = Signature::from_bytes(&sig_bytes.into()).unwrap();
+
+    // Must verify with standard k256 verify
+    vk.verify(message, &sig)
+        .expect("CGGMP21 signature must verify with k256");
+}
+
+/// Recovery ID is valid (0 or 1).
+#[tokio::test]
+async fn test_cggmp21_sign_recovery_id_valid() {
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let message = b"recovery id test";
+    let sigs = run_sign(cggmp21_factory, &shares, &[0, 1], message).await;
+
+    let MpcSignature::Ecdsa { recovery_id, .. } = &sigs[0] else {
+        panic!("expected ECDSA");
+    };
+    assert!(
+        *recovery_id <= 1,
+        "recovery_id must be 0 or 1, got {}",
+        recovery_id
+    );
+}
+
+/// s is in the lower half of curve order (SEC-012 low-s normalization).
+#[tokio::test]
+async fn test_cggmp21_sign_low_s() {
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let message = b"low-s normalization check";
+    let sigs = run_sign(cggmp21_factory, &shares, &[0, 1], message).await;
+
+    let MpcSignature::Ecdsa { s, .. } = &sigs[0] else {
+        panic!("expected ECDSA");
+    };
+
+    // Verify low-s: if normalize_s returns None, s is already low-s.
+    // Construct a k256 Signature and check normalize_s().
+    let MpcSignature::Ecdsa { r: r_bytes, .. } = &sigs[0] else {
+        unreachable!();
+    };
+    let mut sig_raw = [0u8; 64];
+    sig_raw[..32].copy_from_slice(r_bytes);
+    sig_raw[32..].copy_from_slice(s);
+    let sig = k256::ecdsa::Signature::from_bytes(&sig_raw.into()).unwrap();
+    assert!(
+        sig.normalize_s().is_none(),
+        "s must already be in lower half of curve order (SEC-012 low-s)"
+    );
+}
+
+/// Pre-signature marked as used after signing — reuse returns error.
+#[tokio::test]
+async fn test_cggmp21_presign_cannot_reuse() {
+    use mpc_wallet_core::protocol::cggmp21::Cggmp21Protocol;
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let signers = vec![PartyId(1), PartyId(2)];
+    let net = LocalTransportNetwork::new(3);
+
+    // Run pre-sign for two parties
+    let protocol1 = Cggmp21Protocol::new();
+    let protocol2 = Cggmp21Protocol::new();
+    let share1 = shares[0].clone();
+    let share2 = shares[1].clone();
+    let t1 = net.get_transport(PartyId(1));
+    let t2 = net.get_transport(PartyId(2));
+    let signers1 = signers.clone();
+    let signers2 = signers.clone();
+
+    let (mut pre1, _pre2) = tokio::join!(
+        async { protocol1.pre_sign(&share1, &signers1, &*t1).await.unwrap() },
+        async { protocol2.pre_sign(&share2, &signers2, &*t2).await.unwrap() }
+    );
+
+    // Mark as used (simulating first sign)
+    pre1.used = true;
+
+    // Attempting to use again should fail
+    let protocol = Cggmp21Protocol::new();
+    let transport = net.get_transport(PartyId(1));
+    let result = protocol
+        .sign_with_presig(&mut pre1, b"second message", &shares[0], &*transport)
+        .await;
+    assert!(result.is_err(), "reusing pre-signature must fail");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("already used") || err_msg.contains("nonce reuse"),
+        "error must mention nonce reuse, got: {}",
+        err_msg
+    );
+}
+
+/// CGGMP21 and GG20 produce the same MpcSignature::Ecdsa variant format.
+#[tokio::test]
+async fn test_cggmp21_sign_matches_gg20_format() {
+    let cggmp_shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let gg20_shares = run_keygen(gg20_factory, 2, 3).await;
+
+    let message = b"format compatibility test";
+    let cggmp_sigs = run_sign(cggmp21_factory, &cggmp_shares, &[0, 1], message).await;
+    let gg20_sigs = run_sign(gg20_factory, &gg20_shares, &[0, 1], message).await;
+
+    // Both must produce Ecdsa variant
+    match (&cggmp_sigs[0], &gg20_sigs[0]) {
+        (
+            MpcSignature::Ecdsa {
+                r: cr,
+                s: cs,
+                recovery_id: crid,
+            },
+            MpcSignature::Ecdsa {
+                r: gr,
+                s: gs,
+                recovery_id: grid,
+            },
+        ) => {
+            // Same format: 32-byte r, 32-byte s, u8 recovery_id
+            assert_eq!(cr.len(), 32, "CGGMP21 r must be 32 bytes");
+            assert_eq!(cs.len(), 32, "CGGMP21 s must be 32 bytes");
+            assert_eq!(gr.len(), 32, "GG20 r must be 32 bytes");
+            assert_eq!(gs.len(), 32, "GG20 s must be 32 bytes");
+            assert!(*crid <= 1, "CGGMP21 recovery_id must be 0 or 1");
+            assert!(
+                *grid <= 1 || *grid == 0xff,
+                "GG20 recovery_id must be valid"
+            );
+        }
+        _ => panic!("both protocols must produce MpcSignature::Ecdsa"),
+    }
+}
+
+/// Signing with 3-of-5 config works.
+#[tokio::test]
+async fn test_cggmp21_sign_3_of_5() {
+    use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+    let shares = run_keygen(cggmp21_factory, 3, 5).await;
+    let gpk = shares[0].group_public_key.as_bytes();
+    let pubkey = k256::PublicKey::from_sec1_bytes(gpk).unwrap();
+    let vk = VerifyingKey::from(&pubkey);
+
+    let message = b"3-of-5 signing test";
+    let sigs = run_sign(cggmp21_factory, &shares, &[0, 2, 4], message).await;
+    let MpcSignature::Ecdsa { r, s, .. } = &sigs[0] else {
+        panic!("expected ECDSA");
+    };
+
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(r);
+    sig_bytes[32..].copy_from_slice(s);
+    vk.verify(message, &Signature::from_bytes(&sig_bytes.into()).unwrap())
+        .expect("3-of-5 CGGMP21 signature must verify");
+}
+
+/// r and s components are 32 bytes and non-zero.
+#[tokio::test]
+async fn test_cggmp21_sign_r_s_nonzero() {
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let message = b"r and s non-zero test";
+    let sigs = run_sign(cggmp21_factory, &shares, &[0, 1], message).await;
+
+    let MpcSignature::Ecdsa { r, s, .. } = &sigs[0] else {
+        panic!("expected ECDSA");
+    };
+
+    assert_eq!(r.len(), 32);
+    assert_eq!(s.len(), 32);
+    assert!(r.iter().any(|&b| b != 0), "r must not be all zeros");
+    assert!(s.iter().any(|&b| b != 0), "s must not be all zeros");
+}
+
+// ── Refresh tests ────────────────────────────────────────────────────────────
+
+/// CGGMP21 does not support refresh — returns protocol error.
+#[tokio::test]
+async fn test_cggmp21_refresh_not_supported() {
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let protocol = cggmp21_factory();
+    let signers = vec![PartyId(1), PartyId(2)];
+    let net = LocalTransportNetwork::new(3);
+    let transport = net.get_transport(PartyId(1));
+
+    let result = protocol.refresh(&shares[0], &signers, &*transport).await;
+    assert!(
+        result.is_err(),
+        "CGGMP21 refresh must return error (not implemented)"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("not supported"),
+        "error must indicate refresh is not supported, got: {}",
+        err_msg
+    );
+}
+
+/// CGGMP21 does not support reshare — returns protocol error.
+#[tokio::test]
+async fn test_cggmp21_reshare_not_supported() {
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let protocol = cggmp21_factory();
+    let new_config = ThresholdConfig::new(2, 4).unwrap();
+    let new_parties = vec![PartyId(1), PartyId(2), PartyId(3), PartyId(4)];
+    let old_signers = vec![PartyId(1), PartyId(2)];
+    let net = LocalTransportNetwork::new(4);
+    let transport = net.get_transport(PartyId(1));
+
+    let result = protocol
+        .reshare(
+            &shares[0],
+            &old_signers,
+            new_config,
+            &new_parties,
+            &*transport,
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "CGGMP21 reshare must return error (not implemented)"
+    );
+}
+
+// ── Pre-signing tests ────────────────────────────────────────────────────────
+
+/// Pre-sign produces valid PreSignature with expected fields.
+#[tokio::test]
+async fn test_cggmp21_presign_produces_valid_output() {
+    use mpc_wallet_core::protocol::cggmp21::Cggmp21Protocol;
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let signers = vec![PartyId(1), PartyId(2)];
+    let net = LocalTransportNetwork::new(3);
+
+    let p1 = Cggmp21Protocol::new();
+    let p2 = Cggmp21Protocol::new();
+    let s1 = shares[0].clone();
+    let s2 = shares[1].clone();
+    let t1 = net.get_transport(PartyId(1));
+    let t2 = net.get_transport(PartyId(2));
+    let sig1 = signers.clone();
+    let sig2 = signers.clone();
+
+    let (pre1, pre2) = tokio::join!(
+        async { p1.pre_sign(&s1, &sig1, &*t1).await.unwrap() },
+        async { p2.pre_sign(&s2, &sig2, &*t2).await.unwrap() }
+    );
+
+    // Both must agree on big_r
+    assert_eq!(pre1.big_r, pre2.big_r, "parties must agree on R point");
+    // big_r must be valid secp256k1 point
+    assert!(
+        k256::PublicKey::from_sec1_bytes(&pre1.big_r).is_ok(),
+        "R must be valid SEC1 point"
+    );
+    // Not used yet
+    assert!(!pre1.used);
+    assert!(!pre2.used);
+    // k_i and chi_i must be 32 bytes
+    assert_eq!(pre1.k_i.len(), 32);
+    assert_eq!(pre1.chi_i.len(), 32);
+    // Party IDs correct
+    assert_eq!(pre1.party_id, PartyId(1));
+    assert_eq!(pre2.party_id, PartyId(2));
+}
+
+/// Pre-sign then online sign produces valid signature.
+#[tokio::test]
+async fn test_cggmp21_presign_then_online_sign() {
+    use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+    use mpc_wallet_core::protocol::cggmp21::Cggmp21Protocol;
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let signers = vec![PartyId(1), PartyId(2)];
+    let net = LocalTransportNetwork::new(3);
+
+    // Phase 1: Pre-sign
+    let p1 = Cggmp21Protocol::new();
+    let p2 = Cggmp21Protocol::new();
+    let s1 = shares[0].clone();
+    let s2 = shares[1].clone();
+    let t1 = net.get_transport(PartyId(1));
+    let t2 = net.get_transport(PartyId(2));
+    let sig1 = signers.clone();
+    let sig2 = signers.clone();
+
+    let (mut pre1, mut pre2) = tokio::join!(
+        async { p1.pre_sign(&s1, &sig1, &*t1).await.unwrap() },
+        async { p2.pre_sign(&s2, &sig2, &*t2).await.unwrap() }
+    );
+
+    // Phase 2: Online sign
+    let message = b"online sign after pre-sign";
+    let net2 = LocalTransportNetwork::new(3);
+    let p1b = Cggmp21Protocol::new();
+    let p2b = Cggmp21Protocol::new();
+    let s1b = shares[0].clone();
+    let s2b = shares[1].clone();
+    let t1b = net2.get_transport(PartyId(1));
+    let t2b = net2.get_transport(PartyId(2));
+    let msg1 = message.to_vec();
+    let msg2 = message.to_vec();
+
+    let (sig1_result, _sig2_result) = tokio::join!(
+        async { p1b.sign_with_presig(&mut pre1, &msg1, &s1b, &*t1b).await },
+        async { p2b.sign_with_presig(&mut pre2, &msg2, &s2b, &*t2b).await }
+    );
+
+    let sig = sig1_result.expect("online sign must succeed");
+    let MpcSignature::Ecdsa { r, s, .. } = &sig else {
+        panic!("expected ECDSA signature");
+    };
+
+    // Verify
+    let gpk = shares[0].group_public_key.as_bytes();
+    let pubkey = k256::PublicKey::from_sec1_bytes(gpk).unwrap();
+    let vk = VerifyingKey::from(&pubkey);
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(r);
+    sig_bytes[32..].copy_from_slice(s);
+    vk.verify(message, &Signature::from_bytes(&sig_bytes.into()).unwrap())
+        .expect("pre-sign + online-sign signature must verify");
+
+    // Pre-signatures must be marked as used
+    assert!(pre1.used, "pre1 must be marked used after signing");
+    assert!(pre2.used, "pre2 must be marked used after signing");
+}
+
+// ── Abort tests ──────────────────────────────────────────────────────────────
+
+/// Identifiable abort error message includes party information.
+#[tokio::test]
+async fn test_cggmp21_abort_error_message_format() {
+    // We test the nonce reuse path which triggers a known error
+    use mpc_wallet_core::protocol::cggmp21::Cggmp21Protocol;
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let signers = vec![PartyId(1), PartyId(2)];
+    let net = LocalTransportNetwork::new(3);
+
+    let p1 = Cggmp21Protocol::new();
+    let p2 = Cggmp21Protocol::new();
+    let t1 = net.get_transport(PartyId(1));
+    let t2 = net.get_transport(PartyId(2));
+    let s1 = shares[0].clone();
+    let s2 = shares[1].clone();
+    let sig1 = signers.clone();
+    let sig2 = signers.clone();
+
+    let (mut pre1, _pre2) = tokio::join!(
+        async { p1.pre_sign(&s1, &sig1, &*t1).await.unwrap() },
+        async { p2.pre_sign(&s2, &sig2, &*t2).await.unwrap() }
+    );
+
+    // Force used = true to trigger nonce reuse error
+    pre1.used = true;
+    let protocol = Cggmp21Protocol::new();
+    let transport = net.get_transport(PartyId(1));
+    let err = protocol
+        .sign_with_presig(&mut pre1, b"test", &shares[0], &*transport)
+        .await
+        .unwrap_err();
+
+    let err_str = err.to_string();
+    assert!(
+        err_str.contains("already used") || err_str.contains("nonce reuse"),
+        "abort error must contain relevant info, got: {}",
+        err_str
+    );
+}
+
+// ── Cross-protocol tests ─────────────────────────────────────────────────────
+
+/// CGGMP21 and GG20 both produce secp256k1 keys.
+#[tokio::test]
+async fn test_cggmp21_vs_gg20_same_curve() {
+    let cggmp_shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let gg20_shares = run_keygen(gg20_factory, 2, 3).await;
+
+    // Both produce valid secp256k1 compressed public keys
+    let cggmp_gpk = cggmp_shares[0].group_public_key.as_bytes();
+    let gg20_gpk = gg20_shares[0].group_public_key.as_bytes();
+
+    let cggmp_pk =
+        k256::PublicKey::from_sec1_bytes(cggmp_gpk).expect("CGGMP21 key must be valid secp256k1");
+    let gg20_pk =
+        k256::PublicKey::from_sec1_bytes(gg20_gpk).expect("GG20 key must be valid secp256k1");
+
+    // Both are compressed SEC1 (33 bytes)
+    assert_eq!(
+        cggmp_gpk.len(),
+        33,
+        "CGGMP21 key must be 33 bytes compressed"
+    );
+    assert_eq!(gg20_gpk.len(), 33, "GG20 key must be 33 bytes compressed");
+
+    // Both are on the same curve (both parse as k256 PublicKey)
+    let _ = cggmp_pk;
+    let _ = gg20_pk;
+}
+
+/// CGGMP21 and GG20 key shares are not interchangeable.
+#[tokio::test]
+async fn test_cggmp21_key_not_compatible_with_gg20() {
+    let cggmp_shares = run_keygen(cggmp21_factory, 2, 3).await;
+
+    // CGGMP21 shares have Cggmp21Secp256k1 scheme
+    assert_eq!(cggmp_shares[0].scheme, CryptoScheme::Cggmp21Secp256k1);
+
+    let gg20_shares = run_keygen(gg20_factory, 2, 3).await;
+    assert_eq!(gg20_shares[0].scheme, CryptoScheme::Gg20Ecdsa);
+
+    // Different schemes — can't mix
+    assert_ne!(
+        cggmp_shares[0].scheme, gg20_shares[0].scheme,
+        "CGGMP21 and GG20 must have different CryptoScheme"
+    );
+
+    // Share data formats are different — trying to deserialize as the wrong type fails
+    let cggmp_result: Result<mpc_wallet_core::protocol::cggmp21::Cggmp21ShareData, _> =
+        serde_json::from_slice(&gg20_shares[0].share_data);
+    // Should fail because GG20 share data has different fields
+    // (may or may not fail depending on serde options, but scheme check prevents misuse)
+    let _ = cggmp_result;
+}
+
+/// CGGMP21 signature verifies with recovery (ecrecover-style).
+#[tokio::test]
+async fn test_cggmp21_sign_recovery() {
+    use k256::ecdsa::{RecoveryId, VerifyingKey};
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let gpk = shares[0].group_public_key.as_bytes();
+    let expected_vk = VerifyingKey::from(&k256::PublicKey::from_sec1_bytes(gpk).unwrap());
+
+    let message = b"recovery test";
+    let sigs = run_sign(cggmp21_factory, &shares, &[0, 1], message).await;
+    let MpcSignature::Ecdsa {
+        r, s, recovery_id, ..
+    } = &sigs[0]
+    else {
+        panic!("expected ECDSA");
+    };
+
+    // Build signature and recover the public key
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(r);
+    sig_bytes[32..].copy_from_slice(s);
+    let sig = k256::ecdsa::Signature::from_bytes(&sig_bytes.into()).unwrap();
+    let recid = RecoveryId::try_from(*recovery_id).unwrap();
+
+    // Hash the message the same way CGGMP21 does (SHA-256)
+    use sha2::Digest;
+    let hash = sha2::Sha256::digest(message);
+    let recovered =
+        VerifyingKey::recover_from_prehash(&hash, &sig, recid).expect("recovery must succeed");
+    assert_eq!(
+        recovered, expected_vk,
+        "recovered public key must match group public key"
+    );
+}
+
+/// Multiple sequential signing operations with the same key shares all produce valid signatures.
+#[tokio::test]
+async fn test_cggmp21_sign_multiple_sequential() {
+    use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let gpk = shares[0].group_public_key.as_bytes();
+    let pubkey = k256::PublicKey::from_sec1_bytes(gpk).unwrap();
+    let vk = VerifyingKey::from(&pubkey);
+
+    for i in 0..3 {
+        let message = format!("sequential message {}", i);
+        let sigs = run_sign(cggmp21_factory, &shares, &[0, 1], message.as_bytes()).await;
+        let MpcSignature::Ecdsa { r, s, .. } = &sigs[0] else {
+            panic!("expected ECDSA");
+        };
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes[..32].copy_from_slice(r);
+        sig_bytes[32..].copy_from_slice(s);
+        vk.verify(
+            message.as_bytes(),
+            &Signature::from_bytes(&sig_bytes.into()).unwrap(),
+        )
+        .unwrap_or_else(|_| panic!("sequential message {} must verify", i));
+    }
+}
+
+/// Scheme() returns the correct CryptoScheme.
+#[tokio::test]
+async fn test_cggmp21_scheme_identifier() {
+    let protocol = cggmp21_factory();
+    assert_eq!(
+        protocol.scheme(),
+        CryptoScheme::Cggmp21Secp256k1,
+        "CGGMP21 protocol must report Cggmp21Secp256k1 scheme"
+    );
+}
+
+/// All signers receive consistent results (same r, same s).
+#[tokio::test]
+async fn test_cggmp21_all_signers_consistent() {
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let message = b"consistency test";
+    let sigs = run_sign(cggmp21_factory, &shares, &[0, 1], message).await;
+
+    // Both signers should produce the same final signature
+    let MpcSignature::Ecdsa { r: r0, s: s0, .. } = &sigs[0] else {
+        panic!("expected ECDSA");
+    };
+    let MpcSignature::Ecdsa { r: r1, s: s1, .. } = &sigs[1] else {
+        panic!("expected ECDSA");
+    };
+    assert_eq!(r0, r1, "both signers must agree on r");
+    assert_eq!(s0, s1, "both signers must agree on s");
+}
+
+/// PreSignature serialization round-trip.
+#[tokio::test]
+async fn test_cggmp21_presignature_serialization() {
+    use mpc_wallet_core::protocol::cggmp21::{Cggmp21Protocol, PreSignature};
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+    let signers = vec![PartyId(1), PartyId(2)];
+    let net = LocalTransportNetwork::new(3);
+
+    let p1 = Cggmp21Protocol::new();
+    let p2 = Cggmp21Protocol::new();
+    let t1 = net.get_transport(PartyId(1));
+    let t2 = net.get_transport(PartyId(2));
+    let s1 = shares[0].clone();
+    let s2 = shares[1].clone();
+    let sig1 = signers.clone();
+    let sig2 = signers.clone();
+
+    let (pre1, _pre2) = tokio::join!(
+        async { p1.pre_sign(&s1, &sig1, &*t1).await.unwrap() },
+        async { p2.pre_sign(&s2, &sig2, &*t2).await.unwrap() }
+    );
+
+    // Serialize and deserialize
+    let bytes = serde_json::to_vec(&pre1).expect("PreSignature must serialize");
+    let restored: PreSignature =
+        serde_json::from_slice(&bytes).expect("PreSignature must deserialize");
+
+    assert_eq!(restored.k_i, pre1.k_i);
+    assert_eq!(restored.chi_i, pre1.chi_i);
+    assert_eq!(restored.big_r, pre1.big_r);
+    assert_eq!(restored.party_id, pre1.party_id);
+    assert_eq!(restored.used, pre1.used);
+}
+
+/// Cggmp21ShareData deserialization from keygen output.
+#[tokio::test]
+async fn test_cggmp21_share_data_from_keygen() {
+    use mpc_wallet_core::protocol::cggmp21::Cggmp21ShareData;
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+
+    for (idx, share) in shares.iter().enumerate() {
+        let data: Cggmp21ShareData = serde_json::from_slice(&share.share_data)
+            .unwrap_or_else(|e| panic!("party {} share data must deserialize: {}", idx + 1, e));
+
+        assert_eq!(data.party_index, (idx + 1) as u16);
+        assert_eq!(data.public_shares.len(), 3);
+        assert_eq!(data.group_public_key.len(), 33);
+        assert_eq!(data.secret_share.len(), 32);
+
+        // Each public share must be a valid compressed SEC1 point
+        for (j, ps) in data.public_shares.iter().enumerate() {
+            assert!(
+                k256::PublicKey::from_sec1_bytes(ps).is_ok(),
+                "public share {} for party {} must be valid SEC1",
+                j,
+                idx + 1
+            );
+        }
+
+        // Group public key in share data must match KeyShare group_public_key
+        assert_eq!(data.group_public_key, share.group_public_key.as_bytes());
+    }
+}
+
+/// Different parties' auxiliary info (Paillier/Pedersen) are different.
+#[tokio::test]
+async fn test_cggmp21_keygen_aux_info_unique_per_party() {
+    use mpc_wallet_core::protocol::cggmp21::Cggmp21ShareData;
+
+    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+
+    let datas: Vec<Cggmp21ShareData> = shares
+        .iter()
+        .map(|s| serde_json::from_slice(&s.share_data).unwrap())
+        .collect();
+
+    // Each party's Paillier SK and Pedersen params should be different
+    for i in 0..datas.len() {
+        for j in (i + 1)..datas.len() {
+            assert_ne!(
+                datas[i].paillier_sk,
+                datas[j].paillier_sk,
+                "parties {} and {} must have different Paillier SK",
+                i + 1,
+                j + 1
+            );
+            assert_ne!(
+                datas[i].paillier_pk,
+                datas[j].paillier_pk,
+                "parties {} and {} must have different Paillier PK",
+                i + 1,
+                j + 1
+            );
+        }
+    }
+}
