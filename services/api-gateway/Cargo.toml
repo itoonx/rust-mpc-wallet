@@ -64,6 +64,12 @@ thiserror = { workspace = true }
 
 base64 = { workspace = true }
 
+[features]
+default = []
+# Enable when aws-sdk-kms is added for real KMS integration.
+# Currently defines the interface with stub implementations.
+aws-kms = []
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
 reqwest = { workspace = true }
