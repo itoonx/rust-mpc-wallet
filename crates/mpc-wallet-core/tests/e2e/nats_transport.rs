@@ -52,7 +52,9 @@ async fn test_nats_signed_message_round_trip() {
     let sender = party_keys.connect(0, &session_id, &url).await;
     let receiver = party_keys.connect(1, &session_id, &url).await;
 
-    let recv_handle = tokio::spawn(async move { receiver.recv().await });
+    let recv_handle = tokio::spawn(async move {
+        tokio::time::timeout(std::time::Duration::from_secs(30), receiver.recv()).await
+    });
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -64,7 +66,7 @@ async fn test_nats_signed_message_round_trip() {
     };
     sender.send(msg).await.unwrap();
 
-    let received = recv_handle.await.unwrap().unwrap();
+    let received = recv_handle.await.unwrap().expect("recv timed out after 30s").unwrap();
     assert_eq!(received.from, PartyId(1));
     assert_eq!(received.round, 1);
     assert_eq!(received.payload, b"hello from party 1");
@@ -109,11 +111,16 @@ async fn test_nats_session_isolation() {
 // MPC keygen via NATS
 // ═══════════════════════════════════════════════════════════════════════
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires NATS: ./scripts/local-infra.sh up"]
 async fn test_nats_keygen_gg20_2of3() {
     let url = nats_url();
-    let (shares, _party_keys) = nats_keygen(gg20_factory, 2, 3, &url).await;
+    let (shares, _party_keys) = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        nats_keygen(gg20_factory, 2, 3, &url),
+    )
+    .await
+    .expect("nats keygen timed out after 60s");
 
     assert_eq!(shares.len(), 3);
     let gpk = &shares[0].group_public_key;
@@ -132,7 +139,7 @@ async fn test_nats_keygen_gg20_2of3() {
 
 /// Direct 2-party sign via NATS (pre-built shares from LocalTransport).
 /// Tests the sign protocol over NATS without keygen overhead.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires NATS: ./scripts/local-infra.sh up"]
 async fn test_nats_sign_gg20_direct() {
     use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
