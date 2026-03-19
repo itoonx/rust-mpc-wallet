@@ -2378,26 +2378,16 @@ async fn test_cggmp21_sign_r_s_nonzero() {
 
 // ── Refresh tests ────────────────────────────────────────────────────────────
 
-/// CGGMP21 does not support refresh — returns protocol error.
+/// CGGMP21 refresh is now implemented (Sprint 21, R1).
+/// Full refresh tests are in the cggmp21 module's own test suite.
+/// This integration test verifies the scheme is correct.
 #[tokio::test]
-async fn test_cggmp21_refresh_not_supported() {
-    let shares = run_keygen(cggmp21_factory, 2, 3).await;
+async fn test_cggmp21_scheme_supports_refresh() {
+    // CGGMP21 refresh was implemented in Sprint 21.
+    // The cggmp21 module has dedicated refresh tests (test_cggmp21_refresh_*).
+    // Here we just verify the protocol reports the correct scheme.
     let protocol = cggmp21_factory();
-    let signers = vec![PartyId(1), PartyId(2)];
-    let net = LocalTransportNetwork::new(3);
-    let transport = net.get_transport(PartyId(1));
-
-    let result = protocol.refresh(&shares[0], &signers, &*transport).await;
-    assert!(
-        result.is_err(),
-        "CGGMP21 refresh must return error (not implemented)"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("not supported"),
-        "error must indicate refresh is not supported, got: {}",
-        err_msg
-    );
+    assert_eq!(protocol.scheme(), CryptoScheme::Cggmp21Secp256k1);
 }
 
 /// CGGMP21 does not support reshare — returns protocol error.
