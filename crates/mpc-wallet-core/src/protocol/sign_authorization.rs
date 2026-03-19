@@ -562,8 +562,12 @@ mod tests {
 
         // Manually insert an entry that is already expired (expiry in the past).
         let now = crate::protocol::request_context::unix_now_secs();
-        cache.seen.insert("old-auth-1".to_string(), now.saturating_sub(10));
-        cache.seen.insert("old-auth-2".to_string(), now.saturating_sub(5));
+        cache
+            .seen
+            .insert("old-auth-1".to_string(), now.saturating_sub(10));
+        cache
+            .seen
+            .insert("old-auth-2".to_string(), now.saturating_sub(5));
         cache.seen.insert("fresh-auth".to_string(), now + 300);
 
         assert_eq!(cache.len(), 3);
