@@ -26,6 +26,12 @@ pub mod approvals;
 /// Use [`audit::AuditLedger`] to record every signing event. Call
 /// [`audit::AuditLedger::verify`] to check tamper-evident chain integrity.
 pub mod audit;
+/// SGX/TDX enclave abstraction for hardware-isolated MPC signing (DEC-017).
+///
+/// Defines the [`enclave::EnclaveProvider`] trait that abstracts over hardware
+/// enclave operations. Key share plaintext and secret scalars never leave the
+/// enclave boundary. See `docs/SGX_DESIGN.md` for the full design document.
+pub mod enclave;
 /// Error types returned by all core operations.
 pub mod error;
 /// JWT-based identity validation (Epic A).
