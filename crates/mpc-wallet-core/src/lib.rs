@@ -26,6 +26,13 @@ pub mod approvals;
 /// Use [`audit::AuditLedger`] to record every signing event. Call
 /// [`audit::AuditLedger::verify`] to check tamper-evident chain integrity.
 pub mod audit;
+/// SGX enclave abstraction: trait + mock provider for testing.
+///
+/// Use [`enclave::EnclaveProvider`] to load key shares into an enclave,
+/// perform MPC signing within the enclave boundary, and produce attestation
+/// reports. [`enclave::mock::MockEnclaveProvider`] provides a software-only
+/// implementation for development and testing.
+pub mod enclave;
 /// Error types returned by all core operations.
 pub mod error;
 /// JWT-based identity validation (Epic A).
