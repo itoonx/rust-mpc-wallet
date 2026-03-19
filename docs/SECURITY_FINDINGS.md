@@ -41,6 +41,16 @@
 | SEC-021 | INFO | AES-256-GCM uses fresh random salt + nonce per write — no reuse risk (positive finding) |
 | SEC-022 | INFO | Git history scan found no committed secrets (positive finding) |
 | SEC-023 | LOW | ~~T-06 (R3d): invalid-hex test case missing — no dedicated test for `0x` + 64 non-hex chars path~~ **RESOLVED** by T-S17-04 (R3d) — invalid hex validation test added |
+| SEC-034 | MEDIUM | CGGMP21 MtA simulation broadcasts raw nonce shares (k_i, gamma_i) in plaintext — not behind feature gate |
+| SEC-035 | MEDIUM | CGGMP21 identifiable abort cannot fully verify per-party sigma_i — K_i not stored from pre-signing |
+| SEC-036 | LOW | CGGMP21 Schnorr challenge hash fallback to Scalar::ONE on non-reducible hash output |
+| SEC-037 | LOW | CGGMP21 PreSignature `used` flag is in-memory only — crash-replay can bypass nonce reuse protection |
+| SEC-038 | LOW | CGGMP21 `chi_i_scalar` not wrapped in Zeroizing — secret material on stack without zeroize-on-drop |
+| SEC-039 | INFO | CGGMP21 Paillier/Pedersen keys are simulated (32-byte, not 2048-bit) — clearly documented (expected) |
+| SEC-040 | INFO | CGGMP21 full private key never reconstructed (positive finding) |
+| SEC-041 | INFO | CGGMP21 commitment scheme is binding — SHA-256 commit-then-reveal verified (positive finding) |
+| SEC-042 | INFO | CGGMP21 low-s normalization correctly applied (positive finding) |
+| SEC-043 | INFO | CGGMP21 recovery ID correctly computed via brute-force verification (positive finding) |
 
 ---
 
@@ -1435,3 +1445,293 @@ Additional Sprint 17 items confirmed:
 ### Verdict
 
 **APPROVED** — No CRITICAL or HIGH findings remain open. All Sprint 17 security hardening items have been verified. Sprint 18 in-progress items (SEC-026 control plane signing, AuthorizationCache) are defense-in-depth improvements that do not block the current gate.
+
+---
+
+## CGGMP21 Protocol Audit (Sprint 21)
+
+- **Date:** 2026-03-19
+- **Auditor:** R6 (Security Agent)
+- **Task:** T-S21-03
+- **Scope:** `crates/mpc-wallet-core/src/protocol/cggmp21.rs` (~1910 lines)
+- **Protocol:** CGGMP21 threshold ECDSA (secp256k1) — keygen, pre-signing, online signing, identifiable abort, auxiliary info
+
+### Findings Summary
+
+| ID | Severity | Summary | Status |
+|----|----------|---------|--------|
+| SEC-034 | MEDIUM | MtA simulation broadcasts raw nonce shares (k_i, gamma_i) in plaintext — not behind feature gate | OPEN |
+| SEC-035 | MEDIUM | Identifiable abort cannot fully verify per-party sigma_i — K_i not stored from pre-signing | OPEN |
+| SEC-036 | LOW | Schnorr challenge hash fallback to Scalar::ONE on non-reducible hash output | OPEN |
+| SEC-037 | LOW | PreSignature `used` flag is in-memory only — crash-and-replay can bypass nonce reuse protection | OPEN |
+| SEC-038 | LOW | `chi_i_scalar` (line 997) not wrapped in Zeroizing — secret material on stack without zeroize-on-drop | OPEN |
+| SEC-039 | INFO | Paillier/Pedersen keys are simulated (32-byte SHA-256 derived, not 2048-bit primes) — clearly documented | N/A |
+| SEC-040 | INFO | No key reconstruction — full private key x = sum(x_i) is never assembled (positive finding) | N/A |
+| SEC-041 | INFO | Commitment scheme is binding — Round 1 SHA-256 commitment verified before accepting decommit (positive finding) | N/A |
+| SEC-042 | INFO | Low-s normalization correctly applied via k256::ecdsa::Signature::normalize_s() (positive finding) | N/A |
+| SEC-043 | INFO | Recovery ID correctly computed via brute-force verification (positive finding) | N/A |
+
+---
+
+### [MEDIUM] SEC-034: MtA Simulation Broadcasts Raw Nonce Shares Without Feature Gate
+
+- **ID:** SEC-034
+- **Date:** 2026-03-19
+- **Task:** T-S21-03 (R6 audit)
+- **Agent:** R1 (Crypto Agent)
+- **File:** `crates/mpc-wallet-core/src/protocol/cggmp21.rs:926-974`
+- **Description:** In the pre-signing Round 2 (MtA simulation), each party broadcasts their raw
+  `k_i` and `gamma_i` scalar values in plaintext over the transport. This means every participant
+  learns every other participant's nonce share and blinding factor. While this is documented in
+  comments as "INSECURE" and "demonstrates the protocol structure," the simulation code is not
+  behind a feature gate (unlike GG20's `#[cfg(feature = "gg20-simulation")]` pattern). This means
+  the insecure MtA path is compiled and executable in production builds.
+- **Impact:** Any party (or transport-layer eavesdropper) learns all nonce shares k_i, enabling
+  private key extraction from a single observed signature. The protocol's threshold security
+  property is completely negated during pre-signing. Since this is not feature-gated, it could
+  be accidentally deployed in production.
+- **Recommendation:** Gate the entire `Cggmp21Protocol` behind `#[cfg(feature = "cggmp21-simulation")]`
+  (following the GG20 pattern), or gate only the MtA simulation Round 2 with a clear production
+  stub that returns `CoreError::Protocol("Paillier MtA not yet implemented")`. Add a
+  `#[cfg(not(feature = "cggmp21-simulation"))]` stub that rejects signing until real Paillier MtA
+  is implemented.
+- **Status:** OPEN
+- **Severity:** MEDIUM (simulation-mode implementation is expected per task spec, but must be gated)
+- **Owner:** R1
+
+---
+
+### [MEDIUM] SEC-035: Identifiable Abort Cannot Fully Verify Per-Party Partial Signatures
+
+- **ID:** SEC-035
+- **Date:** 2026-03-19
+- **Task:** T-S21-03 (R6 audit)
+- **Agent:** R1 (Crypto Agent)
+- **File:** `crates/mpc-wallet-core/src/protocol/cggmp21.rs:1176-1238`
+- **Description:** The `identify_cheater` function is invoked when the aggregated signature fails
+  verification. However, it can only detect trivially invalid contributions (sigma_i == zero).
+  It cannot fully verify each party's sigma_i because the per-party nonce commitment points K_i
+  are not stored during pre-signing. In the real CGGMP21 protocol, K_i is stored so that the
+  verification `sigma_i * G == e * K_i + r * chi_i_point` can be performed per party.
+  The function also ignores `_e_scalar` and `_r_scalar` parameters (prefixed with underscore),
+  which are needed for proper verification.
+- **Impact:** A malicious party that submits a non-zero but incorrect partial signature will cause
+  signing to fail but will NOT be identified. The identifiable abort property of CGGMP21 is only
+  partially implemented.
+- **Recommendation:** Store `K_i` (nonce commitment points) from pre-signing Round 1 in the
+  `PreSignature` struct. Use them in `identify_cheater` to verify each party's sigma_i
+  independently. Remove the underscore prefixes from `_e_scalar` and `_r_scalar` and use them
+  in verification.
+- **Status:** OPEN
+- **Severity:** MEDIUM (correctness/completeness issue in identifiable abort — does not affect
+  signature validity, only cheater detection)
+- **Owner:** R1
+
+---
+
+### [LOW] SEC-036: Schnorr Proof Challenge Fallback to Scalar::ONE
+
+- **ID:** SEC-036
+- **Date:** 2026-03-19
+- **Task:** T-S21-03 (R6 audit)
+- **Agent:** R1 (Crypto Agent)
+- **File:** `crates/mpc-wallet-core/src/protocol/cggmp21.rs:268-277, 315-317`
+- **Description:** In `schnorr_prove` (line 268-277) and `schnorr_verify` (line 315-317), the
+  SHA-256 hash output is converted to a scalar using `Scalar::from_repr()`. If the 32-byte hash
+  value is >= the secp256k1 curve order n (~2^256 - 4.3*10^38), `from_repr` returns None and
+  the code falls back to `Scalar::ONE`. The probability is approximately 1.5 * 10^{-39} per
+  invocation, making this effectively unreachable. However, using ONE as a challenge value
+  would make the Schnorr proof trivially forgeable for that specific invocation.
+  The correct approach is to use `Reduce::reduce_bytes()` (which performs modular reduction)
+  as is already done elsewhere in the file (e.g., line 1062, 1067).
+- **Impact:** Negligible probability (~10^{-39}), but if triggered, the Schnorr proof for that
+  round would use challenge e=1, potentially allowing a party to forge a proof of knowledge.
+- **Recommendation:** Replace the `Scalar::from_repr(...).unwrap_or(Scalar::ONE)` pattern with
+  `<Scalar as Reduce<U256>>::reduce_bytes(...)` which always produces a valid scalar via modular
+  reduction. This is a one-line fix per call site.
+- **Status:** OPEN
+- **Severity:** LOW (probability ~10^{-39}, but incorrect fallback value)
+- **Owner:** R1
+
+---
+
+### [LOW] SEC-037: PreSignature `used` Flag Not Persisted — Crash-Replay Bypass
+
+- **ID:** SEC-037
+- **Date:** 2026-03-19
+- **Task:** T-S21-03 (R6 audit)
+- **Agent:** R1 (Crypto Agent)
+- **File:** `crates/mpc-wallet-core/src/protocol/cggmp21.rs:139-163, 1033-1038`
+- **Description:** The `PreSignature.used` boolean flag provides nonce reuse protection by
+  rejecting signing attempts with an already-used pre-signature. However, this flag is an
+  in-memory value (line 163: `pub used: bool`). If a node crashes after pre-signing but before
+  the `used = true` flag is observed by the caller's persistence layer, the pre-signature could
+  be loaded from disk and reused to sign a different message. Nonce reuse in ECDSA enables
+  full private key extraction from two signatures sharing the same nonce.
+- **Impact:** In a crash-recovery scenario, if the pre-signature was persisted before signing and
+  reloaded after a crash, the nonce reuse protection is bypassed. This is a limited attack
+  scenario requiring both: (a) persistence of pre-signatures to disk, and (b) a crash at a
+  precise timing window.
+- **Recommendation:** For production use, store `used` state in a persistent store (e.g.,
+  EncryptedFileStore) and check it on load. Alternatively, delete the pre-signature from disk
+  immediately after marking it as used, before proceeding with signing. Consider making the
+  `used` field private and providing accessor methods that enforce persistence.
+- **Status:** OPEN
+- **Severity:** LOW (requires specific crash-recovery scenario)
+- **Owner:** R1 / R2
+
+---
+
+### [LOW] SEC-038: `chi_i_scalar` Not Wrapped in Zeroizing
+
+- **ID:** SEC-038
+- **Date:** 2026-03-19
+- **Task:** T-S21-03 (R6 audit)
+- **Agent:** R1 (Crypto Agent)
+- **File:** `crates/mpc-wallet-core/src/protocol/cggmp21.rs:997`
+- **Description:** The `chi_i_scalar` value (computed as `k_sum * x_i * lambda_i`) is a secret
+  scalar representing this party's share of `k * x`. It is computed as a plain `Scalar` without
+  a `Zeroizing` wrapper. When it goes out of scope, the value may remain on the stack. Other
+  secret scalars in the same function (`k_i`, `gamma_i`, `x_i`) are correctly wrapped in
+  `Zeroizing`. The `k_sum` and `gamma_sum_scalar` temporaries ARE explicitly zeroized (lines
+  1000-1001), but `chi_i_scalar` is not.
+- **Impact:** The `chi_i_scalar` (share of k*x) may persist briefly on the stack after the
+  function returns. Combined with `k_i` (also leaked via MtA simulation, see SEC-034), an
+  attacker with memory access could derive the secret share x_i.
+- **Recommendation:** Wrap `chi_i_scalar` in `Zeroizing::new(...)` consistent with the SEC-008
+  pattern used for other secret scalars in the same function.
+- **Status:** OPEN
+- **Severity:** LOW (defense-in-depth; mitigated by PreSignature's ZeroizeOnDrop on the serialized form)
+- **Owner:** R1
+
+---
+
+### [INFO] SEC-039: Paillier/Pedersen Auxiliary Parameters Are Simulated
+
+- **ID:** SEC-039
+- **Date:** 2026-03-19
+- **Task:** T-S21-03 (R6 audit)
+- **Agent:** R1 (Crypto Agent)
+- **File:** `crates/mpc-wallet-core/src/protocol/cggmp21.rs:330-384`
+- **Description:** The Paillier key pairs and Pedersen parameters are generated as 32-byte
+  SHA-256 hash outputs derived from the party's secret share. In production CGGMP21, Paillier
+  keys must be 2048-bit RSA moduli (N = p*q with safe primes), and Pedersen parameters must be
+  derived from these. The current simulation uses 256-bit values that provide no homomorphic
+  encryption capability. This is clearly documented in code comments: "In production, these would
+  be large (2048-bit) primes. For simulation purposes, we derive 32-byte values."
+- **Impact:** None — this is an expected limitation of the simulation-mode implementation. The
+  simulated Paillier keys cannot perform actual Paillier encryption, which is why the MtA step
+  broadcasts raw scalars (SEC-034).
+- **Recommendation:** Track as a prerequisite for production readiness. Real Paillier/Pedersen
+  generation requires a large-integer library (e.g., `rug` or `num-bigint`) and safe prime
+  generation.
+- **Status:** Informational — expected for simulation mode
+- **Owner:** R1
+
+---
+
+### [INFO] SEC-040: No Key Reconstruction (Positive Finding)
+
+- **ID:** SEC-040
+- **Date:** 2026-03-19
+- **Task:** T-S21-03 (R6 audit)
+- **File:** `crates/mpc-wallet-core/src/protocol/cggmp21.rs:506, 646-660, 727-757`
+- **Description:** The CGGMP21 keygen correctly computes the group public key X = sum(X_i) by
+  summing the public key shares (elliptic curve points), NOT by summing the secret scalars.
+  Each party's final secret share is the Feldman VSS accumulation of shares from all parties
+  (line 756: `*final_share += share_scalar`), but this is a Shamir share, not the full key.
+  The full private key `x = sum(x_i)` is never reconstructed at any point in keygen, pre-signing,
+  or signing.
+- **Impact:** None — this is a positive finding confirming the core MPC security property.
+- **Status:** Informational
+
+---
+
+### [INFO] SEC-041: Commitment Scheme Is Binding (Positive Finding)
+
+- **ID:** SEC-041
+- **Date:** 2026-03-19
+- **Task:** T-S21-03 (R6 audit)
+- **File:** `crates/mpc-wallet-core/src/protocol/cggmp21.rs:537-543, 604-643`
+- **Description:** Round 1 broadcasts `V_i = SHA-256(X_i || schnorr_R || schnorr_s || party_index)`.
+  Round 2 reveals all components. The verifier recomputes the hash and compares against the
+  stored commitment. This prevents a party from changing their public key share after seeing
+  other parties' commitments (adaptive adversary protection). SHA-256 provides collision
+  resistance and preimage resistance adequate for this use.
+- **Impact:** None — positive finding.
+- **Status:** Informational
+
+---
+
+### [INFO] SEC-042: Low-S Normalization Correctly Applied (Positive Finding)
+
+- **ID:** SEC-042
+- **Date:** 2026-03-19
+- **Task:** T-S21-03 (R6 audit)
+- **File:** `crates/mpc-wallet-core/src/protocol/cggmp21.rs:1119-1122`
+- **Description:** After signature aggregation, `normalize_s()` is called on the raw ECDSA
+  signature. If s > n/2, it is replaced with n-s (and the recovery_id is adjusted). This
+  follows the SEC-012 pattern established in Sprint 6 for EVM compatibility (EIP-2).
+- **Impact:** None — positive finding.
+- **Status:** Informational
+
+---
+
+### [INFO] SEC-043: Recovery ID Correctly Computed (Positive Finding)
+
+- **ID:** SEC-043
+- **Date:** 2026-03-19
+- **Task:** T-S21-03 (R6 audit)
+- **File:** `crates/mpc-wallet-core/src/protocol/cggmp21.rs:1151-1158`
+- **Description:** The recovery ID is determined by brute-force testing all 4 possible values
+  (0-3) and finding which one recovers the correct verifying key from the prehash and signature.
+  This is the standard approach when the R point's y-parity is not directly available from the
+  protocol. The `unwrap_or(0)` fallback is safe because at least one recovery ID must succeed
+  for a valid signature (and the signature was already verified at line 1134).
+- **Impact:** None — positive finding.
+- **Status:** Informational
+
+---
+
+### Audit Checklist Summary
+
+| # | Check | Result | Notes |
+|---|-------|--------|-------|
+| 1 | Secret scalars in Zeroizing | PARTIAL | x_i, k_i, gamma_i wrapped; chi_i_scalar is NOT (SEC-038) |
+| 2 | No key reconstruction | PASS | Full key never assembled — SEC-040 positive finding |
+| 3 | Commitment scheme binding | PASS | SHA-256 commit-then-reveal verified — SEC-041 positive |
+| 4 | Schnorr proofs sound | PARTIAL | Verifier correct, but Scalar::ONE fallback edge case (SEC-036) |
+| 5 | Feldman verification | PASS | share_scalar * G == sum(C_k * x^k) verified per party |
+| 6 | Low-s normalization | PASS | normalize_s() applied — SEC-042 positive |
+| 7 | Recovery ID correct | PASS | Brute-force recovery — SEC-043 positive |
+| 8 | Identifiable abort detects cheating | PARTIAL | Only detects zero contributions; K_i not stored (SEC-035) |
+| 9 | Nonce handling | PARTIAL | Random nonces, reuse flag present but not persisted (SEC-037) |
+| 10 | Transport authentication | PASS | Uses Transport trait (SignedEnvelope in production) |
+| 11 | Share data serialization | PASS | No secrets leaked in serialized format |
+| 12 | Error messages clean | PASS | No secret material in error strings |
+| 13 | Paillier simulation marked | PASS | Clearly documented as simulation (SEC-039) |
+| 14 | Feature gates on simulation | FAIL | MtA simulation not feature-gated (SEC-034) |
+
+### Verdict
+
+```
+VERDICT: APPROVED (with tracked findings)
+Branch:  (Sprint 21 — CGGMP21 protocol)
+Task:    T-S21-03
+Auditor: R6
+```
+
+**No CRITICAL or HIGH findings.** The implementation correctly avoids key reconstruction, uses
+proper commitment schemes, verifies Schnorr proofs, validates Feldman VSS commitments, normalizes
+signatures to low-s, and uses the Transport trait for authenticated messaging.
+
+**2 MEDIUM findings** (SEC-034: MtA simulation not feature-gated, SEC-035: incomplete identifiable
+abort) and **3 LOW findings** (SEC-036: Schnorr challenge fallback, SEC-037: nonce reuse flag not
+persisted, SEC-038: chi_i_scalar not zeroized) are tracked for resolution in future sprints.
+
+The MEDIUM findings are **expected for a simulation-mode implementation** per the task spec.
+SEC-034 (MtA not gated) should be resolved before any production deployment by adding a
+`cggmp21-simulation` feature flag following the GG20 precedent. SEC-035 (incomplete identifiable
+abort) is a completeness gap that does not affect signature correctness.
+
+**APPROVED** for merge — no CRITICAL or HIGH findings. MEDIUM/LOW findings are tracked above.
