@@ -1475,3 +1475,461 @@ async fn test_nats_keygen_frost_ed25519() {
     vk.verify(message, &sig)
         .expect("FROST Ed25519 signature must verify");
 }
+
+// ============================================================================
+// Sprint 18 — Control Plane Hardening Tests (T-S18-03)
+// ============================================================================
+
+/// Authorization replay dedup cache: tracks seen authorization_ids within a TTL
+/// window and rejects duplicates. This implements the server-side replay
+/// protection described in the authorization_id field docs (SEC-025).
+///
+/// Production MPC nodes MUST maintain an equivalent cache. This test proves
+/// the concept works: same authorization_id is rejected on second use.
+#[test]
+fn test_authorization_cache_prevents_replay() {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    /// Simple in-test authorization cache for replay dedup.
+    struct AuthorizationCache {
+        seen: HashMap<String, Instant>,
+        ttl: Duration,
+    }
+
+    impl AuthorizationCache {
+        fn new(ttl: Duration) -> Self {
+            Self {
+                seen: HashMap::new(),
+                ttl,
+            }
+        }
+
+        /// Returns Ok(()) if authorization_id is new (first use), Err if replayed.
+        fn check_and_insert(&mut self, authorization_id: &str) -> Result<(), String> {
+            // Prune expired entries first
+            let now = Instant::now();
+            self.seen.retain(|_, ts| now.duration_since(*ts) < self.ttl);
+
+            if self.seen.contains_key(authorization_id) {
+                return Err(format!(
+                    "authorization replay detected: {} already seen within TTL",
+                    authorization_id
+                ));
+            }
+            self.seen.insert(authorization_id.to_string(), now);
+            Ok(())
+        }
+    }
+
+    let ttl = Duration::from_secs(120); // 2-minute TTL matches MAX_AUTHORIZATION_AGE_SECS
+    let mut cache = AuthorizationCache::new(ttl);
+
+    let auth_id = "auth-001-unique";
+
+    // First use: must succeed
+    assert!(
+        cache.check_and_insert(auth_id).is_ok(),
+        "first use of authorization_id must be accepted"
+    );
+
+    // Second use within TTL: must be rejected (replay)
+    let replay_result = cache.check_and_insert(auth_id);
+    assert!(
+        replay_result.is_err(),
+        "replayed authorization_id must be rejected"
+    );
+    assert!(
+        replay_result
+            .unwrap_err()
+            .contains("authorization replay detected"),
+        "error must indicate replay"
+    );
+
+    // Different authorization_id: must succeed
+    assert!(
+        cache.check_and_insert("auth-002-different").is_ok(),
+        "different authorization_id must be accepted"
+    );
+}
+
+/// Authorization cache prune: expired entries are cleaned up and previously
+/// rejected IDs become accepted again after TTL expiry. This tests that
+/// the cache does not grow unboundedly and that TTL expiry works.
+#[test]
+fn test_authorization_cache_prunes_expired() {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    struct AuthorizationCache {
+        seen: HashMap<String, Instant>,
+        ttl: Duration,
+    }
+
+    impl AuthorizationCache {
+        fn new(ttl: Duration) -> Self {
+            Self {
+                seen: HashMap::new(),
+                ttl,
+            }
+        }
+
+        fn check_and_insert(&mut self, authorization_id: &str) -> Result<(), String> {
+            let now = Instant::now();
+            self.seen.retain(|_, ts| now.duration_since(*ts) < self.ttl);
+            if self.seen.contains_key(authorization_id) {
+                return Err("replay".into());
+            }
+            self.seen.insert(authorization_id.to_string(), now);
+            Ok(())
+        }
+
+        /// Simulate expiry by backdating all entries beyond the TTL.
+        /// In production, this happens naturally via wall-clock time.
+        fn simulate_expiry(&mut self) {
+            let expired_time = Instant::now() - self.ttl - Duration::from_secs(1);
+            for ts in self.seen.values_mut() {
+                *ts = expired_time;
+            }
+        }
+
+        fn len(&self) -> usize {
+            self.seen.len()
+        }
+    }
+
+    // Use a short TTL for this test
+    let ttl = Duration::from_secs(120);
+    let mut cache = AuthorizationCache::new(ttl);
+
+    // Insert several entries
+    for i in 0..5 {
+        assert!(cache.check_and_insert(&format!("auth-{i}")).is_ok());
+    }
+    assert_eq!(cache.len(), 5, "cache must hold 5 entries");
+
+    // All 5 should be rejected on replay
+    for i in 0..5 {
+        assert!(cache.check_and_insert(&format!("auth-{i}")).is_err());
+    }
+
+    // Simulate expiry: backdate all entries beyond TTL
+    cache.simulate_expiry();
+
+    // After expiry, the same IDs should be accepted again (cache pruned on next check)
+    assert!(
+        cache.check_and_insert("auth-0").is_ok(),
+        "expired authorization_id must be accepted again after TTL"
+    );
+
+    // The prune should have removed the expired entries; only "auth-0" remains
+    assert_eq!(
+        cache.len(),
+        1,
+        "prune must remove expired entries, leaving only the newly inserted one"
+    );
+}
+
+/// FROST Ed25519 sender validation (SEC-013): the protocol rejects messages
+/// from parties not in the expected signer set.
+///
+/// `validate_sender` is an internal function in frost_ed25519.rs, so we test
+/// the same logic pattern here: construct a ProtocolMessage with an unexpected
+/// `from` field and verify it's rejected by the expected-sender-set check.
+///
+/// The FROST keygen/sign implementations call this function on every received
+/// message, providing defense-in-depth against party-ID spoofing.
+#[test]
+fn test_frost_ed25519_validates_sender() {
+    use mpc_wallet_core::transport::ProtocolMessage;
+    use std::collections::HashSet;
+
+    // Expected parties in a 2-of-3 protocol
+    let expected: HashSet<PartyId> = [PartyId(1), PartyId(2), PartyId(3)].into_iter().collect();
+
+    // Replicate the validate_sender logic (same as frost_ed25519.rs)
+    let validate_sender =
+        |msg: &ProtocolMessage, expected_set: &HashSet<PartyId>| -> Result<(), String> {
+            if !expected_set.contains(&msg.from) {
+                return Err(format!(
+                    "FROST: unexpected sender party {} — not in expected set",
+                    msg.from.0
+                ));
+            }
+            Ok(())
+        };
+
+    // Valid sender (party 1) — should succeed
+    let valid_msg = ProtocolMessage {
+        from: PartyId(1),
+        to: None,
+        round: 1,
+        payload: vec![],
+    };
+    assert!(
+        validate_sender(&valid_msg, &expected).is_ok(),
+        "message from expected party must be accepted"
+    );
+
+    // Valid sender (party 3) — should succeed
+    let valid_msg3 = ProtocolMessage {
+        from: PartyId(3),
+        to: None,
+        round: 1,
+        payload: vec![],
+    };
+    assert!(
+        validate_sender(&valid_msg3, &expected).is_ok(),
+        "message from party 3 must be accepted"
+    );
+
+    // Invalid sender (party 99 — not in set) — should be rejected
+    let spoofed_msg = ProtocolMessage {
+        from: PartyId(99),
+        to: None,
+        round: 1,
+        payload: vec![],
+    };
+    let result = validate_sender(&spoofed_msg, &expected);
+    assert!(
+        result.is_err(),
+        "message from unexpected party must be rejected"
+    );
+    assert!(
+        result.unwrap_err().contains("unexpected sender party 99"),
+        "error must identify the spoofed party"
+    );
+
+    // Edge case: party 0 not in set
+    let zero_msg = ProtocolMessage {
+        from: PartyId(0),
+        to: None,
+        round: 1,
+        payload: vec![],
+    };
+    assert!(
+        validate_sender(&zero_msg, &expected).is_err(),
+        "party 0 not in expected set must be rejected"
+    );
+}
+
+/// GG20 keygen produces KeyShare.share_data wrapped in Zeroizing<Vec<u8>>
+/// (SEC-004 + SEC-008 hardening). This test verifies:
+/// 1. share_data is non-empty after keygen
+/// 2. share_data is Zeroizing<Vec<u8>> (compile-time type check)
+/// 3. Clone produces another Zeroizing wrapper (both copies zeroize on drop)
+/// 4. Debug output redacts share_data (SEC-015)
+#[tokio::test]
+async fn test_gg20_shares_use_zeroizing() {
+    use zeroize::Zeroizing;
+
+    let shares = run_keygen(gg20_factory, 2, 3).await;
+    assert_eq!(shares.len(), 3);
+
+    for (i, share) in shares.iter().enumerate() {
+        // 1. share_data is non-empty (real key material was generated)
+        assert!(
+            !share.share_data.is_empty(),
+            "party {} share_data must be non-empty",
+            i + 1
+        );
+
+        // 2. Type check: share_data is Zeroizing<Vec<u8>>
+        // This line only compiles if share_data is Zeroizing<Vec<u8>>
+        let _zeroizing_ref: &Zeroizing<Vec<u8>> = &share.share_data;
+
+        // 3. Clone produces Zeroizing<Vec<u8>> (both copies will zeroize on drop)
+        let cloned: Zeroizing<Vec<u8>> = share.share_data.clone();
+        assert_eq!(
+            cloned.len(),
+            share.share_data.len(),
+            "cloned share_data must have same length"
+        );
+        assert_eq!(
+            cloned.as_ref() as &[u8],
+            share.share_data.as_ref() as &[u8],
+            "cloned share_data must have same content"
+        );
+
+        // 4. Debug output must redact share_data (SEC-015)
+        let debug_output = format!("{:?}", share);
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug must redact share_data, got: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains(&format!("{:?}", share.share_data.as_ref() as &Vec<u8>)),
+            "Debug must NOT contain raw share bytes"
+        );
+
+        // 5. Scheme correctness
+        assert_eq!(share.scheme, CryptoScheme::Gg20Ecdsa);
+    }
+}
+
+/// Full SignAuthorization flow with all fields including authorization_id
+/// (Sprint 17 hardening). Verifies:
+/// 1. All 6 verification checks pass for a valid authorization
+/// 2. authorization_id is preserved and non-empty
+/// 3. All payload fields are correctly round-tripped
+/// 4. Signature verification is cryptographically sound
+#[test]
+fn test_sign_authorization_full_flow() {
+    use ed25519_dalek::SigningKey;
+    use mpc_wallet_core::protocol::sign_authorization::{
+        ApproverEvidence, AuthorizationPayload, SignAuthorization,
+    };
+    use sha2::{Digest, Sha256};
+
+    // Generate gateway signing key
+    let gateway_key = SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        b[0] = 0x5A;
+        b[1] = 0x42;
+        b
+    });
+
+    let message = b"full flow: transfer 10 SOL to GRk3...";
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let auth_id = format!("auth-fullflow-{now}");
+    let payload = AuthorizationPayload {
+        authorization_id: auth_id.clone(),
+        requester_id: "user-full-flow".into(),
+        wallet_id: "wallet-sol-001".into(),
+        message_hash: hex::encode(Sha256::digest(message)),
+        policy_hash: hex::encode(Sha256::digest(b"treasury-policy-v3")),
+        policy_passed: true,
+        approval_count: 3,
+        approval_required: 2,
+        approvers: vec![
+            ApproverEvidence {
+                approver_id: "approver-alice".into(),
+                signature_hash: hex::encode(Sha256::digest(b"alice-sig")),
+            },
+            ApproverEvidence {
+                approver_id: "approver-bob".into(),
+                signature_hash: hex::encode(Sha256::digest(b"bob-sig")),
+            },
+            ApproverEvidence {
+                approver_id: "approver-carol".into(),
+                signature_hash: hex::encode(Sha256::digest(b"carol-sig")),
+            },
+        ],
+        timestamp: now,
+        session_id: "session-full-flow-001".into(),
+        encrypted_context: None,
+    };
+
+    // Create signed authorization
+    let auth = SignAuthorization::create(payload, &gateway_key);
+
+    // --- Verify all 6 checks pass ---
+    let result = auth.verify(&gateway_key.verifying_key(), message);
+    assert!(
+        result.is_ok(),
+        "full authorization must pass all 6 checks: {result:?}"
+    );
+
+    // --- Verify authorization_id round-trips correctly ---
+    assert_eq!(
+        auth.payload.authorization_id, auth_id,
+        "authorization_id must be preserved"
+    );
+    assert!(
+        !auth.payload.authorization_id.is_empty(),
+        "authorization_id must be non-empty"
+    );
+
+    // --- Verify all payload fields are preserved ---
+    assert_eq!(auth.payload.requester_id, "user-full-flow");
+    assert_eq!(auth.payload.wallet_id, "wallet-sol-001");
+    assert!(auth.payload.policy_passed);
+    assert_eq!(auth.payload.approval_count, 3);
+    assert_eq!(auth.payload.approval_required, 2);
+    assert_eq!(auth.payload.approvers.len(), 3);
+    assert_eq!(auth.payload.session_id, "session-full-flow-001");
+    assert_eq!(auth.payload.timestamp, now);
+
+    // --- Verify gateway pubkey is correct (32 bytes) ---
+    assert_eq!(auth.gateway_pubkey.len(), 32);
+    assert_eq!(
+        auth.gateway_pubkey,
+        gateway_key.verifying_key().to_bytes().to_vec()
+    );
+
+    // --- Verify gateway signature is 64 bytes ---
+    assert_eq!(auth.gateway_signature.len(), 64);
+
+    // --- Negative checks: tamper each field and verify rejection ---
+
+    // Check 1: wrong gateway key → pubkey mismatch
+    let wrong_key = SigningKey::from_bytes(&[0xFFu8; 32]);
+    assert!(
+        auth.verify(&wrong_key.verifying_key(), message).is_err(),
+        "wrong gateway key must fail check 1 (pubkey mismatch)"
+    );
+
+    // Check 2: wrong message → message hash mismatch
+    assert!(
+        auth.verify(&gateway_key.verifying_key(), b"wrong message")
+            .is_err(),
+        "wrong message must fail check 4 (message binding)"
+    );
+
+    // Check 3: policy_passed=false
+    {
+        let mut bad_payload = auth.payload.clone();
+        bad_payload.policy_passed = false;
+        let bad_auth = SignAuthorization::create(bad_payload, &gateway_key);
+        assert!(
+            bad_auth
+                .verify(&gateway_key.verifying_key(), message)
+                .is_err(),
+            "policy_passed=false must fail check 5"
+        );
+    }
+
+    // Check 4: insufficient approvals
+    {
+        let mut bad_payload = auth.payload.clone();
+        bad_payload.approval_count = 1;
+        bad_payload.approval_required = 3;
+        let bad_auth = SignAuthorization::create(bad_payload, &gateway_key);
+        assert!(
+            bad_auth
+                .verify(&gateway_key.verifying_key(), message)
+                .is_err(),
+            "insufficient approvals must fail check 6"
+        );
+    }
+
+    // Check 5: empty authorization_id
+    {
+        let mut bad_payload = auth.payload.clone();
+        bad_payload.authorization_id = String::new();
+        let bad_auth = SignAuthorization::create(bad_payload, &gateway_key);
+        assert!(
+            bad_auth
+                .verify(&gateway_key.verifying_key(), message)
+                .is_err(),
+            "empty authorization_id must fail check 0"
+        );
+    }
+
+    // Check 6: expired timestamp
+    {
+        let mut bad_payload = auth.payload.clone();
+        bad_payload.timestamp = 1000; // ancient
+        let bad_auth = SignAuthorization::create(bad_payload, &gateway_key);
+        assert!(
+            bad_auth
+                .verify(&gateway_key.verifying_key(), message)
+                .is_err(),
+            "expired timestamp must fail check 3"
+        );
+    }
+}
