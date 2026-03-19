@@ -251,15 +251,13 @@ impl NatsTransport {
     /// and the second flush confirms the round-trip. This replaces fixed `sleep(2s)`
     /// delays in tests (L-011 fix).
     pub async fn wait_ready(&self) -> Result<(), CoreError> {
-        self.client
-            .flush()
-            .await
-            .map_err(|e| CoreError::Transport(format!("NATS flush failed: {e}")))?;
+        let map_err = |e| CoreError::Transport(format!("NATS flush failed: {e}"));
+        // First flush: drain outbound buffer so SUB command reaches server.
+        self.client.flush().await.map_err(map_err)?;
+        // Yield to let the NATS server process the SUB and any pending messages.
         tokio::task::yield_now().await;
-        self.client
-            .flush()
-            .await
-            .map_err(|e| CoreError::Transport(format!("NATS flush failed: {e}")))?;
+        // Second flush: confirm server has processed our subscription (round-trip).
+        self.client.flush().await.map_err(map_err)?;
         Ok(())
     }
 

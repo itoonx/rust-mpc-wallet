@@ -25,9 +25,7 @@ use mpc_wallet_core::rpc;
 use mpc_wallet_core::transport::nats::NatsTransport;
 use mpc_wallet_core::types::{CryptoScheme, PartyId, ThresholdConfig};
 
-fn nats_url() -> String {
-    std::env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:4222".into())
-}
+use super::nats_url;
 
 /// Simulate a single MPC node: subscribe to control channel, run keygen, save share.
 async fn run_node_keygen(
@@ -68,10 +66,8 @@ async fn run_node_keygen(
         }
     }
 
-    // Wait for all parties to subscribe before starting keygen.
-    // Without this, fast parties broadcast round 1 before slow parties subscribe,
-    // causing message loss on CI runners.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Synchronization barrier: confirm subscription is active on NATS server.
+    transport.wait_ready().await.unwrap();
 
     // Run keygen
     let protocol = Gg20Protocol::new();
@@ -168,8 +164,8 @@ async fn run_node_sign(
     let message = hex::decode(&req.message_hex).unwrap();
     let signers: Vec<PartyId> = req.signer_ids.iter().map(|&id| PartyId(id)).collect();
 
-    // Wait for all signing parties to subscribe before starting.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Synchronization barrier: confirm subscription is active.
+    transport.wait_ready().await.unwrap();
 
     let protocol = Gg20Protocol::new();
     let sig = protocol
