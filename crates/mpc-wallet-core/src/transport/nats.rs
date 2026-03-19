@@ -244,29 +244,66 @@ impl NatsTransport {
 #[async_trait]
 impl Transport for NatsTransport {
     async fn send(&self, msg: ProtocolMessage) -> Result<(), CoreError> {
-        let target = msg
-            .to
-            .ok_or_else(|| CoreError::Transport("NATS: broadcast not supported".into()))?;
+        match msg.to {
+            Some(target) => {
+                // Unicast to a specific party
+                let seq_no = self.next_seq_no();
 
-        let seq_no = self.next_seq_no();
+                let envelope = SignedEnvelope::sign(
+                    msg,
+                    self.party_id,
+                    seq_no,
+                    DEFAULT_TTL_SECS,
+                    &self.signing_key,
+                );
 
-        // SEC-007: wrap in signed envelope before publishing
-        let envelope = SignedEnvelope::sign(
-            msg,
-            self.party_id,
-            seq_no,
-            DEFAULT_TTL_SECS,
-            &self.signing_key,
-        );
+                let subject = Self::party_subject(&self.session_id, target);
+                let payload = serde_json::to_vec(&envelope)
+                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
-        let subject = Self::party_subject(&self.session_id, target);
-        let payload =
-            serde_json::to_vec(&envelope).map_err(|e| CoreError::Serialization(e.to_string()))?;
+                self.client
+                    .publish(subject, payload.into())
+                    .await
+                    .map_err(|e| CoreError::Transport(format!("NATS publish failed: {e}")))?;
+            }
+            None => {
+                // Broadcast to all registered peers (FROST DKG rounds use this)
+                if self.peer_keys.is_empty() {
+                    return Err(CoreError::Transport(
+                        "NATS broadcast: no peers registered — call register_peer_key first".into(),
+                    ));
+                }
 
-        self.client
-            .publish(subject, payload.into())
-            .await
-            .map_err(|e| CoreError::Transport(format!("NATS publish failed: {e}")))?;
+                for &peer_id in self.peer_keys.keys() {
+                    let seq_no = self.next_seq_no();
+
+                    // Clone the message for each peer, setting the target
+                    let peer_msg = ProtocolMessage {
+                        from: msg.from,
+                        to: Some(peer_id),
+                        round: msg.round,
+                        payload: msg.payload.clone(),
+                    };
+
+                    let envelope = SignedEnvelope::sign(
+                        peer_msg,
+                        self.party_id,
+                        seq_no,
+                        DEFAULT_TTL_SECS,
+                        &self.signing_key,
+                    );
+
+                    let subject = Self::party_subject(&self.session_id, peer_id);
+                    let payload = serde_json::to_vec(&envelope)
+                        .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+                    self.client
+                        .publish(subject, payload.into())
+                        .await
+                        .map_err(|e| CoreError::Transport(format!("NATS publish failed: {e}")))?;
+                }
+            }
+        }
 
         Ok(())
     }

@@ -963,3 +963,168 @@ fn _assert_zeroize_on_drop_for_share_structs() {
     // Compile-time: Zeroizing<Vec<u8>> is ZeroizeOnDrop.
     _assert_zeroize::<zeroize::Zeroizing<Vec<u8>>>();
 }
+
+// ============================================================================
+// FROST Ed25519 keygen over NATS transport (E2E)
+// ============================================================================
+
+/// FROST Ed25519 2-of-3 keygen + sign over live NATS transport.
+///
+/// This test proves that FROST DKG works end-to-end over NATS, including:
+/// - Round 1: broadcast (to: None) of commitment packages
+/// - Round 2: unicast (to: Some(target)) of per-party secret packages
+/// - Round 3: local computation (no network)
+/// - Sign rounds: broadcast commitments + broadcast signature shares
+///
+/// Requires a live NATS server at NATS_URL (default: nats://localhost:4222).
+#[tokio::test]
+#[ignore = "requires live NATS server: NATS_URL=nats://localhost:4222"]
+async fn test_nats_keygen_frost_ed25519() {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    use mpc_wallet_core::protocol::frost_ed25519::FrostEd25519Protocol;
+    use mpc_wallet_core::transport::nats::NatsTransport;
+    use rand::rngs::OsRng;
+    use rand::RngCore;
+
+    let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let config = ThresholdConfig::new(2, 3).unwrap();
+
+    // Generate Ed25519 signing keys for SEC-007 envelope authentication
+    let mut keys = Vec::new();
+    for _ in 0..3 {
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        keys.push(ed25519_dalek::SigningKey::from_bytes(&bytes));
+    }
+
+    // Collect verifying keys for peer registration
+    let vks: Vec<ed25519_dalek::VerifyingKey> = keys.iter().map(|k| k.verifying_key()).collect();
+
+    // Create transports and register peer keys
+    let mut transports = Vec::new();
+    for (i, key) in keys.iter().enumerate() {
+        let party_id = PartyId((i + 1) as u16);
+        let mut t = NatsTransport::connect_signed(
+            &nats_url,
+            party_id,
+            session_id.clone(),
+            key.clone(),
+        )
+        .await
+        .expect("NATS connect failed");
+
+        // Register all other peers
+        for (j, vk) in vks.iter().enumerate() {
+            if j != i {
+                t.register_peer_key(PartyId((j + 1) as u16), *vk);
+            }
+        }
+        transports.push(t);
+    }
+
+    // Small delay to let subscriptions propagate
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Run FROST DKG keygen concurrently on all 3 parties
+    let mut handles = Vec::new();
+
+    // We need to move transports into the tasks
+    let transports: Vec<std::sync::Arc<NatsTransport>> =
+        transports.into_iter().map(std::sync::Arc::new).collect();
+
+    for (i, transport) in transports.iter().enumerate() {
+        let party_id = PartyId((i + 1) as u16);
+        let transport = transport.clone();
+        let cfg = config;
+        handles.push(tokio::spawn(async move {
+            let protocol = FrostEd25519Protocol::new();
+            protocol.keygen(cfg, party_id, &*transport).await
+        }));
+    }
+
+    let mut shares = Vec::new();
+    for h in handles {
+        let share = h.await.unwrap().expect("FROST keygen over NATS failed");
+        shares.push(share);
+    }
+
+    // Verify all parties got the same group public key
+    assert_eq!(shares.len(), 3);
+    let gpk = &shares[0].group_public_key;
+    for share in &shares[1..] {
+        assert_eq!(
+            share.group_public_key.as_bytes(),
+            gpk.as_bytes(),
+            "all parties must agree on group public key"
+        );
+    }
+
+    // Verify scheme is correct
+    for share in &shares {
+        assert_eq!(share.scheme, CryptoScheme::FrostEd25519);
+    }
+
+    // Now test signing over NATS with a 2-of-3 subset (parties 1 and 2)
+    let sign_session_id = uuid::Uuid::new_v4().to_string();
+    let signers = vec![PartyId(1), PartyId(2)];
+    let message = b"frost ed25519 nats e2e test";
+
+    // Create fresh transports for signing (new session)
+    let mut sign_transports = Vec::new();
+    for (i, (signer, key)) in signers.iter().zip(keys.iter()).enumerate() {
+        let mut t = NatsTransport::connect_signed(
+            &nats_url,
+            *signer,
+            sign_session_id.clone(),
+            key.clone(),
+        )
+        .await
+        .expect("NATS connect for sign failed");
+
+        // Register peer (only the other signer)
+        let other = 1 - i;
+        t.register_peer_key(signers[other], vks[other]);
+        sign_transports.push(t);
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let sign_transports: Vec<std::sync::Arc<NatsTransport>> =
+        sign_transports.into_iter().map(std::sync::Arc::new).collect();
+
+    let mut sign_handles = Vec::new();
+    for (share, transport) in shares.iter().take(2).zip(sign_transports.iter()) {
+        let share = share.clone();
+        let transport = transport.clone();
+        let signer_list = signers.clone();
+        let msg = message.to_vec();
+        sign_handles.push(tokio::spawn(async move {
+            let protocol = FrostEd25519Protocol::new();
+            protocol.sign(&share, &signer_list, &msg, &*transport).await
+        }));
+    }
+
+    let mut sigs = Vec::new();
+    for h in sign_handles {
+        let sig = h.await.unwrap().expect("FROST sign over NATS failed");
+        sigs.push(sig);
+    }
+
+    // All signers should produce identical EdDSA signatures
+    let MpcSignature::EdDsa { signature: sig0 } = &sigs[0] else {
+        panic!("expected EdDSA signature");
+    };
+    for sig in &sigs[1..] {
+        let MpcSignature::EdDsa { signature } = sig else {
+            panic!("expected EdDSA signature");
+        };
+        assert_eq!(sig0, signature, "all signers must produce same signature");
+    }
+
+    // Cryptographically verify the signature
+    let vk = VerifyingKey::from_bytes(gpk.as_bytes().try_into().unwrap()).unwrap();
+    let sig = Signature::from_bytes(sig0);
+    vk.verify(message, &sig)
+        .expect("FROST Ed25519 signature must verify");
+}
