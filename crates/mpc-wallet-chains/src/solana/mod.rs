@@ -34,12 +34,25 @@ impl Default for SolanaSimulationConfig {
 }
 
 pub struct SolanaProvider {
+    group_pubkey: Option<GroupPublicKey>,
     simulation_config: Option<SolanaSimulationConfig>,
 }
 
 impl SolanaProvider {
     pub fn new() -> Self {
         Self {
+            group_pubkey: None,
+            simulation_config: None,
+        }
+    }
+
+    /// Create a provider pre-loaded with the group's Ed25519 public key.
+    ///
+    /// When a public key is set, `build_transaction` validates that the `from`
+    /// address in `extra` matches the signing public key (SEC-017).
+    pub fn with_pubkey(group_pubkey: GroupPublicKey) -> Self {
+        Self {
+            group_pubkey: Some(group_pubkey),
             simulation_config: None,
         }
     }
@@ -71,6 +84,24 @@ impl ChainProvider for SolanaProvider {
         &self,
         params: TransactionParams,
     ) -> Result<UnsignedTransaction, CoreError> {
+        // SEC-017: If a group pubkey is set, validate that the `from` address
+        // (fee payer) matches the signing public key.
+        if let Some(ref gpk) = self.group_pubkey {
+            if let Some(from_str) = params
+                .extra
+                .as_ref()
+                .and_then(|e| e.get("from"))
+                .and_then(|v| v.as_str())
+            {
+                let expected_address = address::derive_solana_address(gpk)?;
+                if from_str != expected_address {
+                    return Err(CoreError::InvalidInput(format!(
+                        "from address '{}' does not match signing public key (expected '{}')",
+                        from_str, expected_address
+                    )));
+                }
+            }
+        }
         tx::build_solana_transaction(params).await
     }
 

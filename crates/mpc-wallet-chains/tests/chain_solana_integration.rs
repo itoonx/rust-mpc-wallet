@@ -297,6 +297,94 @@ async fn test_solana_same_from_to_address() {
 }
 
 // ============================================================================
+// SEC-017: Solana from-address validation against signing public key
+// ============================================================================
+
+/// SEC-017: When a group pubkey is set, build_transaction must reject a `from`
+/// address that does not match the signing public key.
+#[tokio::test]
+async fn test_solana_sec017_rejects_mismatched_from_address() {
+    // Use a known pubkey: all-ones (32 bytes)
+    let pubkey_bytes = vec![1u8; 32];
+    let gpk = GroupPublicKey::Ed25519(pubkey_bytes.clone());
+    let provider = mpc_wallet_chains::solana::SolanaProvider::with_pubkey(gpk.clone());
+
+    // Derive the correct address for this pubkey
+    let correct_address = provider.derive_address(&gpk).unwrap();
+
+    // Use a DIFFERENT from address (all-twos pubkey encoded as base58)
+    let wrong_from = bs58::encode(&[2u8; 32]).into_string();
+    assert_ne!(correct_address, wrong_from);
+
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(),
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({"from": wrong_from})),
+    };
+
+    let result = provider.build_transaction(params).await;
+    assert!(
+        result.is_err(),
+        "build_transaction must reject from address that doesn't match signing pubkey"
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("does not match signing public key"),
+        "error must mention mismatch: {err_msg}"
+    );
+}
+
+/// SEC-017: When the from address matches the signing pubkey, build_transaction
+/// must succeed.
+#[tokio::test]
+async fn test_solana_sec017_accepts_matching_from_address() {
+    let pubkey_bytes = vec![1u8; 32];
+    let gpk = GroupPublicKey::Ed25519(pubkey_bytes.clone());
+    let provider = mpc_wallet_chains::solana::SolanaProvider::with_pubkey(gpk.clone());
+
+    let correct_address = provider.derive_address(&gpk).unwrap();
+
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(),
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({"from": correct_address})),
+    };
+
+    let result = provider.build_transaction(params).await;
+    assert!(
+        result.is_ok(),
+        "build_transaction must succeed when from matches signing pubkey: {:?}",
+        result
+    );
+}
+
+/// SEC-017: When no group pubkey is set (SolanaProvider::new()), the from
+/// address is NOT validated — backward compatibility.
+#[tokio::test]
+async fn test_solana_sec017_no_pubkey_skips_validation() {
+    let provider = mpc_wallet_chains::solana::SolanaProvider::new();
+
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(),
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({"from": "11111111111111111111111111111111"})),
+    };
+
+    let result = provider.build_transaction(params).await;
+    assert!(
+        result.is_ok(),
+        "without pubkey set, any from address must be accepted: {:?}",
+        result
+    );
+}
+
+// ============================================================================
 // Solana simulation / risk analysis tests
 // ============================================================================
 
