@@ -9,7 +9,9 @@ use axum::{
     Extension, Json,
 };
 
+use mpc_wallet_core::protocol::sign_authorization::{AuthorizationPayload, SignAuthorization};
 use mpc_wallet_core::rbac::{ApiRole, AuthContext, Permissions};
+use sha2::{Digest, Sha256};
 
 use crate::models::request::{CreateWalletRequest, SignRequest};
 use crate::models::response::{
@@ -151,7 +153,7 @@ pub async fn sign_message(
     Permissions::check_risk_tier_for_signing(&ctx)
         .map_err(|e| (StatusCode::FORBIDDEN, Json(ApiResponse::err(e.to_string()))))?;
 
-    let _message_bytes = hex::decode(&req.message).map_err(|e| {
+    let message_bytes = hex::decode(&req.message).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::err(format!("invalid hex message: {e}"))),
@@ -159,6 +161,49 @@ pub async fn sign_message(
     })?;
 
     state.metrics.sign_total.inc();
+
+    // Build SignAuthorization proof for MPC nodes to independently verify.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let message_hash = hex::encode(Sha256::digest(&message_bytes));
+    let policy_hash = hex::encode(Sha256::digest(b""));
+
+    let payload = AuthorizationPayload {
+        requester_id: ctx.user_id.clone(),
+        wallet_id: wallet_id.clone(),
+        message_hash,
+        policy_hash,
+        policy_passed: true, // TODO: wire real policy engine check
+        approval_count: 0,   // TODO: wire approval workflow
+        approval_required: 0,
+        approvers: vec![],
+        timestamp: now,
+        session_id: uuid::Uuid::new_v4().to_string(),
+        encrypted_context: None,
+    };
+
+    let sign_auth = SignAuthorization::create(payload, &state.server_signing_key);
+    let sign_auth_json = serde_json::to_string(&sign_auth).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::err(format!(
+                "failed to serialize sign authorization: {e}"
+            ))),
+        )
+    })?;
+
+    tracing::info!(
+        wallet_id = %wallet_id,
+        requester = %ctx.user_id,
+        "sign authorization created for MPC nodes"
+    );
+
+    // TODO: Send sign_auth_json to MPC nodes via orchestrator (NATS).
+    // For now, return NOT_FOUND since key store integration is not yet wired.
+    let _ = sign_auth_json; // suppress unused warning until orchestrator is wired
 
     Err((
         StatusCode::NOT_FOUND,
