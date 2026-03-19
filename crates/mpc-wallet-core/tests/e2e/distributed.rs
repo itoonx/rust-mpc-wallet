@@ -68,6 +68,11 @@ async fn run_node_keygen(
         }
     }
 
+    // Wait for all parties to subscribe before starting keygen.
+    // Without this, fast parties broadcast round 1 before slow parties subscribe,
+    // causing message loss on CI runners.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
     // Run keygen
     let protocol = Gg20Protocol::new();
     let share = protocol
@@ -162,6 +167,9 @@ async fn run_node_sign(
 
     let message = hex::decode(&req.message_hex).unwrap();
     let signers: Vec<PartyId> = req.signer_ids.iter().map(|&id| PartyId(id)).collect();
+
+    // Wait for all signing parties to subscribe before starting.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let protocol = Gg20Protocol::new();
     let sig = protocol

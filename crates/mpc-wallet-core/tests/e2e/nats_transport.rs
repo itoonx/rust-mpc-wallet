@@ -197,6 +197,9 @@ async fn test_nats_sign_gg20_direct() {
     let m1 = message.to_vec();
     let m2 = message.to_vec();
 
+    // Wait for both NATS subscriptions to be fully active on the server.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
     let h1 = tokio::spawn(async move {
         let protocol = Gg20Protocol::new();
         protocol.sign(&share1, &s1, &m1, &t1).await

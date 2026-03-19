@@ -102,16 +102,25 @@ pub async fn nats_keygen(
     let config = ThresholdConfig::new(threshold, total).unwrap();
     let party_keys = PartyKeys::generate(total);
 
-    let mut handles = Vec::new();
+    // Phase 1: Connect all parties first (establishes NATS subscriptions).
+    let mut transports = Vec::new();
     for i in 0..total as usize {
-        let pkeys = party_keys.clone();
-        let sid = session_id.clone();
-        let nats = url.to_string();
+        let transport = party_keys.connect(i, &session_id, url).await;
+        transports.push(transport);
+    }
+
+    // Wait for all subscriptions to be fully active on the NATS server.
+    // Without this, fast parties may broadcast before slow parties subscribe,
+    // causing message loss on CI runners (slower than local dev machines).
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Phase 2: Now start keygen concurrently — all subscriptions are ready.
+    let mut handles = Vec::new();
+    for (i, transport) in transports.into_iter().enumerate() {
         let protocol = protocol_factory();
         let party_id = PartyId(i as u16 + 1);
 
         handles.push(tokio::spawn(async move {
-            let transport = pkeys.connect(i, &sid, &nats).await;
             protocol.keygen(config, party_id, &transport).await
         }));
     }
@@ -144,22 +153,28 @@ pub async fn nats_sign(
         .map(|&i| shares[i].party_id.0 as usize - 1)
         .collect();
 
-    let mut handles = Vec::new();
+    // Phase 1: Connect all signing parties first.
+    let mut transports = Vec::new();
     for &idx in signer_indices {
+        let party_index = shares[idx].party_id.0 as usize - 1;
+        let transport = party_keys
+            .connect_with_peers(party_index, &signer_party_indices, &session_id, url)
+            .await;
+        transports.push((idx, transport));
+    }
+
+    // Wait for all subscriptions to be active (CI timing fix).
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Phase 2: Start signing concurrently.
+    let mut handles = Vec::new();
+    for (idx, transport) in transports.into_iter() {
         let share = shares[idx].clone();
-        let pkeys = party_keys.clone();
-        let sid = session_id.clone();
-        let nats = url.to_string();
         let protocol = protocol_factory();
         let signers_clone = signers.clone();
         let msg = message.to_vec();
-        let party_index = share.party_id.0 as usize - 1;
-        let peer_indices = signer_party_indices.clone();
 
         handles.push(tokio::spawn(async move {
-            let transport = pkeys
-                .connect_with_peers(party_index, &peer_indices, &sid, &nats)
-                .await;
             protocol
                 .sign(&share, &signers_clone, &msg, &transport)
                 .await
