@@ -7,6 +7,10 @@
 //! 4. Sign produces a cryptographically valid signature
 //! 5. All communication happens via NATS (no shared memory)
 //!
+//! Uses NATS request-reply pattern: orchestrator sends with `publish_with_reply`
+//! (inbox), nodes respond to `msg.reply`. This eliminates subscribe-before-publish
+//! timing issues that previously made these tests flaky in CI.
+//!
 //! Requires: `./scripts/local-infra.sh up` (NATS on localhost:4222)
 
 use ed25519_dalek::SigningKey;
@@ -96,8 +100,11 @@ async fn run_node_keygen(
         error: None,
     };
 
-    // Publish response
-    let reply_subject = rpc::keygen_reply_subject(&req.group_id);
+    // Respond via NATS request-reply: use msg.reply inbox if available,
+    // fall back to legacy reply subject for backward compatibility.
+    let reply_subject = msg
+        .reply
+        .unwrap_or_else(|| rpc::keygen_reply_subject(&req.group_id).into());
     let payload = serde_json::to_vec(&response).unwrap();
     nats.publish(reply_subject, payload.into()).await.unwrap();
 
@@ -172,7 +179,11 @@ async fn run_node_sign(
         error: None,
     };
 
-    let reply_subject = rpc::sign_reply_subject(&req.group_id);
+    // Respond via NATS request-reply: use msg.reply inbox if available,
+    // fall back to legacy reply subject for backward compatibility.
+    let reply_subject = msg
+        .reply
+        .unwrap_or_else(|| rpc::sign_reply_subject(&req.group_id).into());
     let payload = serde_json::to_vec(&response).unwrap();
     nats.publish(reply_subject, payload.into()).await.unwrap();
 
@@ -186,10 +197,10 @@ async fn run_node_sign(
 /// Full distributed keygen: orchestrator publishes request, 3 nodes respond.
 /// Proves: gateway holds 0 shares, each node holds exactly 1.
 ///
-/// Run locally: NATS_URL=nats://127.0.0.1:4222 cargo test --test e2e_tests "distributed" -- --ignored
-/// NOT run in CI: requires precise NATS subscription timing that CI runners can't guarantee.
+/// Uses NATS request-reply pattern (publish_with_reply + inbox) which eliminates
+/// the subscribe-before-publish timing issues that made this test flaky in CI.
 #[tokio::test]
-#[ignore = "local only — distributed keygen needs precise NATS timing"]
+#[ignore = "requires NATS: ./scripts/local-infra.sh up"]
 async fn test_distributed_keygen_3_nodes() {
     let url = nats_url();
     let group_id = uuid::Uuid::new_v4().to_string();
@@ -228,13 +239,13 @@ async fn test_distributed_keygen_3_nodes() {
     }
 
     // Give nodes time to connect to NATS + subscribe to control channel.
-    // CI runners are slower — 200ms is not enough, use 2s.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    // Orchestrator publishes keygen request
+    // Orchestrator uses NATS request-reply: create inbox, subscribe, publish_with_reply.
+    // Nodes respond to the inbox directly — no separate reply subject needed.
     let nats = async_nats::connect(&url).await.unwrap();
-    let reply_subject = rpc::keygen_reply_subject(&group_id);
-    let mut reply_sub = nats.subscribe(reply_subject).await.unwrap();
+    let inbox = nats.new_inbox();
+    let mut reply_sub = nats.subscribe(inbox.clone()).await.unwrap();
 
     let request = rpc::KeygenRequest {
         group_id: group_id.clone(),
@@ -249,7 +260,9 @@ async fn test_distributed_keygen_3_nodes() {
 
     let subject = rpc::keygen_subject(&group_id);
     let payload = serde_json::to_vec(&request).unwrap();
-    nats.publish(subject, payload.into()).await.unwrap();
+    nats.publish_with_reply(subject, inbox, payload.into())
+        .await
+        .unwrap();
 
     // Collect 3 responses (with timeout)
     let mut responses = Vec::new();
@@ -359,11 +372,12 @@ async fn test_distributed_keygen_then_sign() {
         }));
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
+    // Orchestrator uses NATS request-reply pattern
     let nats = async_nats::connect(&url).await.unwrap();
-    let reply_sub_subject = rpc::keygen_reply_subject(&group_id);
-    let mut reply_sub = nats.subscribe(reply_sub_subject).await.unwrap();
+    let keygen_inbox = nats.new_inbox();
+    let mut reply_sub = nats.subscribe(keygen_inbox.clone()).await.unwrap();
 
     let keygen_req = rpc::KeygenRequest {
         group_id: group_id.clone(),
@@ -376,7 +390,7 @@ async fn test_distributed_keygen_then_sign() {
         nats_url: Some(url.clone()),
     };
     let payload = serde_json::to_vec(&keygen_req).unwrap();
-    nats.publish(rpc::keygen_subject(&group_id), payload.into())
+    nats.publish_with_reply(rpc::keygen_subject(&group_id), keygen_inbox, payload.into())
         .await
         .unwrap();
 
@@ -434,10 +448,11 @@ async fn test_distributed_keygen_then_sign() {
         }));
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    let sign_reply_subject = rpc::sign_reply_subject(&group_id);
-    let mut sign_reply_sub = nats.subscribe(sign_reply_subject).await.unwrap();
+    // Orchestrator uses NATS request-reply for sign phase
+    let sign_inbox = nats.new_inbox();
+    let mut sign_reply_sub = nats.subscribe(sign_inbox.clone()).await.unwrap();
 
     let sign_req = rpc::SignRequest {
         group_id: group_id.clone(),
@@ -449,7 +464,7 @@ async fn test_distributed_keygen_then_sign() {
         nats_url: Some(url.clone()),
     };
     let payload = serde_json::to_vec(&sign_req).unwrap();
-    nats.publish(rpc::sign_subject(&group_id), payload.into())
+    nats.publish_with_reply(rpc::sign_subject(&group_id), sign_inbox, payload.into())
         .await
         .unwrap();
 

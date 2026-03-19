@@ -153,17 +153,14 @@ jobs:
             sleep 1
           done
 
-      # Run CI-safe E2E tests only (NATS timing-sensitive tests run locally)
+      # Run ALL E2E tests including distributed (request-reply eliminates timing issues)
       - name: Run E2E tests
         env:
           NATS_URL: nats://127.0.0.1:4222
           REDIS_URL: redis://127.0.0.1:6379
           GATEWAY_URL: http://127.0.0.1:3000
         run: |
-          # Gateway + infra tests (reliable in CI — no NATS protocol timing)
-          cargo test -p mpc-wallet-core --test e2e_tests "full_flow" -- --ignored --test-threads=1
-          cargo test -p mpc-wallet-core --test e2e_tests "chain_signing" -- --ignored --test-threads=1
+          # All E2E tests: full_flow + chain_signing + distributed (NATS request-reply)
+          cargo test -p mpc-wallet-core --test e2e_tests -- --ignored --test-threads=1
           # Kill gateway so the job can exit
           kill $(cat /tmp/gateway.pid) 2>/dev/null || true
-          # NOTE: NATS transport + distributed tests skipped in CI (timing-sensitive)
-          # Run locally: ./scripts/local-infra.sh test
