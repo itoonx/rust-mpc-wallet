@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use mpc_wallet_core::error::CoreError;
+use mpc_wallet_core::types::CryptoScheme;
 
 use crate::aptos::AptosProvider;
 use crate::bitcoin::BitcoinProvider;
@@ -214,6 +215,87 @@ impl ChainRegistry {
         ]
     }
 
+    /// Return the list of `CryptoScheme` variants that produce signatures
+    /// compatible with the given chain's `finalize_transaction`.
+    ///
+    /// Both `Gg20Ecdsa` and `Cggmp21Secp256k1` produce `MpcSignature::Ecdsa`,
+    /// so every secp256k1-based chain accepts either protocol.
+    pub fn compatible_schemes(chain: Chain) -> Vec<CryptoScheme> {
+        match chain {
+            // EVM chains — secp256k1 ECDSA
+            Chain::Ethereum
+            | Chain::Polygon
+            | Chain::Bsc
+            | Chain::Arbitrum
+            | Chain::Optimism
+            | Chain::Base
+            | Chain::Avalanche
+            | Chain::Linea
+            | Chain::ZkSync
+            | Chain::Scroll
+            | Chain::Mantle
+            | Chain::Blast
+            | Chain::Zora
+            | Chain::Fantom
+            | Chain::Gnosis
+            | Chain::Cronos
+            | Chain::Celo
+            | Chain::Moonbeam
+            | Chain::Ronin
+            | Chain::OpBnb
+            | Chain::Immutable
+            | Chain::MantaPacific
+            | Chain::Hyperliquid
+            | Chain::Berachain
+            | Chain::MegaEth
+            | Chain::Monad => vec![CryptoScheme::Gg20Ecdsa, CryptoScheme::Cggmp21Secp256k1],
+
+            // UTXO chains — legacy P2PKH uses ECDSA
+            Chain::Litecoin | Chain::Dogecoin | Chain::Zcash => {
+                vec![CryptoScheme::Gg20Ecdsa, CryptoScheme::Cggmp21Secp256k1]
+            }
+
+            // Bitcoin — Taproot uses Schnorr, but legacy would use ECDSA
+            Chain::BitcoinMainnet | Chain::BitcoinTestnet => {
+                vec![
+                    CryptoScheme::FrostSecp256k1Tr,
+                    CryptoScheme::Gg20Ecdsa,
+                    CryptoScheme::Cggmp21Secp256k1,
+                ]
+            }
+
+            // TRON — secp256k1 ECDSA
+            Chain::Tron => vec![CryptoScheme::Gg20Ecdsa, CryptoScheme::Cggmp21Secp256k1],
+
+            // Cosmos chains — secp256k1 ECDSA (or EdDSA for some, but primarily ECDSA)
+            Chain::CosmosHub | Chain::Osmosis | Chain::Celestia | Chain::Injective | Chain::Sei => {
+                vec![CryptoScheme::Gg20Ecdsa, CryptoScheme::Cggmp21Secp256k1]
+            }
+
+            // Ed25519 chains
+            Chain::Solana | Chain::Sui | Chain::Aptos | Chain::Movement => {
+                vec![CryptoScheme::FrostEd25519]
+            }
+
+            // Substrate chains — Sr25519
+            Chain::Polkadot
+            | Chain::Kusama
+            | Chain::Astar
+            | Chain::Acala
+            | Chain::Phala
+            | Chain::Interlay => vec![CryptoScheme::Sr25519Threshold],
+
+            // StarkNet — STARK curve
+            Chain::Starknet => vec![CryptoScheme::StarkThreshold],
+
+            // TON — Ed25519
+            Chain::Ton => vec![CryptoScheme::FrostEd25519],
+
+            // Monero — Ed25519-like
+            Chain::Monero => vec![CryptoScheme::FrostEd25519],
+        }
+    }
+
     /// Broadcast a signed transaction, resolving the RPC endpoint automatically.
     ///
     /// Uses `rest_endpoint()` for Bitcoin chains, `endpoint()` for JSON-RPC chains.
@@ -280,6 +362,40 @@ mod tests {
         assert_eq!(*r.network(), NetworkEnv::Mainnet);
         let r = ChainRegistry::default_testnet();
         assert_eq!(*r.network(), NetworkEnv::Testnet);
+    }
+
+    #[test]
+    fn test_compatible_schemes_all_evm_include_cggmp21() {
+        use mpc_wallet_core::types::CryptoScheme;
+        let evm_chains = vec![
+            Chain::Ethereum,
+            Chain::Polygon,
+            Chain::Bsc,
+            Chain::Arbitrum,
+            Chain::Base,
+        ];
+        for chain in evm_chains {
+            let schemes = ChainRegistry::compatible_schemes(chain);
+            assert!(
+                schemes.contains(&CryptoScheme::Cggmp21Secp256k1),
+                "{:?} must include CGGMP21",
+                chain
+            );
+            assert!(
+                schemes.contains(&CryptoScheme::Gg20Ecdsa),
+                "{:?} must include GG20",
+                chain
+            );
+        }
+    }
+
+    #[test]
+    fn test_compatible_schemes_ed25519_no_ecdsa() {
+        use mpc_wallet_core::types::CryptoScheme;
+        let schemes = ChainRegistry::compatible_schemes(Chain::Solana);
+        assert!(schemes.contains(&CryptoScheme::FrostEd25519));
+        assert!(!schemes.contains(&CryptoScheme::Gg20Ecdsa));
+        assert!(!schemes.contains(&CryptoScheme::Cggmp21Secp256k1));
     }
 
     #[test]
