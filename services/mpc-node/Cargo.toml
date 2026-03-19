@@ -24,6 +24,7 @@ serde_json = { workspace = true }
 
 # Crypto
 ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
 zeroize = { workspace = true }
 
 # Utilities

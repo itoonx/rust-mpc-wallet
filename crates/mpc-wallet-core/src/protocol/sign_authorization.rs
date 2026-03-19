@@ -25,6 +25,8 @@
 //!                                 └──────────────────────┘
 //! ```
 
+use std::collections::HashMap;
+
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -206,6 +208,99 @@ impl SignAuthorization {
         let serialized =
             serde_json::to_vec(payload).expect("AuthorizationPayload serialization cannot fail");
         Sha256::digest(serialized).into()
+    }
+
+    /// Verify the authorization proof and check for replay using a dedup cache.
+    ///
+    /// This is the recommended entry point for MPC nodes: it calls `verify()` first,
+    /// then records the `authorization_id` in the cache. If the same ID was already
+    /// seen (within the TTL window), the call returns an error.
+    pub fn verify_with_cache(
+        &self,
+        expected_gateway_pubkey: &VerifyingKey,
+        message_to_sign: &[u8],
+        cache: &mut AuthorizationCache,
+    ) -> Result<(), CoreError> {
+        // First verify the authorization itself (signature, freshness, policy, etc.).
+        self.verify(expected_gateway_pubkey, message_to_sign)?;
+
+        // Then check and record the authorization_id for replay protection.
+        cache.check_and_record(&self.payload.authorization_id, MAX_AUTHORIZATION_AGE_SECS)
+    }
+}
+
+/// Node-side dedup cache for `SignAuthorization` replay protection (SEC-025).
+///
+/// Tracks seen `authorization_id` values and rejects duplicates within the TTL window.
+/// An attacker who captures a valid `SignAuthorization` cannot replay it to sign the
+/// same message twice — the second attempt will be rejected by this cache.
+///
+/// Each MPC node maintains its own `AuthorizationCache` instance.
+pub struct AuthorizationCache {
+    /// Maps authorization_id -> expiry timestamp (UNIX seconds).
+    seen: HashMap<String, u64>,
+    /// Maximum number of entries before forced pruning.
+    max_entries: usize,
+}
+
+impl AuthorizationCache {
+    /// Create a new cache with the given maximum entry count.
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            seen: HashMap::new(),
+            max_entries,
+        }
+    }
+
+    /// Check if `auth_id` has been seen before; if not, record it.
+    ///
+    /// Returns `Err` if the `auth_id` is a duplicate (replay detected).
+    /// Records the ID with expiry = now + `ttl_secs`.
+    /// Prunes expired entries when approaching `max_entries`.
+    pub fn check_and_record(&mut self, auth_id: &str, ttl_secs: u64) -> Result<(), CoreError> {
+        let now = super::request_context::unix_now_secs();
+
+        // Prune expired entries if we're at or near capacity.
+        if self.seen.len() >= self.max_entries {
+            self.prune_with_now(now);
+        }
+
+        // Check for replay — entry exists and hasn't expired.
+        if let Some(&expiry) = self.seen.get(auth_id) {
+            if now < expiry {
+                return Err(CoreError::Protocol(format!(
+                    "sign authorization replay detected: authorization_id '{}' already used",
+                    auth_id
+                )));
+            }
+            // Entry exists but expired — allow reuse (remove stale entry).
+            self.seen.remove(auth_id);
+        }
+
+        // Record the new authorization_id.
+        self.seen.insert(auth_id.to_string(), now + ttl_secs);
+        Ok(())
+    }
+
+    /// Remove all expired entries from the cache.
+    pub fn prune(&mut self) {
+        let now = super::request_context::unix_now_secs();
+        self.prune_with_now(now);
+    }
+
+    /// Internal prune with explicit timestamp (for testability).
+    fn prune_with_now(&mut self, now: u64) {
+        self.seen.retain(|_, expiry| *expiry > now);
+    }
+
+    /// Number of entries currently in the cache (for diagnostics).
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    /// Whether the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
     }
 }
 
@@ -411,5 +506,79 @@ mod tests {
 
         let auth = SignAuthorization::create(payload.clone(), &key);
         assert_eq!(auth.payload.authorization_id, payload.authorization_id);
+    }
+
+    // --- AuthorizationCache tests ---
+
+    #[test]
+    fn test_authorization_cache_rejects_replay() {
+        let mut cache = AuthorizationCache::new(100);
+        let key = test_key();
+        let message = b"replay test";
+        let payload = valid_payload(message);
+        let auth = SignAuthorization::create(payload, &key);
+
+        // First use should succeed.
+        let result = auth.verify_with_cache(&key.verifying_key(), message, &mut cache);
+        assert!(result.is_ok(), "first use should succeed: {result:?}");
+
+        // Second use of the same authorization_id should be rejected.
+        let result = auth.verify_with_cache(&key.verifying_key(), message, &mut cache);
+        assert!(result.is_err(), "replay should be rejected");
+        assert!(
+            format!("{result:?}").contains("replay detected"),
+            "error should mention replay: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_authorization_cache_allows_different_ids() {
+        let mut cache = AuthorizationCache::new(100);
+        let key = test_key();
+        let message = b"different ids test";
+
+        // Create two authorizations with different IDs.
+        let mut payload1 = valid_payload(message);
+        payload1.authorization_id = "auth-id-001".into();
+        let auth1 = SignAuthorization::create(payload1, &key);
+
+        let mut payload2 = valid_payload(message);
+        payload2.authorization_id = "auth-id-002".into();
+        let auth2 = SignAuthorization::create(payload2, &key);
+
+        // Both should succeed.
+        let r1 = auth1.verify_with_cache(&key.verifying_key(), message, &mut cache);
+        assert!(r1.is_ok(), "first ID should succeed: {r1:?}");
+
+        let r2 = auth2.verify_with_cache(&key.verifying_key(), message, &mut cache);
+        assert!(r2.is_ok(), "second (different) ID should succeed: {r2:?}");
+
+        assert_eq!(cache.len(), 2, "cache should have 2 entries");
+    }
+
+    #[test]
+    fn test_authorization_cache_expires_old_entries() {
+        let mut cache = AuthorizationCache::new(100);
+
+        // Manually insert an entry that is already expired (expiry in the past).
+        let now = crate::protocol::request_context::unix_now_secs();
+        cache
+            .seen
+            .insert("old-auth-1".to_string(), now.saturating_sub(10));
+        cache
+            .seen
+            .insert("old-auth-2".to_string(), now.saturating_sub(5));
+        cache.seen.insert("fresh-auth".to_string(), now + 300);
+
+        assert_eq!(cache.len(), 3);
+
+        // Prune should remove the two expired entries.
+        cache.prune();
+
+        assert_eq!(cache.len(), 1, "only fresh entry should remain");
+        assert!(
+            cache.seen.contains_key("fresh-auth"),
+            "fresh entry should survive pruning"
+        );
     }
 }

@@ -810,6 +810,8 @@ STEP 3  R6 Security Gate (mandatory before ANY merge)
 ~/.claude/agents/r5-qa.md
 ~/.claude/agents/r6-security.md
 ~/.claude/agents/r7-pm.md
+~/.claude/agents/r8-sdk.md
+~/.claude/agents/r9-devops.md
 ~/.claude/agents/r10-scribe.md
 ```
 

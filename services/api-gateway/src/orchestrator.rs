@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_nats::Client as NatsClient;
+use ed25519_dalek::SigningKey;
 use futures::StreamExt;
 use tokio::sync::RwLock;
 
@@ -46,6 +47,9 @@ pub struct MpcOrchestrator {
     wallets: Arc<RwLock<HashMap<String, WalletMetadata>>>,
     /// Timeout for waiting for node responses.
     ceremony_timeout: Duration,
+    /// Ed25519 signing key for control plane message authentication (SEC-026).
+    /// All control messages are signed before publishing on NATS.
+    signing_key: Option<SigningKey>,
 }
 
 impl Default for MpcOrchestrator {
@@ -62,6 +66,7 @@ impl MpcOrchestrator {
             nats: None,
             wallets: Arc::new(RwLock::new(HashMap::new())),
             ceremony_timeout: Duration::from_secs(60),
+            signing_key: None,
         }
     }
 
@@ -77,6 +82,34 @@ impl MpcOrchestrator {
             nats: Some(Arc::new(nats)),
             wallets: Arc::new(RwLock::new(HashMap::new())),
             ceremony_timeout: Duration::from_secs(60),
+            signing_key: None,
+        })
+    }
+
+    /// Create an orchestrator connected to NATS with an Ed25519 signing key (SEC-026).
+    ///
+    /// All control plane messages (keygen/sign/freeze) will be signed with this key.
+    /// MPC nodes verify the signature against the corresponding public key before
+    /// processing any control message.
+    pub async fn connect_with_key(
+        nats_url: &str,
+        signing_key: SigningKey,
+    ) -> Result<Self, mpc_wallet_core::error::CoreError> {
+        let nats = async_nats::connect(nats_url).await.map_err(|e| {
+            mpc_wallet_core::error::CoreError::Transport(format!("NATS connect: {e}"))
+        })?;
+
+        tracing::info!(
+            url = %nats_url,
+            gateway_pubkey = %hex::encode(signing_key.verifying_key().as_bytes()),
+            "MPC orchestrator connected to NATS with signing key (SEC-026)"
+        );
+
+        Ok(Self {
+            nats: Some(Arc::new(nats)),
+            wallets: Arc::new(RwLock::new(HashMap::new())),
+            ceremony_timeout: Duration::from_secs(60),
+            signing_key: Some(signing_key),
         })
     }
 
@@ -87,6 +120,19 @@ impl MpcOrchestrator {
                 "MPC orchestrator: NATS not connected (local-only mode)".into(),
             )
         })
+    }
+
+    /// Wrap a serialized payload in a `SignedControlMessage` if a signing key is configured.
+    /// Returns the final bytes to publish on NATS.
+    fn wrap_payload(&self, payload: &[u8]) -> Result<Vec<u8>, mpc_wallet_core::error::CoreError> {
+        match &self.signing_key {
+            Some(key) => {
+                let signed = rpc::sign_control_message(payload, key);
+                serde_json::to_vec(&signed)
+                    .map_err(|e| mpc_wallet_core::error::CoreError::Serialization(e.to_string()))
+            }
+            None => Ok(payload.to_vec()),
+        }
     }
 
     /// Initiate distributed keygen via NATS.
@@ -144,13 +190,14 @@ impl MpcOrchestrator {
         })?;
 
         let subject = rpc::keygen_subject(&group_id);
-        let payload = serde_json::to_vec(&request)
+        let raw_payload = serde_json::to_vec(&request)
             .map_err(|e| mpc_wallet_core::error::CoreError::Serialization(e.to_string()))?;
+        let payload = self.wrap_payload(&raw_payload)?;
         nats.publish_with_reply(subject, inbox, payload.into())
             .await
             .map_err(|e| mpc_wallet_core::error::CoreError::Transport(format!("publish: {e}")))?;
 
-        tracing::info!(group_id = %group_id, "keygen request published, waiting for {total_parties} responses");
+        tracing::info!(group_id = %group_id, "keygen request published (signed), waiting for {total_parties} responses");
 
         // Collect responses from all nodes
         let mut responses: Vec<rpc::KeygenResponse> = Vec::new();
@@ -320,8 +367,9 @@ impl MpcOrchestrator {
         })?;
 
         let subject = rpc::sign_subject(group_id);
-        let payload = serde_json::to_vec(&request)
+        let raw_payload = serde_json::to_vec(&request)
             .map_err(|e| mpc_wallet_core::error::CoreError::Serialization(e.to_string()))?;
+        let payload = self.wrap_payload(&raw_payload)?;
         nats.publish_with_reply(subject, inbox, payload.into())
             .await
             .map_err(|e| mpc_wallet_core::error::CoreError::Transport(format!("publish: {e}")))?;
@@ -399,8 +447,9 @@ impl MpcOrchestrator {
             freeze,
         };
         let subject = rpc::freeze_subject(group_id);
-        let payload = serde_json::to_vec(&request)
+        let raw_payload = serde_json::to_vec(&request)
             .map_err(|e| mpc_wallet_core::error::CoreError::Serialization(e.to_string()))?;
+        let payload = self.wrap_payload(&raw_payload)?;
         if let Ok(nats) = self.nats() {
             // Use request() for single-response freeze acknowledgment.
             // Timeout after 10s — freeze is a fast operation.

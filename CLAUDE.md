@@ -95,7 +95,7 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 17 — security hardening, CI green)
+## Current State (as of Sprint 18 — control plane hardening, CI green)
 
 ### Auth System (3 methods, Redis-ready)
 
@@ -197,7 +197,7 @@ Gateway (creates proof)    →    MPC Node (verifies before sign)
 
 ### Tests on `main`
 ```
-540 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
+553 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
 cargo fmt        clean
 cargo clippy     clean (0 warnings, -D warnings)
 cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
@@ -215,8 +215,17 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 - **Sprint 15:** COMPLETE — Production readiness (standard errors, Vault, NatsTransport fix, sig verification, gateway↔node split, benchmarks, CI E2E)
 - **Sprint 16:** COMPLETE — FROST keygen over NATS, request-reply control plane, 14 new chain tests, real SignAuthorization in gateway, E2E re-enabled, DEC-015 security audit (SEC-025..031)
 - **Sprint 17:** COMPLETE — Security hardening (SEC-008, SEC-013, SEC-014, SEC-017, SEC-019, SEC-023, SEC-025 resolved), authorization_id replay protection, 10 security regression tests
+- **Sprint 18:** COMPLETE — Control plane hardening (SEC-026 signed control messages, AuthorizationCache replay dedup, 5 hardening integration tests, R6 audit APPROVED)
 
-**All 10 epics: 100% COMPLETE**
+**All 10 epics: 100% COMPLETE | Milestone 1 (Security Hardening): COMPLETE**
+
+### New in Sprint 18
+- SEC-026 FIX: All control plane messages (keygen/sign/freeze) Ed25519-signed by gateway, verified by MPC nodes before processing
+- `AuthorizationCache`: node-side dedup cache with TTL-based expiry, max_entries capacity limit, `verify_with_cache()` entry point
+- `SignedControlMessage` struct in `rpc/mod.rs` with `sign_control_message()` / `verify_control_message()` helpers
+- `unwrap_signed_message()` in mpc-node validates control plane messages before deserialization
+- 5 new hardening integration tests + 5 rpc unit tests + 3 cache unit tests = 13 new tests
+- R6 Sprint 17-18 audit: APPROVED — all Sprint 17 checklist verified, SEC-007 status corrected
 
 ### New in Sprint 17
 - SEC-008 FIX: GG20 secret scalars explicitly zeroized in keygen, sign, refresh, reshare
