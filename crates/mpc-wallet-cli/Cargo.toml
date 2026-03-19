@@ -10,7 +10,7 @@ name = "mpc-wallet"
 path = "src/main.rs"
 
 [dependencies]
-mpc-wallet-core = { workspace = true }
+mpc-wallet-core = { workspace = true, features = ["local-transport"] }
 mpc-wallet-chains = { workspace = true }
 
 # CLI

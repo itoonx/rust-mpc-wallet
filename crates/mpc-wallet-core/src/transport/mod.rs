@@ -1,4 +1,8 @@
 /// In-process transport using tokio mpsc channels (for testing and single-process simulation).
+///
+/// Gated behind `#[cfg(any(test, feature = "local-transport"))]` to prevent accidental
+/// production use. Enable the `local-transport` feature flag for CLI/demo usage (SEC-014).
+#[cfg(any(test, feature = "local-transport"))]
 pub mod local;
 /// NATS-based transport for multi-process and multi-machine MPC deployments.
 pub mod nats;
