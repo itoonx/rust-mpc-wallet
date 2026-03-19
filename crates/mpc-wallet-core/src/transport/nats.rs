@@ -173,6 +173,14 @@ impl NatsTransport {
             .await
             .map_err(|e| CoreError::Transport(format!("NATS subscribe failed: {e}")))?;
 
+        // Flush ensures the SUB command reaches the NATS server before returning.
+        // Without this, a fast publisher may send before the server processes SUB,
+        // causing message loss (observed on CI runners with higher latency).
+        client
+            .flush()
+            .await
+            .map_err(|e| CoreError::Transport(format!("NATS flush failed: {e}")))?;
+
         Ok(Self {
             client,
             party_id,
@@ -218,6 +226,11 @@ impl NatsTransport {
             .subscribe(inbox)
             .await
             .map_err(|e| CoreError::Transport(format!("NATS TLS subscribe failed: {e}")))?;
+
+        client
+            .flush()
+            .await
+            .map_err(|e| CoreError::Transport(format!("NATS TLS flush failed: {e}")))?;
 
         Ok(Self {
             client,
