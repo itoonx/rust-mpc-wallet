@@ -60,6 +60,8 @@ pub enum CryptoScheme {
     StarkThreshold,
     /// Threshold BLS on BLS12-381 (for Filecoin, Ethereum validators).
     Bls12_381Threshold,
+    /// CGGMP21 threshold ECDSA on secp256k1 (next-gen protocol, UC-secure).
+    Cggmp21Secp256k1,
 }
 
 impl fmt::Display for CryptoScheme {
@@ -71,6 +73,7 @@ impl fmt::Display for CryptoScheme {
             CryptoScheme::Sr25519Threshold => write!(f, "sr25519-threshold"),
             CryptoScheme::StarkThreshold => write!(f, "stark-threshold"),
             CryptoScheme::Bls12_381Threshold => write!(f, "bls12-381-threshold"),
+            CryptoScheme::Cggmp21Secp256k1 => write!(f, "cggmp21-secp256k1"),
         }
     }
 }
@@ -86,6 +89,7 @@ impl std::str::FromStr for CryptoScheme {
             "sr25519" | "sr25519-threshold" => Ok(CryptoScheme::Sr25519Threshold),
             "stark" | "stark-threshold" => Ok(CryptoScheme::StarkThreshold),
             "bls12-381" | "bls12-381-threshold" => Ok(CryptoScheme::Bls12_381Threshold),
+            "cggmp21" | "cggmp21-secp256k1" => Ok(CryptoScheme::Cggmp21Secp256k1),
             _ => Err(format!("unknown scheme: {s}")),
         }
     }

@@ -90,6 +90,9 @@ pub async fn run(args: SignArgs, format: OutputFormat) -> anyhow::Result<()> {
                 CryptoScheme::Bls12_381Threshold => {
                     Box::new(mpc_wallet_core::protocol::bls12_381::Bls12_381Protocol::new())
                 }
+                CryptoScheme::Cggmp21Secp256k1 => {
+                    Box::new(mpc_wallet_core::protocol::cggmp21::Cggmp21Protocol::new())
+                }
             };
             protocol
                 .sign(&share, &signers_clone, &message_clone, &*transport)

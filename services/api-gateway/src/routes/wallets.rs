@@ -148,7 +148,8 @@ pub async fn get_wallet(
     // Derive addresses for common chains matching the wallet's signing scheme.
     use mpc_wallet_chains::provider::Chain;
     let chains_to_derive: Vec<Chain> = match m.scheme {
-        mpc_wallet_core::types::CryptoScheme::Gg20Ecdsa => {
+        mpc_wallet_core::types::CryptoScheme::Gg20Ecdsa
+        | mpc_wallet_core::types::CryptoScheme::Cggmp21Secp256k1 => {
             vec![Chain::Ethereum, Chain::Polygon, Chain::Bsc, Chain::Arbitrum]
         }
         mpc_wallet_core::types::CryptoScheme::FrostEd25519 => {

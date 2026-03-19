@@ -257,9 +257,9 @@ impl MpcOrchestrator {
 
         // Determine GroupPublicKey variant based on scheme
         let group_public_key = match scheme {
-            CryptoScheme::Gg20Ecdsa | CryptoScheme::FrostSecp256k1Tr => {
-                GroupPublicKey::Secp256k1(gpk_bytes)
-            }
+            CryptoScheme::Gg20Ecdsa
+            | CryptoScheme::FrostSecp256k1Tr
+            | CryptoScheme::Cggmp21Secp256k1 => GroupPublicKey::Secp256k1(gpk_bytes),
             CryptoScheme::FrostEd25519 => GroupPublicKey::Ed25519(gpk_bytes),
             _ => GroupPublicKey::Secp256k1(gpk_bytes),
         };

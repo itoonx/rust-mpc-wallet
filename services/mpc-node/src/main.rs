@@ -650,6 +650,7 @@ fn create_protocol(scheme: CryptoScheme) -> Result<Box<dyn MpcProtocol>, String>
         CryptoScheme::FrostSecp256k1Tr => {
             Ok(Box::new(frost_secp256k1::FrostSecp256k1TrProtocol::new()))
         }
+        CryptoScheme::Cggmp21Secp256k1 => Ok(Box::new(cggmp21::Cggmp21Protocol::new())),
         _ => Err(format!("unsupported scheme: {scheme:?}")),
     }
 }

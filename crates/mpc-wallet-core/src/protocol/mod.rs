@@ -1,5 +1,7 @@
 /// Threshold BLS12-381 protocol (Filecoin, Ethereum validators).
 pub mod bls12_381;
+/// CGGMP21 threshold ECDSA protocol on secp256k1 (next-gen, UC-secure).
+pub mod cggmp21;
 /// FROST threshold EdDSA protocol implementation for Ed25519 (Solana, Sui).
 pub mod frost_ed25519;
 /// FROST threshold Schnorr protocol implementation for secp256k1 with Taproot tweaks (Bitcoin).
