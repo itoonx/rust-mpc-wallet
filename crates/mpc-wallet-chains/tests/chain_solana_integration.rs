@@ -300,6 +300,80 @@ async fn test_solana_same_from_to_address() {
 // Solana simulation / risk analysis tests
 // ============================================================================
 
+// ============================================================================
+// Sprint 17 — Solana from_address validation regression tests (T-S17-05)
+// ============================================================================
+
+/// SEC-017 regression: verify that building a Solana transaction without a
+/// `from` address in the extra params returns an error, not a panic.
+/// This guards against silent acceptance of transactions with no sender.
+#[tokio::test]
+async fn test_solana_from_address_missing_returns_error() {
+    let provider = mpc_wallet_chains::solana::SolanaProvider::new();
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(),
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: None, // no "from" at all
+    };
+    let result = provider.build_transaction(params).await;
+    assert!(
+        result.is_err(),
+        "building a tx without 'from' address must return an error"
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("from") || err_msg.contains("missing"),
+        "error must mention missing from address, got: {err_msg}"
+    );
+}
+
+/// SEC-017 regression: verify that an invalid base58 `from` address is rejected.
+/// If from_address validation were removed, this test would catch it.
+#[tokio::test]
+async fn test_solana_from_address_invalid_base58_rejected() {
+    let provider = mpc_wallet_chains::solana::SolanaProvider::new();
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(),
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({"from": "not-valid-base58!!!"})),
+    };
+    let result = provider.build_transaction(params).await;
+    assert!(
+        result.is_err(),
+        "invalid base58 from address must be rejected"
+    );
+}
+
+/// SEC-017 regression: verify that a `from` address that decodes to the wrong
+/// number of bytes (not 32) is rejected. Solana public keys must be exactly
+/// 32 bytes.
+#[tokio::test]
+async fn test_solana_from_address_wrong_length_rejected() {
+    let provider = mpc_wallet_chains::solana::SolanaProvider::new();
+    // base58 encoding of a 16-byte value (too short for a Solana pubkey)
+    let short_key = bs58::encode(&[0xAAu8; 16]).into_string();
+    let params = TransactionParams {
+        to: "11111111111111111111111111111112".to_string(),
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({"from": short_key})),
+    };
+    let result = provider.build_transaction(params).await;
+    assert!(
+        result.is_err(),
+        "from address that decodes to wrong length must be rejected"
+    );
+}
+
+// ============================================================================
+// Solana simulation / risk analysis tests
+// ============================================================================
+
 #[tokio::test]
 async fn test_solana_simulation_basic() {
     let p = mpc_wallet_chains::solana::SolanaProvider::new()

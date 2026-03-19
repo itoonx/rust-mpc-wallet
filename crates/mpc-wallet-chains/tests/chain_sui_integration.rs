@@ -296,6 +296,75 @@ fn test_sui_validate_address_invalid_hex_chars() {
 }
 
 // ============================================================================
+// Sprint 17 — Sui invalid hex rejection regression tests (T-S17-05, SEC-023)
+// ============================================================================
+
+/// SEC-023 regression: validate_sui_address must reject addresses where the
+/// hex portion contains uppercase-only invalid chars that could slip through
+/// a case-insensitive check.
+#[test]
+fn test_sui_invalid_hex_uppercase_rejected() {
+    // 0x + 64 chars with 'G' (not valid hex, even uppercase)
+    let bad = "0xGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG";
+    let result = mpc_wallet_chains::sui::tx::validate_sui_address(bad);
+    assert!(
+        result.is_err(),
+        "address with uppercase non-hex chars must fail: {:?}",
+        result
+    );
+}
+
+/// SEC-023 regression: validate_sui_address must reject addresses with
+/// embedded spaces or special characters that happen to be 66 chars total.
+#[test]
+fn test_sui_invalid_hex_special_chars_rejected() {
+    // 0x + 64 chars with spaces and special chars
+    let bad = "0x00000000000000000000000000000000000000000000000000000000000000 !";
+    let result = mpc_wallet_chains::sui::tx::validate_sui_address(bad);
+    assert!(
+        result.is_err(),
+        "address with special chars must fail: {:?}",
+        result
+    );
+}
+
+/// SEC-023 regression: validate_sui_address must reject addresses with mixed
+/// valid and invalid hex characters (partial validity).
+#[test]
+fn test_sui_invalid_hex_mixed_chars_rejected() {
+    // First 60 chars valid hex, last 4 chars invalid
+    let bad = "0x000000000000000000000000000000000000000000000000000000000000zzzz";
+    let result = mpc_wallet_chains::sui::tx::validate_sui_address(bad);
+    assert!(
+        result.is_err(),
+        "address with mixed valid/invalid hex must fail: {:?}",
+        result
+    );
+}
+
+/// SEC-023 regression: build_transaction must reject invalid hex in the
+/// sender address when provided via extra params.
+#[tokio::test]
+async fn test_sui_build_rejects_invalid_hex_sender() {
+    let pubkey = GroupPublicKey::Ed25519(vec![1u8; 32]);
+    let provider = mpc_wallet_chains::sui::SuiProvider::with_pubkey(pubkey);
+    let params = TransactionParams {
+        to: "0x0000000000000000000000000000000000000000000000000000000000000002".to_string(),
+        value: "1000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({
+            "sender": "0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        })),
+    };
+    let result = provider.build_transaction(params).await;
+    assert!(
+        result.is_err(),
+        "invalid hex sender address must be rejected in build_transaction"
+    );
+}
+
+// ============================================================================
 // Sui BCS serialization tests (T-S2-04)
 // ============================================================================
 
