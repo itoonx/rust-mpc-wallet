@@ -95,7 +95,7 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 19 — CGGMP21 foundation, CI green)
+## Current State (as of Sprint 20 — CGGMP21 signing complete, CI green)
 
 ### Auth System (3 methods, Redis-ready)
 
@@ -197,7 +197,7 @@ Gateway (creates proof)    →    MPC Node (verifies before sign)
 
 ### Tests on `main`
 ```
-565 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
+572 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
 cargo fmt        clean
 cargo clippy     clean (0 warnings, -D warnings)
 cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
@@ -217,8 +217,17 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 - **Sprint 17:** COMPLETE — Security hardening (SEC-008, SEC-013, SEC-014, SEC-017, SEC-019, SEC-023, SEC-025 resolved), authorization_id replay protection, 10 security regression tests
 - **Sprint 18:** COMPLETE — Control plane hardening (SEC-026 signed control messages, AuthorizationCache replay dedup, 5 hardening integration tests, R6 audit APPROVED)
 - **Sprint 19:** COMPLETE — CGGMP21 Foundation (CryptoScheme::Cggmp21Secp256k1, Feldman VSS keygen, Paillier+Pedersen aux info, 12 new protocol tests)
+- **Sprint 20:** COMPLETE — CGGMP21 Signing (pre-signing phase, online 1-round signing, identifiable abort, low-s normalization, 7 new signing tests)
 
-**All 10 epics: 100% COMPLETE | Milestone 1: COMPLETE | Milestone 2 (CGGMP21): IN PROGRESS**
+**All 10 epics: 100% COMPLETE | Milestone 1: COMPLETE | Milestone 2 (CGGMP21): IN PROGRESS (Sprint 21 remaining)**
+
+### New in Sprint 20
+- CGGMP21 pre-signing: offline batchable phase producing `PreSignature` (k_i, chi_i, big_r)
+- CGGMP21 online signing: 1-round sigma_i aggregation from pre-signatures
+- `sign()` on MpcProtocol trait: keygen uses pre_sign + sign_with_presig internally
+- Identifiable abort: detects cheating party when final signature verification fails
+- Low-s normalization (SEC-012 pattern) and recovery_id computation
+- 7 new tests (pre-sign, full flow, direct sign, different messages, verify, abort, low-s)
 
 ### New in Sprint 19
 - `CryptoScheme::Cggmp21Secp256k1` variant added to type system (R0)
