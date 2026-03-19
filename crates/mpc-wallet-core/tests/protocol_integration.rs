@@ -940,6 +940,146 @@ async fn test_frost_ed25519_refresh_different_subsets() {
         .expect("subset {2,3} must verify after refresh");
 }
 
+// ============================================================================
+// SEC-025: Mandatory SignAuthorization verification
+// ============================================================================
+
+/// Verify that MPC nodes MUST verify SignAuthorization before signing.
+///
+/// This test exercises the library-level `SignAuthorization::verify()` method
+/// to ensure that:
+/// 1. A valid authorization (correct key, fresh, matching message) is accepted.
+/// 2. An authorization signed by the WRONG gateway key is rejected (impersonation).
+/// 3. An EXPIRED authorization is rejected (replay / stale proof).
+/// 4. A TAMPERED authorization (payload modified after signing) is rejected.
+/// 5. An authorization with a MISMATCHED message hash is rejected (message substitution).
+/// 6. An authorization where policy did NOT pass is rejected.
+/// 7. An authorization with INSUFFICIENT approvals is rejected.
+///
+/// These checks mirror the independent verification that each MPC node performs
+/// before participating in a signing session (DEC-012, SEC-025).
+#[test]
+fn test_sign_authorization_mandatory_verification() {
+    use ed25519_dalek::SigningKey;
+    use mpc_wallet_core::protocol::sign_authorization::{
+        ApproverEvidence, AuthorizationPayload, SignAuthorization,
+    };
+    use sha2::{Digest, Sha256};
+
+    let gateway_key = SigningKey::from_bytes(&{
+        let mut b = [0u8; 32];
+        b[0] = 42;
+        b
+    });
+    let message = b"transfer 1.5 ETH to 0xabcdef";
+
+    // Helper: build a valid payload for the given message with current timestamp.
+    let make_valid_payload = |msg: &[u8]| -> AuthorizationPayload {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        AuthorizationPayload {
+            requester_id: "user-sec025".into(),
+            wallet_id: "wallet-sec025".into(),
+            message_hash: hex::encode(Sha256::digest(msg)),
+            policy_hash: hex::encode(Sha256::digest(b"policy-sec025")),
+            policy_passed: true,
+            approval_count: 2,
+            approval_required: 2,
+            approvers: vec![
+                ApproverEvidence {
+                    approver_id: "approver-a".into(),
+                    signature_hash: "aa11".into(),
+                },
+                ApproverEvidence {
+                    approver_id: "approver-b".into(),
+                    signature_hash: "bb22".into(),
+                },
+            ],
+            timestamp: now,
+            session_id: "session-sec025".into(),
+            encrypted_context: None,
+        }
+    };
+
+    // ── 1. Valid authorization MUST be accepted ──────────────────────────────
+    let valid_auth = SignAuthorization::create(make_valid_payload(message), &gateway_key);
+    assert!(
+        valid_auth.verify(&gateway_key.verifying_key(), message).is_ok(),
+        "valid SignAuthorization must be accepted"
+    );
+
+    // ── 2. Wrong gateway key MUST be rejected (impersonation) ───────────────
+    let attacker_key = SigningKey::from_bytes(&[0xFFu8; 32]);
+    let wrong_key_auth = SignAuthorization::create(make_valid_payload(message), &attacker_key);
+    let err = wrong_key_auth
+        .verify(&gateway_key.verifying_key(), message)
+        .expect_err("authorization signed by wrong key must be rejected");
+    assert!(
+        format!("{err:?}").contains("pubkey mismatch"),
+        "error must indicate gateway pubkey mismatch, got: {err:?}"
+    );
+
+    // ── 3. Expired authorization MUST be rejected ───────────────────────────
+    let mut expired_payload = make_valid_payload(message);
+    expired_payload.timestamp = 1_000_000; // far in the past
+    let expired_auth = SignAuthorization::create(expired_payload, &gateway_key);
+    let err = expired_auth
+        .verify(&gateway_key.verifying_key(), message)
+        .expect_err("expired SignAuthorization must be rejected");
+    assert!(
+        format!("{err:?}").contains("expired"),
+        "error must indicate expiration, got: {err:?}"
+    );
+
+    // ── 4. Tampered payload MUST be rejected (signature invalid) ────────────
+    let mut tampered_auth = SignAuthorization::create(make_valid_payload(message), &gateway_key);
+    tampered_auth.payload.requester_id = "attacker-injected".into();
+    let err = tampered_auth
+        .verify(&gateway_key.verifying_key(), message)
+        .expect_err("tampered SignAuthorization must be rejected");
+    assert!(
+        format!("{err:?}").contains("invalid gateway signature"),
+        "error must indicate invalid signature, got: {err:?}"
+    );
+
+    // ── 5. Message hash mismatch MUST be rejected (message substitution) ────
+    let mismatch_auth = SignAuthorization::create(make_valid_payload(message), &gateway_key);
+    let different_message = b"send 999 BTC to attacker";
+    let err = mismatch_auth
+        .verify(&gateway_key.verifying_key(), different_message)
+        .expect_err("message mismatch must be rejected");
+    assert!(
+        format!("{err:?}").contains("message hash mismatch"),
+        "error must indicate message hash mismatch, got: {err:?}"
+    );
+
+    // ── 6. Policy not passed MUST be rejected ───────────────────────────────
+    let mut no_policy_payload = make_valid_payload(message);
+    no_policy_payload.policy_passed = false;
+    let no_policy_auth = SignAuthorization::create(no_policy_payload, &gateway_key);
+    let err = no_policy_auth
+        .verify(&gateway_key.verifying_key(), message)
+        .expect_err("authorization with failed policy must be rejected");
+    assert!(
+        format!("{err:?}").contains("policy check did not pass"),
+        "error must indicate policy failure, got: {err:?}"
+    );
+
+    // ── 7. Insufficient approvals MUST be rejected ──────────────────────────
+    let mut low_approval_payload = make_valid_payload(message);
+    low_approval_payload.approval_count = 1; // only 1 of 2 required
+    let low_approval_auth = SignAuthorization::create(low_approval_payload, &gateway_key);
+    let err = low_approval_auth
+        .verify(&gateway_key.verifying_key(), message)
+        .expect_err("authorization with insufficient approvals must be rejected");
+    assert!(
+        format!("{err:?}").contains("insufficient approvals"),
+        "error must indicate insufficient approvals, got: {err:?}"
+    );
+}
+
 // ─── SEC-004 compile-time assertions ─────────────────────────────────────────
 // These functions verify at compile time that all share data structs implement
 // ZeroizeOnDrop. They are never called at runtime but will fail to compile if
