@@ -1077,3 +1077,309 @@ Run: 2026-03-16 on branch `agent/r6-security` (representative of main + Wave 2 d
 
 **`futures = "0.3"` (added by T-S3-01): NO new advisories.** All five advisories were present
 on `main` before Wave 2 branches. No new CVEs introduced by any of the three Wave 2 branches.
+
+---
+
+## Sprint 16 Audit: DEC-015 Distributed Architecture
+
+### Audit Date: 2026-03-19
+### Auditor: R6 Security Agent
+
+### Scope
+
+Full security audit of the DEC-015 distributed architecture introduced in Sprint 15:
+- Gateway (orchestrator) holds ZERO key shares — delegates to MPC nodes via NATS
+- Each MPC node holds exactly 1 party's share in `EncryptedFileStore`
+- `SignAuthorization` verification at MPC nodes before signing (DEC-012)
+- Control plane message integrity
+- Key material lifecycle
+
+### Files Reviewed
+
+- `services/api-gateway/src/orchestrator.rs` — `MpcOrchestrator`, `WalletMetadata`
+- `services/api-gateway/src/state.rs` — `AppState` (line 393-395: orchestrator field)
+- `services/mpc-node/src/main.rs` — `NodeConfig`, `execute_keygen`, `execute_sign`, handlers
+- `services/mpc-node/src/rpc.rs` — re-export of shared RPC types
+- `crates/mpc-wallet-core/src/rpc/mod.rs` — `KeygenRequest/Response`, `SignRequest/Response`, `FreezeRequest`
+- `crates/mpc-wallet-core/src/protocol/sign_authorization.rs` — `SignAuthorization::verify()` (6 checks)
+- `crates/mpc-wallet-core/src/transport/nats.rs` — `NatsTransport`, `SignedEnvelope` usage
+- `crates/mpc-wallet-core/src/protocol/mod.rs` — `KeyShare.share_data: Zeroizing<Vec<u8>>`
+- `crates/mpc-wallet-core/src/key_store/encrypted.rs` — `EncryptedFileStore` password zeroization
+
+### Findings Summary
+
+| ID | Severity | Summary | Status |
+|----|----------|---------|--------|
+| SEC-025 | MEDIUM | MPC nodes skip SignAuthorization verification when GATEWAY_PUBKEY is not configured | OPEN |
+| SEC-026 | MEDIUM | Control plane messages (mpc.control.*) are plain JSON — no SignedEnvelope, no authentication | OPEN |
+| SEC-027 | MEDIUM | Orchestrator generates ephemeral peer keys during keygen/sign — nodes receive wrong keys | OPEN |
+| SEC-028 | LOW | NodeConfig.key_store_password is plain String — not Zeroizing after EncryptedFileStore init | OPEN |
+| SEC-029 | LOW | NodeConfig.signing_key is never explicitly zeroized/dropped | OPEN |
+| SEC-030 | LOW | No rate limiting on NATS control channels — DoS vector for mpc.control.* subscribers | OPEN |
+| SEC-031 | LOW | No authentication on NATS connection from MPC nodes — any client can publish to control channels | OPEN |
+| SEC-032 | INFO | Gateway holds zero key shares — DEC-015 core invariant verified (positive finding) | N/A |
+| SEC-033 | INFO | Each MPC node stores only its own party's share — single-share invariant verified (positive finding) | N/A |
+
+### Detailed Findings
+
+#### SEC-025: MPC Nodes Skip SignAuthorization When GATEWAY_PUBKEY Not Set
+
+- **ID:** SEC-025
+- **Severity:** MEDIUM
+- **File:** `services/mpc-node/src/main.rs`, lines 395-438 (`execute_sign`)
+- **Description:**
+  The `execute_sign` function only verifies `SignAuthorization` when `config.gateway_pubkey`
+  is `Some(...)`. When `GATEWAY_PUBKEY` env var is not set, the entire verification block is
+  skipped — nodes will sign any message sent via the control channel without checking
+  authorization, policy, or approval quorum.
+
+  ```rust
+  if let Some(ref gateway_pubkey) = config.gateway_pubkey {
+      // ... verification happens here ...
+  }
+  // If None: signing proceeds without any authorization check
+  ```
+
+- **Impact:** If a deployment omits `GATEWAY_PUBKEY` (e.g., misconfiguration, dev defaults),
+  the entire SignAuthorization security model (DEC-012) is silently disabled. An attacker
+  with NATS access can request signing of arbitrary messages.
+- **Recommendation:**
+  1. In production mode, make `GATEWAY_PUBKEY` required (panic on startup if missing).
+  2. At minimum, log a WARN on every sign request when `GATEWAY_PUBKEY` is None.
+  3. Consider adding a `--allow-unsigned` flag that must be explicitly set for dev/test use.
+  4. Document `GATEWAY_PUBKEY` as a mandatory deployment requirement.
+
+---
+
+#### SEC-026: Control Plane Messages Are Unauthenticated Plain JSON
+
+- **ID:** SEC-026
+- **Severity:** MEDIUM
+- **File:** `services/mpc-node/src/main.rs`, lines 110-131 (NATS subscriptions);
+  `services/api-gateway/src/orchestrator.rs`, lines 137-144 (publish keygen);
+  `crates/mpc-wallet-core/src/rpc/mod.rs` (message types)
+- **Description:**
+  Protocol-level messages between MPC parties use `SignedEnvelope` with Ed25519 signatures
+  and replay protection (SEC-007 fix). However, control plane messages on `mpc.control.*`
+  subjects are plain JSON published directly to NATS without any envelope, signature, or
+  authentication.
+
+  The orchestrator publishes `KeygenRequest`, `SignRequest`, and `FreezeRequest` as raw
+  `serde_json::to_vec()` payloads. Nodes deserialize these directly without verifying the
+  sender's identity.
+
+  An attacker with NATS access could:
+  - Publish fake `SignRequest` messages to trigger unauthorized signing (mitigated by SEC-025 if GATEWAY_PUBKEY is set)
+  - Publish `FreezeRequest` to freeze/unfreeze key groups
+  - Publish fake `KeygenRequest` to initiate rogue keygen ceremonies
+  - Inject fake `KeygenResponse`/`SignResponse` on reply channels to confuse the orchestrator
+
+- **Impact:** Any NATS client can impersonate the gateway on control channels. The
+  SignAuthorization (SEC-025) mitigates the signing case, but freeze and keygen control
+  messages have no equivalent protection.
+- **Recommendation:**
+  1. Wrap control plane messages in `SignedEnvelope` using the gateway's Ed25519 signing key.
+  2. MPC nodes should verify control messages against the same `GATEWAY_PUBKEY`.
+  3. Use NATS authorization (user/password or NKey) to restrict who can publish to `mpc.control.*`.
+
+---
+
+#### SEC-027: Orchestrator Generates Ephemeral Peer Keys That Don't Match Node Keys
+
+- **ID:** SEC-027
+- **Severity:** MEDIUM
+- **File:** `services/api-gateway/src/orchestrator.rs`, lines 108-118 (keygen peer_keys),
+  lines 278-289 (sign peer_keys)
+- **Description:**
+  During both `keygen()` and `sign()`, the orchestrator generates fresh random Ed25519 keys
+  for each party and sends them in the `peer_keys` field of the request. However, the MPC
+  nodes use their own persistent `NODE_SIGNING_KEY` for envelope signing (line 238-243 of
+  `mpc-node/src/main.rs`). The orchestrator-generated keys do not match the nodes' actual
+  signing keys.
+
+  In `execute_keygen` and `execute_sign`, the node calls `register_peer_key()` with the
+  keys from the request (lines 259-269, 475-485), meaning each node expects to verify
+  messages from peers using the orchestrator-generated keys — but peers are actually signing
+  with their persistent `NODE_SIGNING_KEY`.
+
+  This means either:
+  (a) The envelope verification will always fail (breaking the protocol), or
+  (b) In the current simulated keygen/sign flow, the protocol never actually exchanges
+  envelope-wrapped messages between nodes (the protocol runs locally).
+
+  In either case, the peer key distribution mechanism is broken for a real distributed
+  deployment.
+
+- **Impact:** In a real multi-node deployment, protocol messages would fail envelope
+  verification because the registered peer keys don't match the actual signing keys.
+  This is currently masked by the protocol running in simulation mode.
+- **Recommendation:**
+  1. Nodes should register each other's actual `NODE_SIGNING_KEY` verifying keys.
+  2. The orchestrator should either: (a) not generate peer keys and let nodes discover each
+     other's keys via a registration protocol, or (b) collect each node's actual verifying
+     key during a setup phase and distribute those.
+
+---
+
+#### SEC-028: NodeConfig.key_store_password Not Zeroized
+
+- **ID:** SEC-028
+- **Severity:** LOW
+- **File:** `services/mpc-node/src/main.rs`, lines 40, 56-57
+- **Description:**
+  `NodeConfig.key_store_password` is stored as a plain `String`. Although the
+  `EncryptedFileStore` internally wraps it in `Zeroizing<String>` (SEC-005 fix), the
+  original `String` in `NodeConfig` is not zeroized and persists in memory for the
+  lifetime of the `Arc<NodeConfig>`.
+
+- **Impact:** The key store password remains in memory in plain form. Memory dumps or
+  process inspection could reveal it.
+- **Recommendation:** Change `NodeConfig.key_store_password` to `Zeroizing<String>` or
+  consume/drop the password after passing it to `EncryptedFileStore::new()`.
+
+---
+
+#### SEC-029: Node Signing Key Lifetime
+
+- **ID:** SEC-029
+- **Severity:** LOW
+- **File:** `services/mpc-node/src/main.rs`, lines 41, 59-65
+- **Description:**
+  The `NodeConfig.signing_key` (`ed25519_dalek::SigningKey`) is held in `Arc<NodeConfig>`
+  for the entire process lifetime. The intermediate `key_bytes` and `arr` used during
+  parsing (lines 61-65) are stack variables that are not explicitly zeroized. While `arr`
+  is 32 bytes on the stack and will be overwritten eventually, it is not deterministically
+  cleared.
+
+  Additionally, `signing_key_hex` (the hex string from the environment) is a plain `String`
+  that is not zeroized after use.
+
+- **Impact:** Low — the signing key needs to remain available for the node's lifetime.
+  The hex string and intermediate byte arrays on the stack are the primary concern.
+- **Recommendation:** Zeroize `arr` and `signing_key_hex` after `SigningKey::from_bytes()`.
+
+---
+
+#### SEC-030: No Rate Limiting on NATS Control Channels
+
+- **ID:** SEC-030
+- **Severity:** LOW
+- **File:** `services/mpc-node/src/main.rs`, lines 117-131 (subscriptions)
+- **Description:**
+  MPC nodes subscribe to wildcard control channels (`mpc.control.keygen.*`,
+  `mpc.control.sign.*`, `mpc.control.freeze.*`) and process every incoming message
+  without rate limiting. A malicious or malfunctioning client could flood these channels,
+  causing nodes to spawn unbounded tasks (each `tokio::spawn` in `handle_keygen_requests`
+  and `handle_sign_requests`).
+
+- **Impact:** Resource exhaustion (CPU, memory, file descriptors) on MPC nodes.
+- **Recommendation:**
+  1. Add a semaphore to limit concurrent keygen/sign operations.
+  2. Rate-limit by group_id or source.
+  3. Use NATS JetStream with consumer limits (existing Epic E5 work).
+
+---
+
+#### SEC-031: No NATS Connection Authentication
+
+- **ID:** SEC-031
+- **Severity:** LOW
+- **File:** `services/mpc-node/src/main.rs`, line 110 (`async_nats::connect`)
+- **Description:**
+  The MPC node connects to NATS using `async_nats::connect(&config.nats_url)` with no
+  authentication credentials (no user/password, no NKey, no TLS client cert). The
+  orchestrator does the same in `orchestrator.rs` line 70.
+
+  While mTLS support exists for protocol-level NATS connections (`connect_signed_tls` in
+  `nats.rs`), the control plane connections do not use it.
+
+  If the NATS server is configured without authentication (common in dev), any network
+  client can connect and publish/subscribe to all subjects.
+
+- **Impact:** Combined with SEC-026, this allows any network-adjacent attacker to inject
+  control messages. NATS server-side auth configuration mitigates this, but it is not
+  enforced by the application.
+- **Recommendation:**
+  1. Support NATS NKey or user/password authentication in `NodeConfig`.
+  2. Document NATS server-side authorization as a deployment requirement.
+  3. Consider using `connect_signed_tls` for the control plane connection as well.
+
+---
+
+#### SEC-032: Gateway Holds Zero Key Shares (Positive Finding)
+
+- **ID:** SEC-032
+- **Severity:** INFO
+- **Description:**
+  Verified that the DEC-015 core invariant is correctly implemented:
+  - `WalletMetadata` (`orchestrator.rs` line 30-38) contains only: `group_id`, `label`,
+    `scheme`, `config`, `group_public_key`, `created_at`, `frozen`. No `KeyShare`,
+    `share_data`, or any secret key material.
+  - `AppState` (`state.rs` line 393-395) contains only `orchestrator: MpcOrchestrator`.
+    No `KeyStore`, `EncryptedFileStore`, or share storage.
+  - `MpcOrchestrator` stores `wallets: HashMap<String, WalletMetadata>` — metadata only.
+  - Log message at line 241: "keygen complete — metadata stored (NO shares in gateway)".
+  - The gateway never calls `protocol.keygen()` or `protocol.sign()` — it only publishes
+    NATS requests and collects responses.
+
+---
+
+#### SEC-033: Each Node Stores Only Its Own Share (Positive Finding)
+
+- **ID:** SEC-033
+- **Severity:** INFO
+- **Description:**
+  Verified single-share-per-node invariant:
+  - `execute_keygen` saves share using `key_store.save(&group_id, &metadata, config.party_id, &share)`
+    (line 292-294) — only `config.party_id`'s share is saved.
+  - `execute_sign` loads share using `key_store.load(&group_id, config.party_id)` (line 381) —
+    only `config.party_id`'s share is loaded.
+  - `protocol.keygen()` is called with `config.party_id` — returns only this party's share.
+  - `KeyShare.share_data` uses `Zeroizing<Vec<u8>>` (SEC-004 root fix confirmed in
+    `protocol/mod.rs` line 104).
+
+---
+
+### Additional Observations
+
+1. **SignAuthorization verification is thorough when enabled.** The 6 checks in
+   `sign_authorization.rs` (lines 110-187) are well-implemented: pubkey match, signature
+   verification, freshness (2-min TTL with `abs_diff`), message binding (SHA-256 hash match),
+   policy check, and approval quorum. Nine unit tests cover all rejection cases.
+
+2. **`EncryptedFileStore` password zeroization is correct.** The `EncryptedFileStore`
+   internally wraps the password in `Zeroizing<String>` and the derived key in
+   `Zeroizing<[u8; 32]>` (SEC-005 fix confirmed). The residual issue is only at the
+   `NodeConfig` layer (SEC-028).
+
+3. **Protocol-level NATS messages are properly signed.** `NatsTransport::send()` wraps
+   every `ProtocolMessage` in a `SignedEnvelope` with Ed25519 signature and monotonic
+   `seq_no` for replay protection (SEC-007 fix). The gap is only on the control plane
+   (SEC-026).
+
+4. **Hardcoded NATS URL in keygen/sign.** `execute_keygen` and `execute_sign` use
+   `"nats://127.0.0.1:4222"` (lines 239, 454) instead of `config.nats_url`. This is
+   marked with a TODO comment. Not a security issue per se, but a correctness bug that
+   would prevent multi-host deployments.
+
+### Verdict
+
+**APPROVED** — with conditions.
+
+The DEC-015 distributed architecture correctly implements the core security invariants:
+- Gateway holds zero key shares (SEC-032 positive)
+- Each node stores only its own share (SEC-033 positive)
+- SignAuthorization provides independent verification at nodes (DEC-012)
+- Protocol messages are authenticated via SignedEnvelope (SEC-007)
+
+**No CRITICAL or HIGH findings.** The three MEDIUM findings (SEC-025, SEC-026, SEC-027)
+do not block merge but should be addressed before production deployment:
+
+- **SEC-025** is the most important: `GATEWAY_PUBKEY` must be documented as mandatory
+  for production, and nodes should refuse to sign without it.
+- **SEC-026** should be addressed as part of control plane hardening (can be deferred
+  to a security hardening sprint).
+- **SEC-027** is an integration issue that will surface during real multi-node testing.
+
+The LOW findings (SEC-028 through SEC-031) are defense-in-depth improvements that
+should be tracked for future sprints.
