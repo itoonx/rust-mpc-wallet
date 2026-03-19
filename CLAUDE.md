@@ -95,7 +95,7 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 18 — control plane hardening, CI green)
+## Current State (as of Sprint 19 — CGGMP21 foundation, CI green)
 
 ### Auth System (3 methods, Redis-ready)
 
@@ -197,7 +197,7 @@ Gateway (creates proof)    →    MPC Node (verifies before sign)
 
 ### Tests on `main`
 ```
-553 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
+565 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
 cargo fmt        clean
 cargo clippy     clean (0 warnings, -D warnings)
 cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
@@ -216,8 +216,18 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 - **Sprint 16:** COMPLETE — FROST keygen over NATS, request-reply control plane, 14 new chain tests, real SignAuthorization in gateway, E2E re-enabled, DEC-015 security audit (SEC-025..031)
 - **Sprint 17:** COMPLETE — Security hardening (SEC-008, SEC-013, SEC-014, SEC-017, SEC-019, SEC-023, SEC-025 resolved), authorization_id replay protection, 10 security regression tests
 - **Sprint 18:** COMPLETE — Control plane hardening (SEC-026 signed control messages, AuthorizationCache replay dedup, 5 hardening integration tests, R6 audit APPROVED)
+- **Sprint 19:** COMPLETE — CGGMP21 Foundation (CryptoScheme::Cggmp21Secp256k1, Feldman VSS keygen, Paillier+Pedersen aux info, 12 new protocol tests)
 
-**All 10 epics: 100% COMPLETE | Milestone 1 (Security Hardening): COMPLETE**
+**All 10 epics: 100% COMPLETE | Milestone 1: COMPLETE | Milestone 2 (CGGMP21): IN PROGRESS**
+
+### New in Sprint 19
+- `CryptoScheme::Cggmp21Secp256k1` variant added to type system (R0)
+- `Cggmp21Protocol` implementing `MpcProtocol` trait with full keygen (R1)
+- CGGMP21 keygen: 3-round DKG with Feldman VSS, Schnorr proofs of knowledge, commitment scheme
+- Auxiliary info: simulated Paillier key pairs (N, p, q) + Pedersen parameters (s, t, N_hat)
+- `Cggmp21ShareData` with `Zeroizing` secret share, public shares, group pubkey, aux info
+- Wired into mpc-node, api-gateway, and CLI (all match arms updated)
+- 12 new tests (keygen 2-of-3, keygen 3-of-5, share format, aux info, scheme display/parse)
 
 ### New in Sprint 18
 - SEC-026 FIX: All control plane messages (keygen/sign/freeze) Ed25519-signed by gateway, verified by MPC nodes before processing

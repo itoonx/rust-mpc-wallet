@@ -60,6 +60,9 @@ pub async fn run(args: KeygenArgs, format: OutputFormat) -> anyhow::Result<()> {
         CryptoScheme::Bls12_381Threshold => {
             Box::new(mpc_wallet_core::protocol::bls12_381::Bls12_381Protocol::new())
         }
+        CryptoScheme::Cggmp21Secp256k1 => {
+            Box::new(mpc_wallet_core::protocol::cggmp21::Cggmp21Protocol::new())
+        }
     };
 
     // Create local transport for demo mode (all parties in one process)
@@ -102,6 +105,9 @@ pub async fn run(args: KeygenArgs, format: OutputFormat) -> anyhow::Result<()> {
                 }
                 CryptoScheme::Bls12_381Threshold => {
                     Box::new(mpc_wallet_core::protocol::bls12_381::Bls12_381Protocol::new())
+                }
+                CryptoScheme::Cggmp21Secp256k1 => {
+                    Box::new(mpc_wallet_core::protocol::cggmp21::Cggmp21Protocol::new())
                 }
             };
             protocol.keygen(config_clone, party_id, &*transport).await
