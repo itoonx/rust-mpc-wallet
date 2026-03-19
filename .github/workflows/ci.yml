@@ -164,6 +164,6 @@ jobs:
           # All E2E tests: full_flow + chain_signing + distributed (NATS request-reply)
           # --features local-transport needed because integration tests are external crates
           # (cfg(test) only applies to unit tests inside the crate)
-          cargo test -p mpc-wallet-core --test e2e_tests --features local-transport -- --ignored --test-threads=1
+          cargo test -p mpc-wallet-core --test e2e_tests --features local-transport -- --ignored
           # Kill gateway so the job can exit
           kill $(cat /tmp/gateway.pid) 2>/dev/null || true
