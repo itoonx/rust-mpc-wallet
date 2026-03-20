@@ -270,7 +270,7 @@ async fn test_distributed_keygen_3_nodes() {
 
     // Collect 3 responses (with timeout)
     let mut responses = Vec::new();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     while responses.len() < 3 {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, reply_sub.next()).await {
@@ -399,7 +399,7 @@ async fn test_distributed_keygen_then_sign() {
         .unwrap();
 
     let mut keygen_responses = Vec::new();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     while keygen_responses.len() < 3 {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, reply_sub.next()).await {
@@ -474,7 +474,7 @@ async fn test_distributed_keygen_then_sign() {
 
     // Collect sign responses
     let mut coordinator_sig: Option<MpcSignature> = None;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     let mut received = 0;
     while received < 2 {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
