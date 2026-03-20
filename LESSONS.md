@@ -651,3 +651,59 @@ Each test uses `unique_session_id()` (UUID) for NATS subject isolation. Tests th
 **Takeaway:**
 > E2E tests sharing live infrastructure must use unique namespaces (session IDs, Redis key prefixes, Vault paths) to prevent cross-test pollution.
 > `--test-threads=1` reveals ordering bugs that `--test-threads=N` hides via parallelism.
+
+---
+
+## Performance Lessons
+
+### LESSON-018: Don't Inflate Timeouts to Work Around Slow Algorithms
+- **Date:** 2026-03-20
+- **Category:** Architecture
+- **Severity:** Medium
+- **Found by:** During Sprint 28 Paillier performance fix
+
+**What happened:**
+`num-bigint` pure Rust safe prime generation took 8+ min per 512-bit keypair. Rather than fixing
+the algorithm, all timeouts were inflated: SignedEnvelope TTL 30s→300s, E2E deadline 60s→300s,
+CI timeout 10min→20min. This masked the real problem and made CI unreliable (19 min builds).
+
+**Root cause:**
+Manual Miller-Rabin primality testing on `num-bigint::BigUint` is catastrophically slow because
+`modpow()` isn't optimized for repeated testing of random candidates.
+
+**Fix / Resolution:**
+Replaced with `glass_pumpkin` crate (pure Rust, Apache-2.0, Baillie-PSW internally). 512-bit
+safe prime: ~200ms. Reverted all inflated timeouts to original values. Added `test_keypair()`
+via `LazyLock` to cache a 512-bit keypair across all tests.
+
+**Takeaway:**
+> The correct fix for "algorithm is too slow" is to fix the algorithm, not inflate every
+> timeout in the system. Inflated timeouts mask real bugs and make CI slow and unreliable.
+
+---
+
+### LESSON-019: Skip Hacks Accumulate Security Debt
+- **Date:** 2026-03-20
+- **Category:** Security
+- **Severity:** Medium
+- **Found by:** During Sprint 28 Paillier performance fix
+
+**What happened:**
+`skip_real_paillier` / `skip_gg20_paillier` conditionals injected dummy Paillier keys
+(all-zeros) in test mode, skipping ZK proof generation and verification entirely. Tests
+passed without actually testing the Paillier proof flow — the proofs could have been
+broken and no test would have caught it.
+
+**Root cause:**
+Safe prime generation was too slow for tests, so the entire Paillier flow was bypassed
+rather than finding a fast-enough implementation or caching test keys.
+
+**Fix / Resolution:**
+Replaced skip hacks with `test_keypair()` — a cached 512-bit keypair generated once via
+`LazyLock`. All tests now run real Paillier keygen, ZK proof generation (Πmod + Πfac),
+and proof verification. No more dummy keys anywhere.
+
+**Takeaway:**
+> Never skip security-critical code paths in tests. If a crypto operation is too slow,
+> use smaller parameters or cache test keys — but always execute the full protocol.
+> Dummy keys that bypass ZK proofs are worse than no tests at all (false confidence).

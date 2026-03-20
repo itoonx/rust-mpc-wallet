@@ -50,6 +50,7 @@ jsonwebtoken = { workspace = true }
 # Utilities
 hex = { workspace = true }
 uuid = { workspace = true }
+glass_pumpkin = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }
 num-integer = { workspace = true }

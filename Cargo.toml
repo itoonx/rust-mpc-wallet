@@ -78,6 +78,7 @@ hex = "0.4"
 bs58 = "0.5"
 bech32 = "0.11"
 uuid = { version = "1", features = ["v4", "serde"] }
+glass_pumpkin = "1"
 num-bigint = "0.4"
 num-traits = "0.2"
 num-integer = "0.1"

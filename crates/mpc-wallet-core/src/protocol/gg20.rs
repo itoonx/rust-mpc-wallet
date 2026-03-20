@@ -26,25 +26,20 @@
 //!    `R = k·G`, extracts `r = R.x mod n`, and computes `k_inv = k⁻¹ mod n`.
 //! 3. Party 1 broadcasts `(r, k_inv)` to all other signers.
 //! 4. Each party `i` computes its **partial signature contribution**:
-//!    `s_i = x_i_add · r · k_inv = λ_i · f(i) · r · k_inv  mod n`
-//!    This is a single scalar multiplication.  The full key `x` is never
-//!    computed anywhere.
-//! 5. Party 1 collects all `s_i` and assembles the signature:
-//!    `s = hash · k_inv + Σ s_i  mod n`
-//!    where `hash = H(message)` reduced mod n.
-//! 6. The result `(r, s)` is a standard ECDSA signature over secp256k1.
+//!    `s_i = x_i_add · r · k_inv  mod n`.
+//! 5. Each party sends `s_i` to the coordinator (Party 1).
+//! 6. The coordinator assembles: `s = hash · k_inv + Σ s_i  mod n`.
 //!
 //! **Correctness:**
 //! ```text
-//! s = k⁻¹(hash + x·r)
-//!   = hash·k_inv + x·r·k_inv
-//!   = hash·k_inv + (Σ x_i_add)·r·k_inv
-//!   = hash·k_inv + Σ (λ_i · f(i) · r · k_inv)
-//!   = hash·k_inv + Σ s_i
+//! s = hash · k_inv + Σ (x_i_add · r · k_inv)
+//!   = k_inv · (hash + r · Σ x_i_add)
+//!   = k_inv · (hash + r · x)
 //! ```
-//! The full key `x` is never assembled.  Party 1 holds `k`, so this scheme
-//! is **honest-but-curious** secure for Party 1.  Sprint 3 will add
-//! distributed nonce generation to remove this trust assumption.
+//!
+//! **Note:** The coordinator currently controls nonce generation. A future
+//! enhancement will use Paillier MtA-based distributed nonce (see
+//! `crate::paillier::mta`) to eliminate this trust assumption.
 //!
 //! ## `gg20-simulation` (OFF by default — INSECURE — backward compat only)
 //!
@@ -101,12 +96,8 @@ struct Gg20ShareData {
     all_paillier_pks: Option<Vec<PaillierPublicKey>>,
 }
 
-/// Default Paillier key size for tests (fast, ~10ms).
-#[cfg(any(test, feature = "local-transport"))]
-const GG20_PAILLIER_BITS: usize = 512;
-
-/// Default Paillier key size for production (secure, ~1-5s).
-#[cfg(not(any(test, feature = "local-transport")))]
+/// Default Paillier key size for production (secure, ~10s with glass_pumpkin).
+/// In test mode, `keypair_for_protocol()` ignores this and returns a cached 512-bit keypair.
 const GG20_PAILLIER_BITS: usize = 2048;
 
 /// GG20 auxiliary info broadcast (Paillier PK + ZK proofs).
@@ -384,7 +375,8 @@ async fn distributed_keygen(
     };
 
     // ── Phase 2: Paillier key generation + ZK proof exchange (Sprint 28) ──
-    let (real_pk, real_sk) = crate::paillier::keygen::generate_paillier_keypair(GG20_PAILLIER_BITS);
+    let (real_pk, real_sk) = crate::paillier::keygen::keypair_for_protocol(GG20_PAILLIER_BITS);
+
     let p_big = BigUint::from_bytes_be(&real_sk.p);
     let q_big = BigUint::from_bytes_be(&real_sk.q);
     let n_big = real_pk.n_biguint();
@@ -420,7 +412,6 @@ async fn distributed_keygen(
     }
     all_aux.sort_by_key(|a| a.party_index);
 
-    // Verify Πmod + Πfac proofs from all parties
     for aux in &all_aux {
         if aux.party_index == party_id.0 {
             continue;
@@ -428,13 +419,13 @@ async fn distributed_keygen(
         let peer_n = aux.paillier_pk.n_biguint();
         if !verify_pimod(&peer_n, &aux.pimod_proof) {
             return Err(CoreError::Protocol(format!(
-                "GG20: Πmod proof failed for party {} — invalid Paillier key",
+                "GG20: Πmod proof failed for party {}",
                 aux.party_index
             )));
         }
         if !verify_pifac(&peer_n, &aux.pifac_proof) {
             return Err(CoreError::Protocol(format!(
-                "GG20: Πfac proof failed for party {} — Paillier key has small factors",
+                "GG20: Πfac proof failed for party {}",
                 aux.party_index
             )));
         }
@@ -472,24 +463,31 @@ async fn distributed_keygen(
 ///
 /// # Security property
 ///
-/// Each party holds a Shamir share `f(i)`.  The full key `x = Σ λ_i·f(i)`
-/// (where the sum is over the signing set) is **never computed** by any party.
-/// Instead, each party computes its additive contribution locally and applies
-/// it directly to the signature partial:
+/// Each party holds a Shamir share `f(i)`.  At signing time the shares are
+/// converted to *additive* shares via Lagrange interpolation, and each party
+/// computes only a *partial* signature contribution on its own local share.
+/// The coordinator (Party 1) assembles the final `(r, s)` from all partials.
 ///
-/// ```text
-/// x_i_add = λ_i · f(i)           // additive share (computed locally, never sent)
-/// s_i     = x_i_add · r · k_inv   // partial sig contribution (sent to Party 1)
-/// ```
+/// The full key `x = f(0) = Σ λ_i · f(i)` is **never** held in memory by
+/// any party — not even the coordinator.
 ///
-/// Party 1 assembles `s = hash·k_inv + Σ s_i`.  The full key is never present
-/// on any single machine at any point.
+/// # Protocol (2 rounds)
 ///
-/// # Protocol
+/// **Round 1 (coordinator → all):**
+///   Coordinator draws ephemeral nonce `k`, computes `R = k·G`, `r = R.x`,
+///   `k_inv = k⁻¹`, and broadcasts `(r, k_inv)`.
 ///
-/// **Round 1** — Coordinator (Party 1) broadcasts `(r, k_inv)`.
-/// **Round 2** — Each party sends `s_i` to Party 1.
-/// **Assembly** — Party 1 computes `s = hash·k_inv + Σ s_i`.
+/// **Round 2 (all → coordinator):**
+///   Each party computes `s_i = x_i_add · r · k_inv` and sends to coordinator.
+///   Coordinator computes `s = hash · k_inv + Σ s_i`, normalizes, outputs `(r, s)`.
+///
+/// # Note on coordinator nonce
+///
+/// The coordinator currently controls nonce generation. A future improvement
+/// (DEC-017) will use MtA-based distributed nonce with commitment-reveal to
+/// eliminate this trust assumption. The Paillier MtA infrastructure is in place
+/// (see `crate::paillier::mta`), but wiring it into the signing protocol is
+/// deferred to a future sprint.
 #[cfg(not(feature = "gg20-simulation"))]
 async fn distributed_sign(
     key_share: &KeyShare,
@@ -500,16 +498,11 @@ async fn distributed_sign(
     use sha2::Digest;
 
     // Deserialize our Shamir share.
-    // SEC-004 root fix (T-S4-00): share_data is now Zeroizing<Vec<u8>>.
-    // Cloning it produces another Zeroizing<Vec<u8>> — no need to wrap again.
-    // The deserialized Gg20ShareData derives ZeroizeOnDrop, ensuring the scalar
-    // bytes (y field) are erased after use.
     let share_data_copy = key_share.share_data.clone();
     let my_share: Gg20ShareData = serde_json::from_slice(&share_data_copy)
         .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
-    // SEC-008 FIX: wrap secret-derived scalars in Zeroizing to ensure they are
-    // wiped from memory after signing completes.
+    // SEC-008 FIX: wrap secret-derived scalars in Zeroizing.
     let shamir_y = Zeroizing::new(
         Scalar::from_repr(*k256::FieldBytes::from_slice(&my_share.y))
             .into_option()
@@ -517,13 +510,12 @@ async fn distributed_sign(
     );
 
     // Compute the Lagrange coefficient λ_i for our party in the actual signer set.
-    // This turns our Shamir share into an additive share: x_i_add = λ_i · f(i).
     let signer_indices: Vec<u16> = signers.iter().map(|p| p.0).collect();
     let lambda_i = lagrange_coefficient(my_share.x, &signer_indices)?;
 
     // Additive share: x_i_add = λ_i · f(i).
     // The full key x = Σ x_i_add is NEVER computed.
-    // SEC-008 FIX: x_i_add is zeroized on drop (wrapping in Zeroizing).
+    // SEC-008 FIX: x_i_add is zeroized on drop.
     let x_i_add = Zeroizing::new(lambda_i * *shamir_y);
 
     let is_coordinator = key_share.party_id == PartyId(1);
@@ -536,7 +528,6 @@ async fn distributed_sign(
         let r_point = (ProjectivePoint::GENERATOR * k).to_affine();
 
         // Extract r = R.x mod n.
-        // Compressed SEC1 point: [0x02 or 0x03][32 bytes x][nothing] — 33 bytes total.
         let r_point_bytes = {
             use k256::elliptic_curve::group::GroupEncoding;
             r_point.to_bytes()
@@ -632,12 +623,6 @@ async fn distributed_sign(
         }
 
         // Assemble final signature: s = hash·k_inv + Σ s_i
-        //
-        // The hash must be converted to a scalar using bits2int reduction (RFC 6979 §2.3.2),
-        // which is `hash mod n` — equivalent to `Reduce::reduce_bytes`.
-        // We must NOT use `from_repr` here: it rejects values >= n, whereas the
-        // correct ECDSA hash-to-scalar always reduces mod n (same as k256 internally does
-        // via `Scalar::reduce_bytes` in ecdsa::hazmat::sign_prehashed).
         let hash_bytes = sha2::Sha256::digest(message);
         use k256::elliptic_curve::ops::Reduce;
         use k256::U256;
@@ -647,11 +632,6 @@ async fn distributed_sign(
         let s = hash_scalar * k_inv_scalar + s_sum;
 
         let r_bytes_arr: [u8; 32] = r_scalar.to_repr().into();
-
-        // k256 enforces low-s: `verify_prehashed` returns Err if s > n/2.
-        // Normalize s to the lower half: if s is "high" (> n/2), use n - s instead.
-        // Both (r, s) and (r, n-s) are valid ECDSA signatures for the same message;
-        // low-s is the canonical form used by k256 and Bitcoin/Ethereum.
         let s_bytes_arr: [u8; 32] = s.to_repr().into();
         let mut sig_bytes_build = [0u8; 64];
         sig_bytes_build[..32].copy_from_slice(&r_bytes_arr);
@@ -659,14 +639,12 @@ async fn distributed_sign(
         let raw_sig = k256::ecdsa::Signature::from_bytes(&sig_bytes_build.into())
             .map_err(|e| CoreError::Crypto(format!("assembled invalid ECDSA signature: {e}")))?;
 
-        // Normalize s (no-op if already low-s).
-        let (normalized_sig, s_was_high) = match raw_sig.normalize_s() {
+        // Low-s normalization (SEC-012 / EIP-2).
+        let (normalized_sig, _s_was_high) = match raw_sig.normalize_s() {
             Some(normalized) => (normalized, true),
             None => (raw_sig, false),
         };
-        let _ = s_was_high; // used only for recovery_id correction below
 
-        // Extract final r,s bytes from the (possibly normalized) signature.
         let norm_sig_bytes = normalized_sig.to_bytes();
         let final_r: [u8; 32] = norm_sig_bytes[..32].try_into().unwrap();
         let final_s: [u8; 32] = norm_sig_bytes[32..].try_into().unwrap();
@@ -679,9 +657,13 @@ async fn distributed_sign(
         let recovery_id = (0u8..4)
             .find(|&v| {
                 let recid = k256::ecdsa::RecoveryId::try_from(v).unwrap();
-                k256::ecdsa::VerifyingKey::recover_from_prehash(&hash_bytes, &normalized_sig, recid)
-                    .map(|recovered| recovered == verifying_key)
-                    .unwrap_or(false)
+                k256::ecdsa::VerifyingKey::recover_from_prehash(
+                    &hash_bytes,
+                    &normalized_sig,
+                    recid,
+                )
+                .map(|recovered| recovered == verifying_key)
+                .unwrap_or(false)
             })
             .unwrap_or(0);
 

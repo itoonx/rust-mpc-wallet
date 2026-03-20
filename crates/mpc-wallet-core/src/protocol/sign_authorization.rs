@@ -265,6 +265,14 @@ impl AuthorizationCache {
             self.prune_with_now(now);
         }
 
+        // Hard reject if still at capacity after prune — prevents unbounded memory growth.
+        // Legitimate traffic retries after entries expire; attack traffic is rate-limited.
+        if self.seen.len() >= self.max_entries {
+            return Err(CoreError::Protocol(
+                "authorization cache at capacity — try again after entries expire".into(),
+            ));
+        }
+
         // Check for replay — entry exists and hasn't expired.
         if let Some(&expiry) = self.seen.get(auth_id) {
             if now < expiry {
@@ -580,5 +588,92 @@ mod tests {
             cache.seen.contains_key("fresh-auth"),
             "fresh entry should survive pruning"
         );
+    }
+
+    #[test]
+    fn test_authorization_cache_burst_exceeds_capacity() {
+        // Create a cache with small capacity
+        let mut cache = AuthorizationCache::new(5);
+
+        // Insert exactly max_entries (5) entries — all with TTL=120s
+        for i in 0..5 {
+            let auth_id = format!("auth-burst-{i}");
+            let result = cache.check_and_record(&auth_id, 120);
+            assert!(
+                result.is_ok(),
+                "inserting auth-burst-{i} should succeed: {result:?}"
+            );
+        }
+        assert_eq!(cache.len(), 5, "cache should be at capacity");
+
+        // Next insert should be REJECTED — cache is full, no expired entries to prune.
+        // This hard cap prevents unbounded memory growth under burst traffic.
+        let overflow_result = cache.check_and_record("auth-burst-overflow", 120);
+        assert!(
+            overflow_result.is_err(),
+            "insert beyond capacity must be rejected"
+        );
+        let err_msg = format!("{overflow_result:?}");
+        assert!(
+            err_msg.contains("at capacity"),
+            "error should mention capacity: {err_msg}"
+        );
+
+        // Replay of existing entry also rejected (capacity check runs before replay check)
+        let replay_result = cache.check_and_record("auth-burst-0", 120);
+        assert!(
+            replay_result.is_err(),
+            "replay at capacity must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_authorization_cache_capacity_with_mixed_expiry() {
+        // Create a cache with max_entries=6 (3 short-lived + room for 6 long-lived after prune)
+        let mut cache = AuthorizationCache::new(6);
+
+        // Insert 3 entries with TTL=1 (will expire in 1 second)
+        for i in 0..3 {
+            let auth_id = format!("auth-short-{i}");
+            let result = cache.check_and_record(&auth_id, 1);
+            assert!(result.is_ok(), "short-TTL insert should succeed");
+        }
+        assert_eq!(cache.len(), 3, "should have 3 short-lived entries");
+
+        // Wait for the short-TTL entries to expire
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // Insert 6 more entries with normal TTL.
+        // When the cache reaches max_entries (6), prune will run and evict
+        // the 3 expired entries, making room for the new ones.
+        for i in 0..6 {
+            let auth_id = format!("auth-long-{i}");
+            let result = cache.check_and_record(&auth_id, 120);
+            assert!(
+                result.is_ok(),
+                "long-TTL insert should succeed after expired entries are pruned"
+            );
+        }
+
+        // After pruning the 3 expired entries and inserting 6 new ones,
+        // the cache should contain exactly 6 entries (the long-lived ones).
+        assert_eq!(
+            cache.len(),
+            6,
+            "cache should contain only the 6 long-lived entries after pruning expired ones"
+        );
+
+        // Cache is now full — inserting the 7th should fail
+        let overflow_result = cache.check_and_record("auth-overflow", 120);
+        assert!(
+            overflow_result.is_err(),
+            "insert beyond capacity must be rejected"
+        );
+
+        // The expired short-TTL entries were pruned — they should NOT be treated as replays.
+        // But cache is full (6/6), so we need to prune first. Force prune by waiting
+        // (not possible here since long entries have 120s TTL). Instead, verify that
+        // the expired entries are indeed gone from the cache.
+        assert_eq!(cache.len(), 6, "cache stays at capacity");
     }
 }

@@ -52,6 +52,8 @@ retro/
 | L-008 | 2026-03-18 | Bug | High | NatsTransport::recv() re-subscribes per call — message loss — **FIXED** |
 | L-009 | 2026-03-18 | Architecture | Medium | GG20 signing requires Party 1 (coordinator) in signer subset — **DOCUMENTED** |
 | L-010 | 2026-03-18 | Testing | Low | E2E test ordering matters with shared NATS infrastructure — **MITIGATED** |
+| L-018 | 2026-03-20 | Architecture | Medium | Don't inflate timeouts to work around slow algorithms — **FIXED** |
+| L-019 | 2026-03-20 | Security | Medium | Skip hacks accumulate security debt — **FIXED** |
 
 ---
 
@@ -69,6 +71,8 @@ retro/
 |--------|-------|-------|-------------|
 | [SESSION_RETRO_AUTH](SESSION_RETRO_AUTH.md) | 2026-03-17 ~ 2026-03-18 | Auth system build (mTLS, Session JWT, Bearer JWT, Redis) | ~30 commits, +147 tests, 5 decisions, v0.2.0 |
 | [SESSION_RETRO_SPRINT15](SESSION_RETRO_SPRINT15.md) | 2026-03-18 | Production readiness (errors, Vault, NATS fix, sig verify, gateway wiring, benchmarks, CI E2E) | 5 phases, +18 tests, 5 bugs found, ~35 benchmarks |
+| [sessions/SESSION_RETRO_S18_S26](sessions/SESSION_RETRO_S18_S26.md) | 2026-03-19~20 | Sprints 18-26 (M1-M4 complete) | 9 sprints, +748 tests, 4 milestones |
+| [sessions/SESSION_RETRO_S28_PAILLIER_PERF](sessions/SESSION_RETRO_S28_PAILLIER_PERF.md) | 2026-03-20 | Sprint 28 Paillier perf fix (glass_pumpkin) | 801 tests, CI 19min→2.5min, all ZK proofs enabled |
 
 ---
 

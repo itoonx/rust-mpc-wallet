@@ -301,7 +301,8 @@ impl MpcOrchestrator {
     /// Request distributed signing via NATS.
     ///
     /// Publishes `SignRequest` with SignAuthorization to signer nodes,
-    /// waits for coordinator's response with the final signature.
+    /// waits for any node's response with the final signature.
+    /// DEC-017: all parties now return the same complete signature.
     pub async fn sign(
         &self,
         group_id: &str,
@@ -380,9 +381,10 @@ impl MpcOrchestrator {
             "sign request published, waiting for responses"
         );
 
-        // Wait for coordinator's response (Party 1 has the complete signature)
+        // DEC-017: all parties return the same complete signature.
+        // Accept the first valid response from any party.
         let deadline = tokio::time::Instant::now() + self.ceremony_timeout;
-        let mut coordinator_sig: Option<MpcSignature> = None;
+        let mut final_sig: Option<MpcSignature> = None;
 
         let expected_responses = signer_ids.len();
         let mut received = 0;
@@ -404,10 +406,11 @@ impl MpcOrchestrator {
                             )));
                         }
 
-                        // Coordinator (Party 1) returns the complete signature
-                        if resp.party_id == 1 {
+                        // DEC-017: every party returns the complete signature.
+                        // Accept the first valid one we receive.
+                        if final_sig.is_none() {
                             if let Some(ref sig_json) = resp.signature_json {
-                                coordinator_sig = serde_json::from_str(sig_json).ok();
+                                final_sig = serde_json::from_str(sig_json).ok();
                             }
                         }
 
@@ -419,9 +422,9 @@ impl MpcOrchestrator {
             }
         }
 
-        coordinator_sig.ok_or_else(|| {
+        final_sig.ok_or_else(|| {
             mpc_wallet_core::error::CoreError::Protocol(
-                "sign: coordinator did not return signature".into(),
+                "sign: no node returned a valid signature".into(),
             )
         })
     }

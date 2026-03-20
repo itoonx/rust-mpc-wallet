@@ -5,6 +5,17 @@
 
 ---
 
+## DEC-017: GG20 Distributed Nonce Generation
+
+- **Date:** 2026-03-20
+- **Status:** Proposed
+- **Context:** GG20 signing hardcodes Party 1 as coordinator controlling the ephemeral nonce. Compromised Party 1 → private key extraction via lattice attack.
+- **Decision:** Commitment-reveal nonce protocol (+2 rounds, no Paillier dependency). Each party commits H(k_i·G), reveals, computes R = Σ K_i. No party learns full k.
+- **Full spec:** `retro/decisions/DEC-017_distributed_nonce.md`
+- **Implementation:** Sprint 30 (after MtA wiring validated in Sprint 29)
+
+---
+
 ## DEC-004: Sprint 2 GG20 as Hard Commitment
 
 - **Date:** 2026-03-15

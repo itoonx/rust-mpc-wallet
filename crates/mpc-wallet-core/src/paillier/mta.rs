@@ -159,12 +159,12 @@ fn sample_mod_n(n: &BigUint) -> BigUint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paillier::keygen::generate_paillier_keypair;
+    use crate::paillier::keygen::test_keypair;
     use std::sync::LazyLock;
 
-    // Shared 512-bit keypair for speed.
+    // Shared 512-bit keypair — delegates to keygen::test_keypair() (process-wide LazyLock cache).
     static TEST_KEYS: LazyLock<(PaillierPublicKey, PaillierSecretKey)> =
-        LazyLock::new(|| generate_paillier_keypair(512));
+        LazyLock::new(test_keypair);
 
     /// Helper: run MtA and return (alpha, beta, n) as BigUints.
     fn run_mta(a_val: &BigUint, b_val: &BigUint) -> (BigUint, BigUint, BigUint) {

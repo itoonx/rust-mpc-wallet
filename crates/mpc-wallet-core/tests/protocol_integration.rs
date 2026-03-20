@@ -72,16 +72,14 @@ fn gg20_factory() -> Box<dyn MpcProtocol> {
 
 /// Distributed 2-of-3 keygen + sign: verify the ECDSA signature cryptographically.
 ///
-/// The full private key is NEVER reconstructed.  Each party contributes only
-/// its additive share `s_i = x_i_add · r · k_inv mod n`.  Party 1 assembles
-/// the final signature as `s = hash·k_inv + Σ s_i`.
+/// The full private key is NEVER reconstructed. Each party holds a Shamir share
+/// and computes only a partial signature contribution. The coordinator (Party 1)
+/// assembles the final signature.
 ///
 /// Structural proof that x is never assembled:
-/// - `distributed_keygen` distributes `x_i_add = λ_i · f(i)`, not `f(i)`.
-/// - `distributed_sign` computes `s_i = x_i_add · r · k_inv` — one scalar
-///   multiply.  There is no call to `lagrange_interpolate` or any code that
-///   sums all shares back into a single scalar outside of the final `s`
-///   assembly (which combines partial `s_i`, not key material).
+/// - `distributed_keygen` distributes Shamir shares `f(i)`, not `x`.
+/// - `distributed_sign` computes `s_i = x_i_add · r · k_inv` —
+///   each party's contribution. No code sums additive key shares.
 #[cfg(not(feature = "gg20-simulation"))]
 #[tokio::test]
 async fn test_gg20_distributed_no_key_reconstruction() {
@@ -102,23 +100,19 @@ async fn test_gg20_distributed_no_key_reconstruction() {
         );
     }
 
-    // Sign with parties 1 and 2 (the coordinator is Party 1).
+    // Sign with parties 1 and 2. Party 1 (coordinator) must be included.
     let message = b"distributed ecdsa test - no key reconstruction";
-    // sigs[0] is the coordinator's result (the canonical final signature).
-    // sigs[1] is Party 2's partial contribution sentinel.
     let sigs = run_sign(gg20_factory, &shares, &[0, 1], message).await;
 
-    // The coordinator (Party 1 = index 0) produces the canonical signature.
+    // Coordinator (index 0 = Party 1) has the canonical signature.
     let MpcSignature::Ecdsa { r, s, recovery_id } = &sigs[0] else {
-        panic!("expected ECDSA signature from coordinator");
+        panic!("expected ECDSA signature");
     };
-
-    // Basic sanity checks.
     assert_eq!(r.len(), 32, "r must be 32 bytes");
     assert_eq!(s.len(), 32, "s must be 32 bytes");
-    assert_ne!(
-        *recovery_id, 0xff,
-        "coordinator must return final signature, not partial sentinel"
+    assert!(
+        *recovery_id <= 3,
+        "recovery_id must be valid (0-3), got {recovery_id}"
     );
 
     // Cryptographic verification: the signature must verify against the group pubkey.
@@ -129,12 +123,12 @@ async fn test_gg20_distributed_no_key_reconstruction() {
     sig_bytes[..32].copy_from_slice(r);
     sig_bytes[32..].copy_from_slice(s);
     let sig = Signature::from_bytes(&sig_bytes.into())
-        .expect("assembled (r,s) must form a valid DER signature");
+        .expect("assembled (r,s) must form a valid ECDSA signature");
     vk.verify(message, &sig)
         .expect("distributed ECDSA signature must cryptographically verify");
 }
 
-/// Verify that different signer subsets both produce valid signatures.
+/// Verify that different signer subsets (containing coordinator) all produce valid signatures.
 #[cfg(not(feature = "gg20-simulation"))]
 #[tokio::test]
 async fn test_gg20_distributed_different_subsets() {
@@ -147,7 +141,7 @@ async fn test_gg20_distributed_different_subsets() {
 
     let message = b"different subsets test";
 
-    // Subset {1, 2}
+    // Subset {1, 2} — coordinator is index 0
     let sigs_12 = run_sign(gg20_factory, &shares, &[0, 1], message).await;
     let MpcSignature::Ecdsa { r, s, .. } = &sigs_12[0] else {
         panic!();
@@ -167,6 +161,9 @@ async fn test_gg20_distributed_different_subsets() {
     sig_bytes[32..].copy_from_slice(s);
     vk.verify(message, &Signature::from_bytes(&sig_bytes.into()).unwrap())
         .expect("subset {1,3} signature must verify");
+
+    // Note: Subset {2,3} without party 1 requires MtA-based distributed nonce
+    // (future enhancement). The coordinator must be in the signing subset.
 }
 
 // ── GG20 key resharing tests (Epic H2) ──────────────────────────────────────
@@ -269,16 +266,13 @@ async fn test_gg20_reshare_add_party() {
         sigs.push(h.await.unwrap().unwrap());
     }
 
-    // The coordinator (Party 1 = index 0) produces the canonical signature.
+    // Coordinator (Party 1, index 0) has the canonical signature.
     let MpcSignature::Ecdsa { r, s, recovery_id } = &sigs[0] else {
-        panic!("expected ECDSA signature from coordinator");
+        panic!("expected ECDSA signature");
     };
     assert_eq!(r.len(), 32);
     assert_eq!(s.len(), 32);
-    assert_ne!(
-        *recovery_id, 0xff,
-        "coordinator must return final signature"
-    );
+    assert!(*recovery_id <= 3, "recovery_id must be valid");
 
     // Cryptographic verification against original group pubkey.
     let pubkey = k256::PublicKey::from_sec1_bytes(&original_gpk).unwrap();
@@ -352,7 +346,7 @@ async fn test_gg20_reshare_change_threshold() {
     };
     assert_eq!(r.len(), 32);
     assert_eq!(s.len(), 32);
-    assert_ne!(*recovery_id, 0xff);
+    assert!(*recovery_id <= 3, "recovery_id must be valid");
 
     let pubkey = k256::PublicKey::from_sec1_bytes(&original_gpk).unwrap();
     let vk = VerifyingKey::from(&pubkey);
@@ -2326,10 +2320,10 @@ async fn test_cggmp21_sign_matches_gg20_format() {
             assert_eq!(cs.len(), 32, "CGGMP21 s must be 32 bytes");
             assert_eq!(gr.len(), 32, "GG20 r must be 32 bytes");
             assert_eq!(gs.len(), 32, "GG20 s must be 32 bytes");
-            assert!(*crid <= 1, "CGGMP21 recovery_id must be 0 or 1");
+            assert!(*crid <= 3, "CGGMP21 recovery_id must be 0-3");
             assert!(
-                *grid <= 1 || *grid == 0xff,
-                "GG20 recovery_id must be valid"
+                *grid <= 3,
+                "GG20 recovery_id must be valid (0-3), got {grid}"
             );
         }
         _ => panic!("both protocols must produce MpcSignature::Ecdsa"),

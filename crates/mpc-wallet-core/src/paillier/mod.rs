@@ -193,13 +193,12 @@ pub(crate) fn gcd(a: &BigUint, b: &BigUint) -> BigUint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paillier::keygen::generate_paillier_keypair;
+    use crate::paillier::keygen::{generate_paillier_keypair, test_keypair};
     use std::sync::LazyLock;
 
-    // Generate keypair once — safe prime generation is slow (~1-5s for 512-bit test keys).
-    // We use 512-bit keys for faster tests; the keygen module tests validate 2048-bit.
+    // Shared 512-bit keypair — delegates to keygen::test_keypair() (process-wide LazyLock cache).
     static TEST_KEYS: LazyLock<(PaillierPublicKey, PaillierSecretKey)> =
-        LazyLock::new(|| generate_paillier_keypair(512));
+        LazyLock::new(test_keypair);
 
     #[test]
     fn test_paillier_encrypt_decrypt_roundtrip() {

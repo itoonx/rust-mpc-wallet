@@ -1173,14 +1173,14 @@ pub fn generate_pedersen_params(bits: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paillier::keygen::{generate_paillier_keypair, generate_safe_prime};
+    use crate::paillier::keygen::{generate_paillier_keypair, generate_safe_prime, test_keypair};
     use std::sync::LazyLock;
 
-    // Reuse test keys from mod.rs
+    // Shared 512-bit keypair — delegates to keygen::test_keypair() (process-wide LazyLock cache).
     static TEST_KEYS: LazyLock<(
         super::super::PaillierPublicKey,
         super::super::PaillierSecretKey,
-    )> = LazyLock::new(|| generate_paillier_keypair(512));
+    )> = LazyLock::new(test_keypair);
 
     #[test]
     fn test_jacobi_symbol_basic() {
@@ -1417,6 +1417,134 @@ mod tests {
                 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79,
                 83, 89, 97
             ]
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Adversarial ZK proof tests (Phase B1)
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_pimod_tampered_proof_rejected() {
+        let (pk, sk) = &*TEST_KEYS;
+        let n = pk.n_biguint();
+        let p = BigUint::from_bytes_be(&sk.p);
+        let q = BigUint::from_bytes_be(&sk.q);
+
+        let mut proof = prove_pimod(&n, &p, &q);
+
+        // Corrupt the first round's a_i field with random bytes
+        if let Some(round) = proof.rounds.first_mut() {
+            let mut rng = OsRng;
+            let mut random_bytes = vec![0u8; 32];
+            rng.fill_bytes(&mut random_bytes);
+            round.a = random_bytes;
+        }
+
+        assert!(
+            !verify_pimod(&n, &proof),
+            "Pimod proof with tampered a_i must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_pifac_tampered_proof_rejected() {
+        let (pk, sk) = &*TEST_KEYS;
+        let n = pk.n_biguint();
+        let p = BigUint::from_bytes_be(&sk.p);
+        let q = BigUint::from_bytes_be(&sk.q);
+
+        let mut proof = prove_pifac(&n, &p, &q);
+
+        // Corrupt the commitment field — this will invalidate all challenge values
+        proof.commitment = vec![0xFFu8; 32];
+
+        assert!(
+            !verify_pifac(&n, &proof),
+            "Pifac proof with tampered commitment must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_pimod_wrong_modulus_rejected() {
+        // Generate proof for TEST_KEYS, then verify against a different N
+        let (pk, sk) = &*TEST_KEYS;
+        let n1 = pk.n_biguint();
+        let p = BigUint::from_bytes_be(&sk.p);
+        let q = BigUint::from_bytes_be(&sk.q);
+
+        let proof = prove_pimod(&n1, &p, &q);
+
+        // Generate a different modulus (key2)
+        let (pk2, _sk2) = generate_paillier_keypair(512);
+        let n2 = pk2.n_biguint();
+
+        // Proof generated for n1 must not verify against n2
+        assert!(
+            !verify_pimod(&n2, &proof),
+            "Pimod proof verified against wrong modulus must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_pifac_wrong_modulus_rejected() {
+        // Generate proof for TEST_KEYS, then verify against a different N
+        let (pk, sk) = &*TEST_KEYS;
+        let n1 = pk.n_biguint();
+        let p = BigUint::from_bytes_be(&sk.p);
+        let q = BigUint::from_bytes_be(&sk.q);
+
+        let proof = prove_pifac(&n1, &p, &q);
+
+        // Generate a different modulus (key2)
+        let (pk2, _sk2) = generate_paillier_keypair(512);
+        let n2 = pk2.n_biguint();
+
+        // Proof generated for n1 must not verify against n2
+        assert!(
+            !verify_pifac(&n2, &proof),
+            "Pifac proof verified against wrong modulus must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_pimod_empty_rounds_rejected() {
+        let (pk, sk) = &*TEST_KEYS;
+        let n = pk.n_biguint();
+        let p = BigUint::from_bytes_be(&sk.p);
+        let q = BigUint::from_bytes_be(&sk.q);
+
+        // Generate a valid proof, then replace rounds with empty vec
+        let mut proof = prove_pimod(&n, &p, &q);
+        proof.rounds = vec![];
+
+        assert!(
+            !verify_pimod(&n, &proof),
+            "Pimod proof with empty rounds must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_pifac_small_factor_modulus_rejected() {
+        // Create a modulus N = small_prime * large_prime where small_prime < 2^256.
+        // The verifier's trial division + bit-length checks must reject this.
+        let small_prime = BigUint::from(104729u64); // well under 2^256
+        let large_prime = generate_safe_prime(256);
+        let weak_n = &small_prime * &large_prime;
+
+        // Generate a proof using the real factors (the prover "honestly" proves
+        // knowledge of the factorization, but the factors are too small)
+        let proof = prove_pifac(&weak_n, &small_prime, &large_prime);
+
+        assert!(
+            !verify_pifac(&weak_n, &proof),
+            "Pifac must reject modulus with a small prime factor (CVE-2023-33241 defense)"
+        );
+
+        // Also verify directly that trial division catches the small factor
+        assert!(
+            has_small_factor(&weak_n),
+            "has_small_factor must detect the small prime in the modulus"
         );
     }
 

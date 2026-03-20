@@ -2,6 +2,9 @@
 //!
 //! Safe prime p: both p and (p-1)/2 are prime.
 //! Key: N = p*q, lambda = lcm(p-1, q-1), mu = L(g^lambda mod N^2)^(-1) mod N.
+//!
+//! Uses `glass_pumpkin` for safe prime generation — pure Rust, cryptographically
+//! secure, ~200ms for 512-bit (was 8+ min with manual Miller-Rabin on num-bigint).
 
 use super::{l_function, PaillierPublicKey, PaillierSecretKey};
 use num_bigint::BigUint;
@@ -16,23 +19,10 @@ const MILLER_RABIN_ROUNDS: u32 = 40;
 /// Generate a safe prime of `bits` size.
 ///
 /// A safe prime p satisfies: p is prime AND (p-1)/2 is prime.
-/// Uses probabilistic Miller-Rabin with 40 rounds.
+/// Uses `glass_pumpkin` which implements Baillie-PSW + Miller-Rabin internally.
 pub fn generate_safe_prime(bits: usize) -> BigUint {
-    loop {
-        // Generate a random odd number of the target bit size.
-        let candidate = random_odd_with_bits(bits);
-
-        // Check if candidate is probable prime.
-        if !is_probable_prime(&candidate, MILLER_RABIN_ROUNDS) {
-            continue;
-        }
-
-        // Check if (candidate - 1) / 2 is prime (making candidate a safe prime).
-        let sophie_germain = (&candidate - BigUint::one()) >> 1;
-        if is_probable_prime(&sophie_germain, MILLER_RABIN_ROUNDS) {
-            return candidate;
-        }
-    }
+    glass_pumpkin::safe_prime::new(bits)
+        .expect("safe prime generation should not fail")
 }
 
 /// Generate a Paillier keypair with N being `bits` bits (each prime is `bits/2` bits).
@@ -40,6 +30,13 @@ pub fn generate_safe_prime(bits: usize) -> BigUint {
 /// Default: `bits = 2048` produces a 2048-bit modulus from two 1024-bit safe primes.
 /// For tests, smaller values (e.g., 512) may be used for speed.
 pub fn generate_paillier_keypair(bits: usize) -> (PaillierPublicKey, PaillierSecretKey) {
+    // Prevent weak keys from reaching production — 512-bit is trivially factorable.
+    #[cfg(not(any(test, feature = "local-transport")))]
+    assert!(
+        bits >= 2048,
+        "SECURITY: Paillier key size must be >= 2048 bits in production (got {bits})"
+    );
+
     let half_bits = bits / 2;
 
     // Generate two distinct safe primes.
@@ -91,30 +88,6 @@ pub(crate) fn keypair_from_primes(
     };
 
     (pk, sk)
-}
-
-/// Generate a random odd number with exactly `bits` bits set.
-fn random_odd_with_bits(bits: usize) -> BigUint {
-    assert!(bits >= 2, "need at least 2 bits for a prime candidate");
-    let byte_len = bits.div_ceil(8);
-    let mut buf = vec![0u8; byte_len];
-    OsRng.fill_bytes(&mut buf);
-
-    // Set the highest bit to ensure the number has exactly `bits` bits.
-    let top_bit_index = (bits - 1) % 8;
-    buf[0] |= 1 << top_bit_index;
-
-    // Clear any bits above `bits` in the top byte.
-    if top_bit_index < 7 {
-        let mask = (1u8 << (top_bit_index + 1)) - 1;
-        buf[0] &= mask;
-    }
-    // If top_bit_index == 7, all 8 bits of buf[0] are valid, no masking needed.
-
-    // Set lowest bit to make it odd.
-    buf[byte_len - 1] |= 1;
-
-    BigUint::from_bytes_be(&buf)
 }
 
 /// Miller-Rabin primality test with `rounds` iterations.
@@ -233,13 +206,46 @@ pub fn is_prime(n: &BigUint) -> bool {
     is_probable_prime(n, MILLER_RABIN_ROUNDS)
 }
 
+// ── Pre-generated test keypair (cached via LazyLock) ─────────────────────────
+// Used by protocol tests (cggmp21, gg20) to avoid regenerating safe primes per test.
+// Generated once on first access, reused across all tests in the process.
+
+#[cfg(any(test, feature = "local-transport"))]
+static TEST_KEYPAIR_512: std::sync::LazyLock<(PaillierPublicKey, PaillierSecretKey)> =
+    std::sync::LazyLock::new(|| generate_paillier_keypair(512));
+
+/// Cached 1024-bit keypair for MtA operations in tests.
+/// N ~ 2^1024 >> q^2 ~ 2^512, ensuring MtA plaintext never wraps mod N.
+#[cfg(any(test, feature = "local-transport"))]
+static TEST_KEYPAIR_1024: std::sync::LazyLock<(PaillierPublicKey, PaillierSecretKey)> =
+    std::sync::LazyLock::new(|| generate_paillier_keypair(1024));
+
+/// Return a pre-generated 512-bit Paillier keypair for tests.
+/// Generated once (via `LazyLock`), reused across all callers.
+///
+/// NOTE: 512-bit keys are only suitable for keygen/ZK proof tests.
+/// For MtA-based signing, use `keypair_for_protocol()` which returns 1024-bit keys.
+#[cfg(any(test, feature = "local-transport"))]
+pub fn test_keypair() -> (PaillierPublicKey, PaillierSecretKey) {
+    TEST_KEYPAIR_512.clone()
+}
+
+/// Generate a Paillier keypair appropriate for the build mode:
+/// - Test / local-transport: cached 1024-bit keypair (N >> q^2 for correct MtA)
+/// - Production: real 2048-bit keypair (~10s with glass_pumpkin)
+///
+/// The 1024-bit test keypair ensures the Paillier plaintext space [0, N) is large
+/// enough that a*b never wraps mod N for 256-bit scalars (N ~ 2^1024 >> q^2 ~ 2^512).
+pub fn keypair_for_protocol(production_bits: usize) -> (PaillierPublicKey, PaillierSecretKey) {
+    #[cfg(any(test, feature = "local-transport"))]
+    { let _ = production_bits; TEST_KEYPAIR_1024.clone() }
+    #[cfg(not(any(test, feature = "local-transport")))]
+    { generate_paillier_keypair(production_bits) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::LazyLock;
-
-    static TEST_KEYS_512: LazyLock<(PaillierPublicKey, PaillierSecretKey)> =
-        LazyLock::new(|| generate_paillier_keypair(512));
 
     #[test]
     fn test_safe_prime_is_safe() {
@@ -252,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_keypair_n_equals_p_times_q() {
-        let (pk, sk) = &*TEST_KEYS_512;
+        let (pk, sk) = &*TEST_KEYPAIR_512;
         let p = BigUint::from_bytes_be(&sk.p);
         let q = BigUint::from_bytes_be(&sk.q);
         let n = pk.n_biguint();
@@ -261,13 +267,13 @@ mod tests {
 
     #[test]
     fn test_keypair_p_neq_q() {
-        let (_pk, sk) = &*TEST_KEYS_512;
+        let (_pk, sk) = &*TEST_KEYPAIR_512;
         assert_ne!(sk.p, sk.q, "p and q must be different");
     }
 
     #[test]
     fn test_keypair_primes_are_safe_primes() {
-        let (_pk, sk) = &*TEST_KEYS_512;
+        let (_pk, sk) = &*TEST_KEYPAIR_512;
         let p = BigUint::from_bytes_be(&sk.p);
         let q = BigUint::from_bytes_be(&sk.q);
 
@@ -282,7 +288,7 @@ mod tests {
 
     #[test]
     fn test_modulus_bit_size() {
-        let (pk, _sk) = &*TEST_KEYS_512;
+        let (pk, _sk) = &*TEST_KEYPAIR_512;
         let n = pk.n_biguint();
         // 512-bit key = two 256-bit primes, so N should be ~512 bits
         assert!(n.bits() >= 500, "N should be ~512 bits, got {}", n.bits());
@@ -290,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_lambda_correct() {
-        let (_pk, sk) = &*TEST_KEYS_512;
+        let (_pk, sk) = &*TEST_KEYPAIR_512;
         let p = BigUint::from_bytes_be(&sk.p);
         let q = BigUint::from_bytes_be(&sk.q);
         let lambda = BigUint::from_bytes_be(&sk.lambda);
@@ -300,7 +306,7 @@ mod tests {
 
     #[test]
     fn test_mu_is_inverse_of_l() {
-        let (pk, sk) = &*TEST_KEYS_512;
+        let (pk, sk) = &*TEST_KEYPAIR_512;
         let n = pk.n_biguint();
         let n_sq = pk.n_squared_biguint();
         let lambda = BigUint::from_bytes_be(&sk.lambda);

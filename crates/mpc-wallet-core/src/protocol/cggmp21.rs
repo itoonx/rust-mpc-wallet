@@ -145,13 +145,8 @@ struct PedersenParams {
     n_hat: Vec<u8>,
 }
 
-/// Default Paillier key size for tests (fast, ~10ms per keygen).
-/// NOTE: 256-bit is INSECURE — test speed only. Production MUST use 2048.
-#[cfg(any(test, feature = "local-transport"))]
-const DEFAULT_PAILLIER_BITS: usize = 512;
-
-/// Default Paillier key size for production (secure, ~1-5s per keygen).
-#[cfg(not(any(test, feature = "local-transport")))]
+/// Default Paillier key size for production (secure, ~10s per keygen with glass_pumpkin).
+/// In test mode, `keypair_for_protocol()` ignores this and returns a cached 512-bit keypair.
 const DEFAULT_PAILLIER_BITS: usize = 2048;
 
 /// Auxiliary info broadcast message (Round 4): Paillier public key + ZK proofs.
@@ -827,8 +822,8 @@ async fn cggmp21_keygen(
         serde_json::to_vec(&sim_pedersen).map_err(|e| CoreError::Serialization(e.to_string()))?;
 
     // ── Real Paillier keygen + ZK proofs (Sprint 28) ────────────────────
-    let (real_pk, real_sk) =
-        crate::paillier::keygen::generate_paillier_keypair(DEFAULT_PAILLIER_BITS);
+    let (real_pk, real_sk) = crate::paillier::keygen::keypair_for_protocol(DEFAULT_PAILLIER_BITS);
+
     let p_big = BigUint::from_bytes_be(&real_sk.p);
     let q_big = BigUint::from_bytes_be(&real_sk.q);
     let n_big = real_pk.n_biguint();
@@ -1056,12 +1051,10 @@ async fn cggmp21_pre_sign(
 
     // ── Round 2: MtA — compute shares of k * gamma ────────────────────
     // Check if real Paillier keys are available for secure MtA
-    // TODO(Sprint 28): Real Paillier MtA for pre-signing is implemented but
-    // disabled pending full integration testing. The keygen ZK proof verification
-    // is the critical security fix (CVE-2023-33241). MtA will be enabled in a
-    // follow-up sprint after the protocol round structure is validated end-to-end.
-    let has_real_paillier = false; // Real MtA disabled for now — keygen proofs are the priority
-    let _has_real_paillier_keys = share_data.real_paillier_pk.is_some()
+    // Real Paillier MtA for pre-signing (enabled Sprint 28 Phase C1).
+    // Shares created after Sprint 28 always have real Paillier keys from
+    // keypair_for_protocol(). The simulated fallback remains for legacy shares.
+    let has_real_paillier = share_data.real_paillier_pk.is_some()
         && share_data.real_paillier_sk.is_some()
         && share_data.all_paillier_pks.is_some();
 
@@ -1099,23 +1092,20 @@ async fn cggmp21_pre_sign(
             })
             .await?;
 
-        // Collect Enc(k_j) from all other signers
+        // Collect Enc(k_j) from all other signers, tracking transport PartyId per keygen index
+        let mut index_to_transport: std::collections::HashMap<u16, PartyId> =
+            std::collections::HashMap::new();
+        index_to_transport.insert(my_index, transport.party_id());
+
         let mut peer_enc_k: Vec<PreSignMtaRound2> = vec![mta_r2_msg];
         for _ in 1..n_signers {
             let msg = transport.recv().await?;
             let r2: PreSignMtaRound2 = serde_json::from_slice(&msg.payload)
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            index_to_transport.insert(r2.party_index, msg.from);
             peer_enc_k.push(r2);
         }
         peer_enc_k.sort_by_key(|m| m.party_index);
-
-        // Compute Lagrange coefficients for all signers (needed for chi MtA)
-        let mut peer_lambda: std::collections::HashMap<u16, Scalar> =
-            std::collections::HashMap::new();
-        for &s in signers {
-            let lam = lagrange_coefficient(s.0, &signer_indices)?;
-            peer_lambda.insert(s.0, lam);
-        }
 
         // For each peer j: run two MtA instances as Party B:
         //   1. k_j * gamma_i (for delta)
@@ -1157,7 +1147,16 @@ async fn cggmp21_pre_sign(
             let mta_out_chi = mta_b_chi.round2(&mta_r1_in_chi);
             chi_beta_shares.push(mta_out_chi.beta);
 
-            // Send both MtA responses to peer
+            // Send both MtA responses to peer (use transport PartyId, not keygen index)
+            let peer_transport_id = index_to_transport
+                .get(&peer_msg.party_index)
+                .copied()
+                .ok_or_else(|| {
+                    CoreError::Protocol(format!(
+                        "no transport mapping for party {}",
+                        peer_msg.party_index
+                    ))
+                })?;
             let combined_response = serde_json::json!({
                 "from_party": my_index,
                 "to_party": peer_msg.party_index,
@@ -1169,7 +1168,7 @@ async fn cggmp21_pre_sign(
             transport
                 .send(ProtocolMessage {
                     from: my_party_id,
-                    to: Some(PartyId(peer_msg.party_index)),
+                    to: Some(peer_transport_id),
                     round: 12,
                     payload,
                 })
@@ -1177,19 +1176,37 @@ async fn cggmp21_pre_sign(
         }
 
         // Receive MtA responses and compute delta_i, chi_i using Scalar arithmetic.
-        // Key insight: MtA produces alpha + beta = a*b mod N. Since N >> q^2,
-        // a*b < N so the mod N is exact. But alpha and beta individually are
-        // random values in [0,N). We reduce each to mod q (secp256k1 order)
-        // before adding to Scalar accumulators, since we only need the result mod q.
+        //
+        // Critical: MtA produces alpha + beta = a*b (mod N). Since beta is sampled
+        // uniformly from [0, N), the unsigned sum alpha + beta can be either a*b or
+        // a*b + N. Naively reducing both mod q gives the wrong result when the sum
+        // wraps (off by N mod q). We use signed interpretation: values > N/2 represent
+        // negative numbers (value - N), ensuring alpha_signed + beta_signed = a*b exactly.
+        let n_big = my_pk.n_biguint();
+        let n_half = &n_big >> 1;
         let secp_order = BigUint::from_bytes_be(&hex_decode_secp_order());
 
-        // Helper: convert BigUint to secp256k1 Scalar (reduce mod q)
-        let to_scalar = |big: &BigUint| -> Scalar {
-            let reduced = big % &secp_order;
-            let be = reduced.to_bytes_be();
-            let mut padded = [0u8; 32];
-            padded[32usize.saturating_sub(be.len())..].copy_from_slice(&be);
-            <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&padded))
+        // Helper: convert BigUint from [0, N) to secp256k1 Scalar using signed reduction.
+        // Values in [0, N/2] are positive → reduce mod q directly.
+        // Values in (N/2, N) represent negative → compute -(N - value) mod q.
+        let to_scalar_signed = |big: &BigUint| -> Scalar {
+            if big <= &n_half {
+                // Positive: reduce directly mod q
+                let reduced = big % &secp_order;
+                let be = reduced.to_bytes_be();
+                let mut padded = [0u8; 32];
+                padded[32usize.saturating_sub(be.len())..].copy_from_slice(&be);
+                <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&padded))
+            } else {
+                // Negative: true value is big - N, so Scalar = -(N - big) mod q
+                let abs_val = &n_big - big;
+                let reduced = &abs_val % &secp_order;
+                let be = reduced.to_bytes_be();
+                let mut padded = [0u8; 32];
+                padded[32usize.saturating_sub(be.len())..].copy_from_slice(&be);
+                let pos = <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&padded));
+                Scalar::ZERO - pos
+            }
         };
 
         // Start with local products
@@ -1198,10 +1215,10 @@ async fn cggmp21_pre_sign(
 
         // Add beta shares (from acting as Party B on peers' broadcasts)
         for beta_bytes in &delta_beta_shares {
-            delta_scalar += to_scalar(&BigUint::from_bytes_be(beta_bytes));
+            delta_scalar += to_scalar_signed(&BigUint::from_bytes_be(beta_bytes));
         }
         for beta_bytes in &chi_beta_shares {
-            chi_scalar += to_scalar(&BigUint::from_bytes_be(beta_bytes));
+            chi_scalar += to_scalar_signed(&BigUint::from_bytes_be(beta_bytes));
         }
 
         // Receive alpha shares from peers (responses to our Enc(k_i) broadcast)
@@ -1219,10 +1236,10 @@ async fn cggmp21_pre_sign(
 
             // Decrypt as Party A, reduce to Scalar
             let alpha_d = mta_party_a_k.round2_finish(&delta_ct);
-            delta_scalar += to_scalar(&BigUint::from_bytes_be(&alpha_d));
+            delta_scalar += to_scalar_signed(&BigUint::from_bytes_be(&alpha_d));
 
             let alpha_c = mta_party_a_k.round2_finish(&chi_ct);
-            chi_scalar += to_scalar(&BigUint::from_bytes_be(&alpha_c));
+            chi_scalar += to_scalar_signed(&BigUint::from_bytes_be(&alpha_c));
         }
 
         // Broadcast delta_i for aggregation (as Scalar bytes, 32 bytes)
@@ -1312,6 +1329,7 @@ async fn cggmp21_pre_sign(
         .into_option()
         .ok_or_else(|| CoreError::Crypto("delta is zero — cannot compute R point".into()))?;
     let big_r_point = (gamma_sum_point * delta_inv).to_affine();
+
     let big_r_bytes = k256::PublicKey::from_affine(big_r_point)
         .map_err(|e| CoreError::Crypto(format!("invalid R point: {e}")))?
         .to_encoded_point(true)
@@ -1878,17 +1896,15 @@ async fn cggmp21_refresh(
     let pedersen_bytes =
         serde_json::to_vec(&sim_pedersen).map_err(|e| CoreError::Serialization(e.to_string()))?;
 
-    // Generate fresh real Paillier keys + ZK proofs (Sprint 28)
-    let (fresh_pk, fresh_sk) =
-        crate::paillier::keygen::generate_paillier_keypair(DEFAULT_PAILLIER_BITS);
+    // Generate fresh real Paillier keys + ZK proofs
+    let (fresh_pk, fresh_sk) = crate::paillier::keygen::keypair_for_protocol(DEFAULT_PAILLIER_BITS);
+
     let p_big = BigUint::from_bytes_be(&fresh_sk.p);
     let q_big = BigUint::from_bytes_be(&fresh_sk.q);
     let n_big = fresh_pk.n_biguint();
-
     let pimod_proof = prove_pimod(&n_big, &p_big, &q_big);
     let pifac_proof = prove_pifac(&n_big, &p_big, &q_big);
 
-    // Broadcast fresh Paillier PK + proofs (round 203)
     let aux_msg = AuxInfoBroadcast {
         party_index: my_index,
         paillier_pk: fresh_pk.clone(),
@@ -1915,7 +1931,6 @@ async fn cggmp21_refresh(
     }
     all_aux.sort_by_key(|a| a.party_index);
 
-    // Verify all proofs
     for aux in &all_aux {
         if aux.party_index == my_index {
             continue;
@@ -1923,18 +1938,15 @@ async fn cggmp21_refresh(
         let peer_n = aux.paillier_pk.n_biguint();
         if !verify_pimod(&peer_n, &aux.pimod_proof) {
             return Err(CoreError::Protocol(format!(
-                "Πmod proof failed for party {} during refresh",
-                aux.party_index
+                "Πmod proof failed for party {} during refresh", aux.party_index
             )));
         }
         if !verify_pifac(&peer_n, &aux.pifac_proof) {
             return Err(CoreError::Protocol(format!(
-                "Πfac proof failed for party {} during refresh",
-                aux.party_index
+                "Πfac proof failed for party {} during refresh", aux.party_index
             )));
         }
     }
-
     let fresh_all_pks: Vec<PaillierPublicKey> =
         all_aux.iter().map(|a| a.paillier_pk.clone()).collect();
 
@@ -2503,11 +2515,13 @@ mod tests {
         let signers = vec![PartyId(1), PartyId(3)]; // Use parties 1 and 3 (not 2)
         let message = b"verify against group pubkey test";
 
-        let net = LocalTransportNetwork::new(2);
+        // Transport needs PartyId(3), so create with max signer ID
+        let max_id = signers.iter().map(|s| s.0).max().unwrap();
+        let net = LocalTransportNetwork::new(max_id);
         let mut handles = Vec::new();
-        for (i, signer) in signers.iter().enumerate() {
+        for signer in &signers {
             let share = shares[signer.0 as usize - 1].clone();
-            let transport = net.get_transport(PartyId((i + 1) as u16));
+            let transport = net.get_transport(*signer);
             let signers_clone = signers.clone();
             let msg = message.to_vec();
             handles.push(tokio::spawn(async move {
@@ -2933,6 +2947,79 @@ mod tests {
             assert!(
                 verify_pifac(&n, &pifac),
                 "Πfac proof must verify for stored key"
+            );
+        }
+    }
+
+    /// Standalone test: verify MtA correctness with signed Scalar reduction.
+    #[test]
+    fn test_mta_scalar_reduction_correctness() {
+        use crate::paillier::keygen::keypair_for_protocol;
+        use crate::paillier::mta::{MtaPartyA, MtaPartyB};
+        use k256::elliptic_curve::ops::Reduce;
+        use num_bigint::BigUint;
+
+        let (pk, sk) = keypair_for_protocol(2048);
+        let n = pk.n_biguint();
+        let n_half = &n >> 1;
+        let secp_order = BigUint::from_bytes_be(&hex_decode_secp_order());
+
+        // Signed reduction: values > N/2 represent negative numbers.
+        let to_scalar_signed = |big: &BigUint| -> Scalar {
+            if big <= &n_half {
+                let reduced = big % &secp_order;
+                let be = reduced.to_bytes_be();
+                let mut padded = [0u8; 32];
+                padded[32usize.saturating_sub(be.len())..].copy_from_slice(&be);
+                <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&padded))
+            } else {
+                let abs_val = &n - big;
+                let reduced = &abs_val % &secp_order;
+                let be = reduced.to_bytes_be();
+                let mut padded = [0u8; 32];
+                padded[32usize.saturating_sub(be.len())..].copy_from_slice(&be);
+                let pos = <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&padded));
+                Scalar::ZERO - pos
+            }
+        };
+
+        // Run multiple trials to cover both wrap and no-wrap cases
+        for trial in 0..10 {
+            let mut rng = rand::thread_rng();
+            let k_1 = Scalar::random(&mut rng);
+            let gamma_2 = Scalar::random(&mut rng);
+
+            let party_a = MtaPartyA::new(
+                pk.clone(), sk.clone(),
+                Zeroizing::new(k_1.to_repr().to_vec()),
+            );
+            let party_b = MtaPartyB::new(
+                pk.clone(),
+                Zeroizing::new(gamma_2.to_repr().to_vec()),
+            );
+
+            let round1 = party_a.round1();
+            let round2 = party_b.round2(&round1);
+
+            let alpha_bytes = party_a.round2_finish(&round2.ciphertext);
+            let alpha = BigUint::from_bytes_be(&alpha_bytes);
+            let beta = BigUint::from_bytes_be(&round2.beta);
+
+            // Verify: alpha + beta = k_1 * gamma_2 (mod N)
+            let sum_mod_n = (&alpha + &beta) % &n;
+            let k_1_big = BigUint::from_bytes_be(&k_1.to_repr());
+            let gamma_2_big = BigUint::from_bytes_be(&gamma_2.to_repr());
+            let product_mod_n = (&k_1_big * &gamma_2_big) % &n;
+            assert_eq!(sum_mod_n, product_mod_n, "trial {}: MtA basic correctness failed", trial);
+
+            // Verify signed Scalar reduction
+            let alpha_scalar = to_scalar_signed(&alpha);
+            let beta_scalar = to_scalar_signed(&beta);
+            let sum_scalar = alpha_scalar + beta_scalar;
+            let expected_scalar = k_1 * gamma_2;
+            assert_eq!(
+                sum_scalar, expected_scalar,
+                "trial {}: signed reduction failed", trial
             );
         }
     }
