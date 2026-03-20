@@ -12,63 +12,51 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_NET_RETRY: 10
   RUSTUP_MAX_RETRIES: 10
-  SCCACHE_GHA_ENABLED: "true"
-  RUSTC_WRAPPER: "sccache"
 
 jobs:
-  build:
-    name: Build & Test
-    runs-on: ubuntu-latest-8-cores
+  fmt:
+    name: Format check
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-      - uses: mozilla-actions/sccache-action@v0.0.7
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  # Single build job that compiles once, shares artifacts with downstream jobs
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest-16-cores
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: "rust-workspace"
           cache-targets: true
 
-      # Install mold linker (50-70% faster linking)
-      - name: Install mold linker
-        run: sudo apt-get update && sudo apt-get install -y mold
-
-      # Install cargo-nextest (2-3x faster test execution)
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
-
-      # Format check (merged from separate job — saves ~30s overhead)
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
       # Clippy (compiles everything as a side effect)
       - name: Clippy lint
-        env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: "clang"
-          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Tests with nextest (truly parallel per-test, not per-crate)
+      # Tests (reuses clippy compilation — near-zero compile time)
+      # Run with --test-threads=4 to validate multi-thread safety (LazyLock, LocalTransport isolation)
       - name: Run tests
-        env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: "clang"
-          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
         run: |
-          cargo nextest run --workspace --features local-transport -j8 --no-fail-fast 2>&1 | tee /tmp/test-output.txt
-          # Test count guard — nextest summary line: "X tests run: Y passed, ..."
-          PASS_COUNT=$(grep -oP '\d+ passed' /tmp/test-output.txt | tail -1 | grep -oP '\d+')
-          echo "Tests passed: $PASS_COUNT"
-          if [ -n "$PASS_COUNT" ] && [ "$PASS_COUNT" -lt 840 ]; then
-            echo "::error::Test count dropped below 840 (got $PASS_COUNT)"
+          cargo test --workspace --features local-transport -- --test-threads=4 2>&1 | tee /tmp/test-output.txt
+          TEST_COUNT=$(grep "test result:" /tmp/test-output.txt | awk -F'[; ]' '{sum+=$4} END {print sum}')
+          echo "Total tests: $TEST_COUNT"
+          if [ "$TEST_COUNT" -lt 840 ]; then
+            echo "::error::Test count dropped below 840 (got $TEST_COUNT) — check for accidentally deleted tests"
             exit 1
           fi
 
       # Build gateway binary (reuses test compilation)
       - name: Build gateway
-        env:
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: "clang"
-          RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
         run: cargo build -p mpc-wallet-api
 
       # Upload gateway binary for E2E job
@@ -79,7 +67,7 @@ jobs:
           path: target/debug/mpc-wallet-api
           retention-days: 1
 
-      # Upload test binary for E2E job (run pre-built, no recompile)
+      # Upload test binary for E2E job
       - name: Upload E2E test binary
         uses: actions/upload-artifact@v4
         with:
@@ -92,15 +80,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-      - name: Run security audit
-        run: cargo audit
+      # Use pre-built cargo-audit from GitHub Action (no compile from source)
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ github.token }}
 
   e2e:
     name: E2E tests (Vault + Redis + NATS)
-    runs-on: ubuntu-latest-8-cores
+    runs-on: ubuntu-latest-16-cores
     needs: [build]
     services:
       vault:
@@ -137,8 +124,11 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "rust-workspace"
 
-      # No Rust toolchain needed — we use pre-built binaries from build job
       - name: Provision Vault secrets
         env:
           VAULT_ADDR: http://127.0.0.1:8200
@@ -156,18 +146,12 @@ jobs:
           curl -sf "$VAULT_ADDR/v1/secret/data/mpc-wallet/gateway" \
             -H "X-Vault-Token: $VAULT_TOKEN" | jq '.data.data | keys'
 
-      # Download pre-built binaries (zero compilation!)
+      # Download pre-built gateway binary (no recompilation!)
       - name: Download gateway binary
         uses: actions/download-artifact@v4
         with:
           name: gateway-binary
           path: ./bin
-
-      - name: Download E2E test binary
-        uses: actions/download-artifact@v4
-        with:
-          name: e2e-test-binary
-          path: ./test-bin
 
       - name: Start gateway
         env:
@@ -196,19 +180,12 @@ jobs:
           done
 
       - name: Run E2E tests
-        timeout-minutes: 10
+        timeout-minutes: 20
         env:
           NATS_URL: nats://127.0.0.1:4222
           REDIS_URL: redis://127.0.0.1:6379
           GATEWAY_URL: http://127.0.0.1:3000
         run: |
-          # Run pre-built E2E test binary directly — no compilation needed
-          TEST_BIN=$(find ./test-bin -name 'e2e_tests-*' -executable | head -1)
-          if [ -z "$TEST_BIN" ]; then
-            # Fallback: try any file matching the pattern and make it executable
-            TEST_BIN=$(find ./test-bin -name 'e2e_tests-*' ! -name '*.d' | head -1)
-            chmod +x "$TEST_BIN"
-          fi
-          echo "Running: $TEST_BIN"
-          "$TEST_BIN" --ignored --test-threads=1 --skip test_nats_keygen_gg20_2of3 --skip test_nats_sign_gg20_direct
+          # E2E tests — skip 2 flaky NATS protocol tests (L-012)
+          cargo test -p mpc-wallet-core --test e2e_tests --features local-transport -- --ignored --test-threads=1 --skip test_nats_keygen_gg20_2of3 --skip test_nats_sign_gg20_direct
           kill $(cat /tmp/gateway.pid) 2>/dev/null || true
