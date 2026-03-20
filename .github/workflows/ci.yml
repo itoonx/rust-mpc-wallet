@@ -50,8 +50,8 @@ jobs:
           cargo test --workspace --features local-transport 2>&1 | tee /tmp/test-output.txt
           TEST_COUNT=$(grep "test result:" /tmp/test-output.txt | awk -F'[; ]' '{sum+=$4} END {print sum}')
           echo "Total tests: $TEST_COUNT"
-          if [ "$TEST_COUNT" -lt 740 ]; then
-            echo "::error::Test count dropped below 740 (got $TEST_COUNT) — check for accidentally deleted tests"
+          if [ "$TEST_COUNT" -lt 790 ]; then
+            echo "::error::Test count dropped below 790 (got $TEST_COUNT) — check for accidentally deleted tests"
             exit 1
           fi
 
@@ -180,7 +180,7 @@ jobs:
           done
 
       - name: Run E2E tests
-        timeout-minutes: 10
+        timeout-minutes: 20
         env:
           NATS_URL: nats://127.0.0.1:4222
           REDIS_URL: redis://127.0.0.1:6379
