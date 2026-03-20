@@ -87,9 +87,18 @@ impl Drop for VaultSecrets {
 impl std::fmt::Debug for VaultSecrets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VaultSecrets")
-            .field("jwt_secret", &self.jwt_secret.as_ref().map(|_| "[REDACTED]"))
-            .field("server_signing_key", &self.server_signing_key.as_ref().map(|_| "[REDACTED]"))
-            .field("session_encryption_key", &self.session_encryption_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "jwt_secret",
+                &self.jwt_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "server_signing_key",
+                &self.server_signing_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "session_encryption_key",
+                &self.session_encryption_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("redis_url", &self.redis_url.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
@@ -529,10 +538,22 @@ mod tests {
             redis_url: Some(Zeroizing::new("redis://secret@host".into())),
         };
         let debug_output = format!("{:?}", secrets);
-        assert!(!debug_output.contains("super-secret"), "jwt_secret leaked in Debug output");
-        assert!(!debug_output.contains("signing-key"), "server_signing_key leaked in Debug output");
-        assert!(!debug_output.contains("redis://secret"), "redis_url leaked in Debug output");
-        assert!(debug_output.contains("REDACTED"), "Debug should show [REDACTED]");
+        assert!(
+            !debug_output.contains("super-secret"),
+            "jwt_secret leaked in Debug output"
+        );
+        assert!(
+            !debug_output.contains("signing-key"),
+            "server_signing_key leaked in Debug output"
+        );
+        assert!(
+            !debug_output.contains("redis://secret"),
+            "redis_url leaked in Debug output"
+        );
+        assert!(
+            debug_output.contains("REDACTED"),
+            "Debug should show [REDACTED]"
+        );
     }
 
     // -- T-S22-03: Vault lease renewal tests --
@@ -717,9 +738,18 @@ mod tests {
         // session_encryption_key not present
 
         let secrets = VaultClient::extract_secrets(&data);
-        assert_eq!(secrets.jwt_secret.as_deref().map(|s| s.as_str()), Some("secret-123"));
-        assert_eq!(secrets.server_signing_key.as_deref().map(|s| s.as_str()), Some("key-456"));
+        assert_eq!(
+            secrets.jwt_secret.as_deref().map(|s| s.as_str()),
+            Some("secret-123")
+        );
+        assert_eq!(
+            secrets.server_signing_key.as_deref().map(|s| s.as_str()),
+            Some("key-456")
+        );
         assert!(secrets.session_encryption_key.is_none());
-        assert_eq!(secrets.redis_url.as_deref().map(|s| s.as_str()), Some("redis://localhost"));
+        assert_eq!(
+            secrets.redis_url.as_deref().map(|s| s.as_str()),
+            Some("redis://localhost")
+        );
     }
 }

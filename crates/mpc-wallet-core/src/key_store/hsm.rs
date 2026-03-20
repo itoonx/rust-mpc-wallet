@@ -472,7 +472,10 @@ mod tests {
         assert_eq!(*dek1, *dek2, "HKDF derivation must be deterministic");
         // Different group produces different DEK
         let dek3 = provider.derive_dek("other-group").await.unwrap();
-        assert_ne!(*dek1, *dek3, "different group_id must produce different DEK");
+        assert_ne!(
+            *dek1, *dek3,
+            "different group_id must produce different DEK"
+        );
     }
 
     // --- Wrapping nonce uniqueness ---

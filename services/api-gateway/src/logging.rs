@@ -38,7 +38,13 @@ impl<'a> RedactingVisitor<'a> {
     }
 
     fn write_field(&mut self, field: &tracing::field::Field, value: &dyn fmt::Display) {
-        let sep = if self.first { "" } else if self.is_json { ", " } else { " " };
+        let sep = if self.first {
+            ""
+        } else if self.is_json {
+            ", "
+        } else {
+            " "
+        };
         self.first = false;
 
         if is_sensitive_field(field.name()) {
@@ -95,7 +101,12 @@ where
     ) -> fmt::Result {
         let now = chrono_lite_now();
         let meta = event.metadata();
-        write!(writer, "{now} {level:>5} {target}: ", level = meta.level(), target = meta.target())?;
+        write!(
+            writer,
+            "{now} {level:>5} {target}: ",
+            level = meta.level(),
+            target = meta.target()
+        )?;
 
         // Write message field first.
         let mut visitor = RedactingVisitor::new(&mut writer, false);
@@ -229,10 +240,7 @@ mod tests {
                 None,
                 None,
                 None,
-                tracing::field::FieldSet::new(
-                    &[],
-                    tracing::callsite::Identifier(&DummyCallsite),
-                ),
+                tracing::field::FieldSet::new(&[], tracing::callsite::Identifier(&DummyCallsite)),
                 tracing::metadata::Kind::EVENT,
             );
             &META

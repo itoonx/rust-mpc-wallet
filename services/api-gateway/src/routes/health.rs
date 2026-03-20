@@ -28,9 +28,7 @@ pub async fn health_live() -> Json<LivenessResponse> {
 }
 
 /// `GET /v1/health/ready` — readiness probe, checks backend connectivity.
-pub async fn health_ready(
-    State(state): State<AppState>,
-) -> (StatusCode, Json<ReadinessResponse>) {
+pub async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<ReadinessResponse>) {
     let nats_status = if state.orchestrator.is_connected() {
         ComponentStatus::Connected
     } else {

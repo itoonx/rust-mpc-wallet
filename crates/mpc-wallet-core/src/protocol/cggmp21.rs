@@ -28,8 +28,6 @@
 
 use crate::error::CoreError;
 use crate::paillier::mta::{MtaPartyA, MtaPartyB, MtaRound1};
-use std::collections::HashSet;
-use std::sync::Mutex;
 use crate::paillier::zk_proofs::{
     prove_pifac, prove_pimod, verify_pifac, verify_pimod, PifacProof, PimodProof,
 };
@@ -37,6 +35,8 @@ use crate::paillier::{PaillierPublicKey, PaillierSecretKey};
 use crate::protocol::{GroupPublicKey, KeyShare, MpcProtocol, MpcSignature};
 use crate::transport::{ProtocolMessage, Transport};
 use crate::types::{CryptoScheme, PartyId, ThresholdConfig};
+use std::collections::HashSet;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use k256::{
@@ -273,13 +273,13 @@ impl Default for InMemoryPreSignatureStore {
 
 impl PreSignatureStore for InMemoryPreSignatureStore {
     fn mark_used(&self, pre_sig_id: &str) -> Result<(), CoreError> {
-        let mut set = self.used_ids.lock().map_err(|e| {
-            CoreError::Protocol(format!("pre-signature store lock poisoned: {e}"))
-        })?;
+        let mut set = self
+            .used_ids
+            .lock()
+            .map_err(|e| CoreError::Protocol(format!("pre-signature store lock poisoned: {e}")))?;
         if !set.insert(pre_sig_id.to_string()) {
             return Err(CoreError::Protocol(
-                "pre-signature already used — nonce reuse would leak private key (SEC-037)"
-                    .into(),
+                "pre-signature already used — nonce reuse would leak private key (SEC-037)".into(),
             ));
         }
         Ok(())
@@ -1305,7 +1305,8 @@ async fn cggmp21_pre_sign(
                 let be = reduced.to_bytes_be();
                 let mut padded = [0u8; 32];
                 padded[32usize.saturating_sub(be.len())..].copy_from_slice(&be);
-                let pos = <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&padded));
+                let pos =
+                    <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&padded));
                 Scalar::ZERO - pos
             }
         };
@@ -1383,7 +1384,8 @@ async fn cggmp21_pre_sign(
         {
             return Err(CoreError::Protocol(
                 "CGGMP21 pre-signing requires real Paillier keys \
-                 — run key refresh to upgrade legacy shares".into()
+                 — run key refresh to upgrade legacy shares"
+                    .into(),
             ));
         }
 
@@ -2040,7 +2042,8 @@ async fn cggmp21_refresh(
         serde_json::to_vec(&sim_pedersen).map_err(|e| CoreError::Serialization(e.to_string()))?;
 
     // Generate fresh real Paillier keys + ZK proofs
-    let (fresh_pk, fresh_sk) = crate::paillier::keygen::keypair_for_protocol(DEFAULT_PAILLIER_BITS)?;
+    let (fresh_pk, fresh_sk) =
+        crate::paillier::keygen::keypair_for_protocol(DEFAULT_PAILLIER_BITS)?;
 
     let p_big = BigUint::from_bytes_be(&fresh_sk.p);
     let q_big = BigUint::from_bytes_be(&fresh_sk.q);
@@ -2081,12 +2084,14 @@ async fn cggmp21_refresh(
         let peer_n = aux.paillier_pk.n_biguint();
         if !verify_pimod(&peer_n, &aux.pimod_proof) {
             return Err(CoreError::Protocol(format!(
-                "Πmod proof failed for party {} during refresh", aux.party_index
+                "Πmod proof failed for party {} during refresh",
+                aux.party_index
             )));
         }
         if !verify_pifac(&peer_n, &aux.pifac_proof) {
             return Err(CoreError::Protocol(format!(
-                "Πfac proof failed for party {} during refresh", aux.party_index
+                "Πfac proof failed for party {} during refresh",
+                aux.party_index
             )));
         }
     }
@@ -3122,7 +3127,8 @@ mod tests {
                 let be = reduced.to_bytes_be();
                 let mut padded = [0u8; 32];
                 padded[32usize.saturating_sub(be.len())..].copy_from_slice(&be);
-                let pos = <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&padded));
+                let pos =
+                    <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&padded));
                 Scalar::ZERO - pos
             }
         };
@@ -3134,13 +3140,11 @@ mod tests {
             let gamma_2 = Scalar::random(&mut rng);
 
             let party_a = MtaPartyA::new(
-                pk.clone(), sk.clone(),
+                pk.clone(),
+                sk.clone(),
                 Zeroizing::new(k_1.to_repr().to_vec()),
             );
-            let party_b = MtaPartyB::new(
-                pk.clone(),
-                Zeroizing::new(gamma_2.to_repr().to_vec()),
-            );
+            let party_b = MtaPartyB::new(pk.clone(), Zeroizing::new(gamma_2.to_repr().to_vec()));
 
             let round1 = party_a.round1();
             let round2 = party_b.round2(&round1);
@@ -3154,7 +3158,11 @@ mod tests {
             let k_1_big = BigUint::from_bytes_be(&k_1.to_repr());
             let gamma_2_big = BigUint::from_bytes_be(&gamma_2.to_repr());
             let product_mod_n = (&k_1_big * &gamma_2_big) % &n;
-            assert_eq!(sum_mod_n, product_mod_n, "trial {}: MtA basic correctness failed", trial);
+            assert_eq!(
+                sum_mod_n, product_mod_n,
+                "trial {}: MtA basic correctness failed",
+                trial
+            );
 
             // Verify signed Scalar reduction
             let alpha_scalar = to_scalar_signed(&alpha);
@@ -3163,7 +3171,8 @@ mod tests {
             let expected_scalar = k_1 * gamma_2;
             assert_eq!(
                 sum_scalar, expected_scalar,
-                "trial {}: signed reduction failed", trial
+                "trial {}: signed reduction failed",
+                trial
             );
         }
     }
@@ -3400,7 +3409,9 @@ mod tests {
             !store.is_used(&presig_id),
             "must not be used before marking"
         );
-        store.mark_used(&presig_id).expect("first mark must succeed");
+        store
+            .mark_used(&presig_id)
+            .expect("first mark must succeed");
 
         // Step 2: after marking, the ID is recorded even if we crash here
         assert!(

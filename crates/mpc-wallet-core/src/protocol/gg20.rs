@@ -657,13 +657,9 @@ async fn distributed_sign(
         let recovery_id = (0u8..4)
             .find(|&v| {
                 let recid = k256::ecdsa::RecoveryId::try_from(v).unwrap();
-                k256::ecdsa::VerifyingKey::recover_from_prehash(
-                    &hash_bytes,
-                    &normalized_sig,
-                    recid,
-                )
-                .map(|recovered| recovered == verifying_key)
-                .unwrap_or(false)
+                k256::ecdsa::VerifyingKey::recover_from_prehash(&hash_bytes, &normalized_sig, recid)
+                    .map(|recovered| recovered == verifying_key)
+                    .unwrap_or(false)
             })
             .unwrap_or(0);
 

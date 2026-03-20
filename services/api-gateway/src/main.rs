@@ -168,10 +168,7 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"].as_str().unwrap(), "degraded");
-        assert_eq!(
-            json["components"]["nats"].as_str().unwrap(),
-            "disconnected"
-        );
+        assert_eq!(json["components"]["nats"].as_str().unwrap(), "disconnected");
         assert_eq!(
             json["components"]["redis"].as_str().unwrap(),
             "not_configured"

@@ -22,8 +22,7 @@ const MILLER_RABIN_ROUNDS: u32 = 40;
 /// A safe prime p satisfies: p is prime AND (p-1)/2 is prime.
 /// Uses `glass_pumpkin` which implements Baillie-PSW + Miller-Rabin internally.
 pub fn generate_safe_prime(bits: usize) -> BigUint {
-    glass_pumpkin::safe_prime::new(bits)
-        .expect("safe prime generation should not fail")
+    glass_pumpkin::safe_prime::new(bits).expect("safe prime generation should not fail")
 }
 
 /// Validate that a Paillier public key has a modulus of at least `min_bits` bits.
@@ -60,7 +59,9 @@ pub fn validate_paillier_bits(bits: usize) -> Result<(), CoreError> {
 /// For tests, smaller values (e.g., 512) may be used for speed.
 ///
 /// In non-test builds, returns `Err(CoreError::Crypto(...))` if `bits < 2048` (SEC-054).
-pub fn generate_paillier_keypair(bits: usize) -> Result<(PaillierPublicKey, PaillierSecretKey), CoreError> {
+pub fn generate_paillier_keypair(
+    bits: usize,
+) -> Result<(PaillierPublicKey, PaillierSecretKey), CoreError> {
     // Prevent weak keys from reaching production — 512-bit is trivially factorable.
     validate_paillier_bits(bits)?;
 
@@ -245,7 +246,9 @@ static TEST_KEYPAIR_512: std::sync::LazyLock<(PaillierPublicKey, PaillierSecretK
 /// N ~ 2^1024 >> q^2 ~ 2^512, ensuring MtA plaintext never wraps mod N.
 #[cfg(any(test, feature = "local-transport"))]
 static TEST_KEYPAIR_1024: std::sync::LazyLock<(PaillierPublicKey, PaillierSecretKey)> =
-    std::sync::LazyLock::new(|| generate_paillier_keypair(1024).expect("1024-bit keypair for tests"));
+    std::sync::LazyLock::new(|| {
+        generate_paillier_keypair(1024).expect("1024-bit keypair for tests")
+    });
 
 /// Return a pre-generated 512-bit Paillier keypair for tests.
 /// Generated once (via `LazyLock`), reused across all callers.
@@ -263,11 +266,18 @@ pub fn test_keypair() -> (PaillierPublicKey, PaillierSecretKey) {
 ///
 /// The 1024-bit test keypair ensures the Paillier plaintext space [0, N) is large
 /// enough that a*b never wraps mod N for 256-bit scalars (N ~ 2^1024 >> q^2 ~ 2^512).
-pub fn keypair_for_protocol(production_bits: usize) -> Result<(PaillierPublicKey, PaillierSecretKey), CoreError> {
+pub fn keypair_for_protocol(
+    production_bits: usize,
+) -> Result<(PaillierPublicKey, PaillierSecretKey), CoreError> {
     #[cfg(any(test, feature = "local-transport"))]
-    { let _ = production_bits; Ok(TEST_KEYPAIR_1024.clone()) }
+    {
+        let _ = production_bits;
+        Ok(TEST_KEYPAIR_1024.clone())
+    }
     #[cfg(not(any(test, feature = "local-transport")))]
-    { generate_paillier_keypair(production_bits) }
+    {
+        generate_paillier_keypair(production_bits)
+    }
 }
 
 #[cfg(test)]
@@ -399,16 +409,22 @@ mod tests {
     #[test]
     fn test_validate_paillier_key_size_works() {
         let (pk, _sk) = test_keypair(); // 512-bit
-        // In test mode, even 512-bit keys pass validation.
+                                        // In test mode, even 512-bit keys pass validation.
         assert!(validate_paillier_key_size(&pk).is_ok());
     }
 
     #[test]
     fn test_keypair_for_protocol_returns_result() {
         let result = keypair_for_protocol(2048);
-        assert!(result.is_ok(), "keypair_for_protocol must return Ok in test mode");
+        assert!(
+            result.is_ok(),
+            "keypair_for_protocol must return Ok in test mode"
+        );
         let (pk, _sk) = result.unwrap();
         // In test mode, returns cached 1024-bit key regardless of requested bits.
-        assert!(pk.n_biguint().bits() >= 1000, "protocol keypair should be ~1024 bits in test mode");
+        assert!(
+            pk.n_biguint().bits() >= 1000,
+            "protocol keypair should be ~1024 bits in test mode"
+        );
     }
 }

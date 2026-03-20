@@ -47,10 +47,7 @@ pub fn build_router(state: AppState, cors_origins: &[String]) -> Router {
     let public_routes = Router::new()
         .route("/v1/health", get(routes::health::health))
         .route("/v1/health/live", get(routes::health::health_live))
-        .route(
-            "/v1/health/ready",
-            get(routes::health::health_ready),
-        )
+        .route("/v1/health/ready", get(routes::health::health_ready))
         .route("/v1/chains", get(routes::chains::list_chains));
 
     // Protected routes (auth + RBAC).

@@ -134,10 +134,7 @@ impl NodeConfig {
             "PARTY_ID must be >= 1 (got {})",
             self.party_id.0
         );
-        assert!(
-            !self.nats_url.is_empty(),
-            "NATS_URL must not be empty"
-        );
+        assert!(!self.nats_url.is_empty(), "NATS_URL must not be empty");
         assert!(
             self.key_store_dir.exists(),
             "KEY_STORE_DIR does not exist: {} — create it before starting the node",
@@ -518,7 +515,9 @@ async fn execute_sign(
         Ok(auth) => {
             // Verify signature + replay protection via AuthorizationCache
             let mut cache = auth_cache.lock().await;
-            if let Err(e) = auth.verify_with_cache(&config.gateway_pubkey, &message_bytes, &mut cache) {
+            if let Err(e) =
+                auth.verify_with_cache(&config.gateway_pubkey, &message_bytes, &mut cache)
+            {
                 tracing::warn!(
                     group_id = %req.group_id,
                     "SignAuthorization verification FAILED: {e}"
