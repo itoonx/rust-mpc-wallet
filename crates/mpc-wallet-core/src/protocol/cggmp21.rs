@@ -2423,7 +2423,12 @@ async fn cggmp21_refresh(
 ///
 /// This ensures `to_scalar_signed(alpha) + to_scalar_signed(beta) == a * b` as a
 /// `Scalar`, even when the unsigned sum `alpha + beta` wraps modulo `N`.
-fn to_scalar_signed(big: &BigUint, n: &BigUint, n_half: &BigUint, secp_order: &BigUint) -> Scalar {
+pub fn to_scalar_signed(
+    big: &BigUint,
+    n: &BigUint,
+    n_half: &BigUint,
+    secp_order: &BigUint,
+) -> Scalar {
     use k256::elliptic_curve::ops::Reduce;
     if big <= n_half {
         // Positive: reduce directly mod q

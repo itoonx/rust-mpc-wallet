@@ -116,7 +116,6 @@ struct Gg20ShareData {
 impl Gg20ShareData {
     /// Returns true if this share has real Paillier keys AND Pedersen params
     /// for MtA-based distributed nonce signing.
-    #[allow(dead_code)] // Will be used when distributed_sign_mta() is implemented
     fn has_real_aux_info(&self) -> bool {
         self.real_paillier_pk.is_some()
             && self.real_paillier_sk.is_some()
@@ -306,7 +305,18 @@ impl MpcProtocol for Gg20Protocol {
 
         #[cfg(not(feature = "gg20-simulation"))]
         {
-            distributed_sign(key_share, signers, message, transport).await
+            // Auto-detect: use MtA-based distributed nonce if real aux info available,
+            // otherwise fall back to coordinator-based signing.
+            let share_data_copy = key_share.share_data.clone();
+            let has_mta = serde_json::from_slice::<Gg20ShareData>(&share_data_copy)
+                .map(|sd| sd.has_real_aux_info())
+                .unwrap_or(false);
+
+            if has_mta {
+                distributed_sign_mta(key_share, signers, message, transport).await
+            } else {
+                distributed_sign(key_share, signers, message, transport).await
+            }
         }
     }
 
@@ -757,6 +767,580 @@ async fn distributed_sign(
             recovery_id: 0xff,
         })
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MtA-BASED DISTRIBUTED signing — no coordinator trust (DEC-017 fix)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Distributed ECDSA signing using MtA-based distributed nonce.
+///
+/// Unlike `distributed_sign()` which trusts Party 1 to generate nonce k,
+/// this version has each party contribute k_i shares via Paillier MtA.
+/// No single party learns the full nonce. Requires real Paillier + Pedersen keys.
+///
+/// ## Protocol
+///
+/// 1. Each party samples k_i, γ_i and broadcasts K_i = k_i·G, Γ_i = γ_i·G
+/// 2. MtA computes shares of δ = k·γ and χ = k·x (with Πenc + Πlog* + Πaff-g)
+/// 3. Broadcast δ_i, aggregate δ = Σ δ_i
+/// 4. R = δ⁻¹ · Γ_sum = k⁻¹·G, extract r = R.x
+/// 5. Each party: σ_i = k_i·m + χ_i·r, broadcast and aggregate s = Σ σ_i
+///
+/// ## Correctness
+///
+/// s = Σ σ_i = m·k + r·k·x = k·(m + xr)
+/// R = k⁻¹·G → verify: s⁻¹·(mG + rQ) = k⁻¹·G = R ✓
+#[allow(clippy::too_many_lines)]
+async fn distributed_sign_mta(
+    key_share: &KeyShare,
+    signers: &[PartyId],
+    message: &[u8],
+    transport: &dyn Transport,
+) -> Result<MpcSignature, CoreError> {
+    use crate::paillier::mta::{MtaPartyA, MtaPartyB, MtaRound1};
+    use crate::paillier::zk_proofs::{PiAffgPublicInput, PiEncPublicInput, PiLogStarPublicInput};
+    use k256::elliptic_curve::group::GroupEncoding;
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    use sha2::Digest;
+
+    let my_party_id = key_share.party_id;
+    let share_data_copy = key_share.share_data.clone();
+    let share_data: Gg20ShareData = serde_json::from_slice(&share_data_copy)
+        .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+    if !share_data.has_real_aux_info() {
+        return Err(CoreError::Protocol(
+            "GG20 MtA signing requires real Paillier + Pedersen keys (run key refresh)".into(),
+        ));
+    }
+
+    let my_pk = share_data.real_paillier_pk.as_ref().unwrap().clone();
+    let my_sk = share_data.real_paillier_sk.as_ref().unwrap().clone();
+    let all_pks = share_data.all_paillier_pks.as_ref().unwrap();
+    let ped_n_hat = share_data.real_pedersen_n_hat.as_ref().unwrap();
+    let ped_s = share_data.real_pedersen_s.as_ref().unwrap();
+    let ped_t = share_data.real_pedersen_t.as_ref().unwrap();
+
+    let my_index = share_data.x;
+    let n_signers = signers.len();
+    let signer_indices: Vec<u16> = signers.iter().map(|p| p.0).collect();
+
+    // Compute Lagrange coefficient and additive share
+    let shamir_y = Zeroizing::new(
+        Scalar::from_repr(*k256::FieldBytes::from_slice(&share_data.y))
+            .into_option()
+            .ok_or_else(|| CoreError::Crypto("invalid Shamir share scalar".into()))?,
+    );
+    let lambda_i = lagrange_coefficient(my_index, &signer_indices)?;
+    let x_i_add = Zeroizing::new(lambda_i * *shamir_y);
+
+    // ── Round 1: Broadcast K_i, Gamma_i ─────────────────────────────────
+    let k_i = Zeroizing::new(Scalar::random(&mut rand::thread_rng()));
+    let gamma_i = Zeroizing::new(Scalar::random(&mut rand::thread_rng()));
+
+    let k_point = (ProjectivePoint::GENERATOR * *k_i).to_affine();
+    let k_point_bytes = k256::PublicKey::from_affine(k_point)
+        .map_err(|e| CoreError::Crypto(format!("k_point: {e}")))?
+        .to_encoded_point(true)
+        .as_bytes()
+        .to_vec();
+
+    let gamma_point = (ProjectivePoint::GENERATOR * *gamma_i).to_affine();
+    let gamma_point_bytes = k256::PublicKey::from_affine(gamma_point)
+        .map_err(|e| CoreError::Crypto(format!("gamma_point: {e}")))?
+        .to_encoded_point(true)
+        .as_bytes()
+        .to_vec();
+
+    let round1_payload = serde_json::to_vec(&serde_json::json!({
+        "party_index": my_index,
+        "k_point": k_point_bytes,
+        "gamma_point": gamma_point_bytes,
+    }))
+    .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+    transport
+        .send(ProtocolMessage {
+            from: my_party_id,
+            to: None,
+            round: 30,
+            payload: round1_payload,
+        })
+        .await?;
+
+    // Collect Round 1 from all signers
+    let mut round1_msgs: Vec<serde_json::Value> = Vec::new();
+    round1_msgs.push(serde_json::json!({
+        "party_index": my_index,
+        "k_point": k_point_bytes,
+        "gamma_point": gamma_point_bytes,
+    }));
+    for _ in 1..n_signers {
+        let msg = transport.recv().await?;
+        let v: serde_json::Value = serde_json::from_slice(&msg.payload)
+            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        round1_msgs.push(v);
+    }
+
+    // Compute Gamma_sum = Σ Gamma_i
+    let mut gamma_sum_point = ProjectivePoint::IDENTITY;
+    for r1 in &round1_msgs {
+        let gp_bytes: Vec<u8> = serde_json::from_value(r1["gamma_point"].clone())
+            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        let gp = k256::PublicKey::from_sec1_bytes(&gp_bytes)
+            .map_err(|e| CoreError::Crypto(format!("invalid Gamma point: {e}")))?;
+        gamma_sum_point += gp.to_projective();
+    }
+
+    // ── Per-round sync barrier (L-012 fix)
+    transport.wait_ready().await?;
+
+    // ── Round 2: MtA for delta (k*gamma) and chi (k*x) ─────────────────
+    let mta_party_a_k = MtaPartyA::new(
+        my_pk.clone(),
+        my_sk.clone(),
+        Zeroizing::new(k_i.to_repr().to_vec()),
+    );
+    let mta_witness = mta_party_a_k.round1_with_witness();
+    let mta_round1_k = mta_witness.message;
+
+    // Generate Πenc + Πlog* proofs
+    let pi_enc_public = PiEncPublicInput {
+        pk_n: my_pk.n.clone(),
+        pk_n_squared: my_pk.n_squared.clone(),
+        ciphertext: mta_round1_k.ciphertext.data.clone(),
+        n_hat: ped_n_hat.clone(),
+        s: ped_s.clone(),
+        t: ped_t.clone(),
+    };
+    let m_big = BigUint::from_bytes_be(&mta_witness.plaintext_m);
+    let r_big = BigUint::from_bytes_be(&mta_witness.randomness_r);
+    let pi_enc = crate::paillier::zk_proofs::prove_pienc(&m_big, &r_big, &pi_enc_public);
+
+    let pi_logstar_public = PiLogStarPublicInput {
+        pk_n: my_pk.n.clone(),
+        pk_n_squared: my_pk.n_squared.clone(),
+        ciphertext: mta_round1_k.ciphertext.data.clone(),
+        x_commitment: k_point_bytes.clone(),
+        n_hat: ped_n_hat.clone(),
+        s: ped_s.clone(),
+        t: ped_t.clone(),
+    };
+    let pi_logstar =
+        crate::paillier::zk_proofs::prove_pilogstar(&m_big, &r_big, &pi_logstar_public);
+
+    // Broadcast Enc(k_i) + proofs
+    let mta_r2_payload = serde_json::to_vec(&serde_json::json!({
+        "party_index": my_index,
+        "encrypted_k": serde_json::to_value(&mta_round1_k.ciphertext).unwrap(),
+        "pi_enc": serde_json::to_value(&pi_enc).unwrap(),
+        "pi_logstar": serde_json::to_value(&pi_logstar).unwrap(),
+        "k_point": k_point_bytes,
+    }))
+    .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+    transport
+        .send(ProtocolMessage {
+            from: my_party_id,
+            to: None,
+            round: 31,
+            payload: mta_r2_payload,
+        })
+        .await?;
+
+    // Collect Enc(k_j) from peers
+    let mut peer_enc_k: Vec<serde_json::Value> = Vec::new();
+    peer_enc_k.push(serde_json::json!({
+        "party_index": my_index,
+        "encrypted_k": serde_json::to_value(&mta_round1_k.ciphertext).unwrap(),
+    }));
+    let mut index_to_transport: std::collections::HashMap<u16, PartyId> =
+        std::collections::HashMap::new();
+    index_to_transport.insert(my_index, my_party_id);
+
+    for _ in 1..n_signers {
+        let msg = transport.recv().await?;
+        let v: serde_json::Value = serde_json::from_slice(&msg.payload)
+            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        let peer_idx = v["party_index"].as_u64().unwrap_or(0) as u16;
+        index_to_transport.insert(peer_idx, msg.from);
+
+        // Verify Πenc + Πlog* from peer
+        let peer_pk_idx = (peer_idx - 1) as usize;
+        let peer_pk = &all_pks[peer_pk_idx];
+        if let Ok(pi_enc_peer) =
+            serde_json::from_value::<crate::paillier::zk_proofs::PiEncProof>(v["pi_enc"].clone())
+        {
+            let enc_ct: crate::paillier::PaillierCiphertext =
+                serde_json::from_value(v["encrypted_k"].clone())
+                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            let pub_input = PiEncPublicInput {
+                pk_n: peer_pk.n.clone(),
+                pk_n_squared: peer_pk.n_squared.clone(),
+                ciphertext: enc_ct.data.clone(),
+                n_hat: ped_n_hat.clone(),
+                s: ped_s.clone(),
+                t: ped_t.clone(),
+            };
+            if !crate::paillier::zk_proofs::verify_pienc(&pi_enc_peer, &pub_input) {
+                return Err(CoreError::Protocol(format!(
+                    "GG20 MtA: Πenc failed for party {} — identifiable abort",
+                    peer_idx
+                )));
+            }
+        }
+        if let (Ok(pi_ls), Ok(kp_bytes)) = (
+            serde_json::from_value::<crate::paillier::zk_proofs::PiLogStarProof>(
+                v["pi_logstar"].clone(),
+            ),
+            serde_json::from_value::<Vec<u8>>(v["k_point"].clone()),
+        ) {
+            let enc_ct: crate::paillier::PaillierCiphertext =
+                serde_json::from_value(v["encrypted_k"].clone())
+                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            let pub_input = PiLogStarPublicInput {
+                pk_n: peer_pk.n.clone(),
+                pk_n_squared: peer_pk.n_squared.clone(),
+                ciphertext: enc_ct.data.clone(),
+                x_commitment: kp_bytes,
+                n_hat: ped_n_hat.clone(),
+                s: ped_s.clone(),
+                t: ped_t.clone(),
+            };
+            if !crate::paillier::zk_proofs::verify_pilogstar(&pi_ls, &pub_input) {
+                return Err(CoreError::Protocol(format!(
+                    "GG20 MtA: Πlog* failed for party {} — identifiable abort",
+                    peer_idx
+                )));
+            }
+        }
+
+        peer_enc_k.push(v);
+    }
+    peer_enc_k.sort_by_key(|v| v["party_index"].as_u64().unwrap_or(0));
+
+    // MtA as Party B for each peer's Enc(k_j)
+    let gamma_i_bytes = Zeroizing::new(gamma_i.to_repr().to_vec());
+    let x_i_add_bytes = Zeroizing::new(x_i_add.to_repr().to_vec());
+
+    let mut delta_beta_shares: Vec<Zeroizing<Vec<u8>>> = Vec::new();
+    let mut chi_beta_shares: Vec<Zeroizing<Vec<u8>>> = Vec::new();
+
+    for peer_v in &peer_enc_k {
+        let peer_idx = peer_v["party_index"].as_u64().unwrap_or(0) as u16;
+        if peer_idx == my_index {
+            continue;
+        }
+        let peer_pk_idx = (peer_idx - 1) as usize;
+        let peer_pk = &all_pks[peer_pk_idx];
+
+        let enc_k: crate::paillier::PaillierCiphertext =
+            serde_json::from_value(peer_v["encrypted_k"].clone())
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+        // MtA for delta: k_j * gamma_i
+        let mta_b_delta = MtaPartyB::new(peer_pk.clone(), gamma_i_bytes.clone());
+        let mta_r1_in = MtaRound1 {
+            ciphertext: enc_k.clone(),
+        };
+        let mta_w_delta = mta_b_delta.round2_with_witness(&mta_r1_in);
+
+        // MtA for chi: k_j * x_i_add
+        let mta_b_chi = MtaPartyB::new(peer_pk.clone(), x_i_add_bytes.clone());
+        let mta_r1_chi = MtaRound1 {
+            ciphertext: enc_k.clone(),
+        };
+        let mta_w_chi = mta_b_chi.round2_with_witness(&mta_r1_chi);
+
+        // Generate Πaff-g proofs
+        let beta_d = BigUint::from_bytes_be(&mta_w_delta.result.beta);
+        let rho_d = BigUint::from_bytes_be(&mta_w_delta.rho_y);
+        let pi_affg_d = crate::paillier::zk_proofs::prove_piaffg(
+            &BigUint::from_bytes_be(&gamma_i_bytes),
+            &beta_d,
+            &rho_d,
+            &PiAffgPublicInput {
+                pk_n0: peer_pk.n.clone(),
+                pk_n0_squared: peer_pk.n_squared.clone(),
+                c: enc_k.data.clone(),
+                d: mta_w_delta.result.ciphertext.data.clone(),
+                n_hat: ped_n_hat.clone(),
+                s: ped_s.clone(),
+                t: ped_t.clone(),
+            },
+        );
+
+        let beta_c = BigUint::from_bytes_be(&mta_w_chi.result.beta);
+        let rho_c = BigUint::from_bytes_be(&mta_w_chi.rho_y);
+        let pi_affg_c = crate::paillier::zk_proofs::prove_piaffg(
+            &BigUint::from_bytes_be(&x_i_add_bytes),
+            &beta_c,
+            &rho_c,
+            &PiAffgPublicInput {
+                pk_n0: peer_pk.n.clone(),
+                pk_n0_squared: peer_pk.n_squared.clone(),
+                c: enc_k.data.clone(),
+                d: mta_w_chi.result.ciphertext.data.clone(),
+                n_hat: ped_n_hat.clone(),
+                s: ped_s.clone(),
+                t: ped_t.clone(),
+            },
+        );
+
+        delta_beta_shares.push(mta_w_delta.result.beta);
+        chi_beta_shares.push(mta_w_chi.result.beta);
+
+        // Send MtA responses + Πaff-g proofs to peer
+        let peer_transport_id = index_to_transport.get(&peer_idx).copied().ok_or_else(|| {
+            CoreError::Protocol(format!("no transport mapping for party {}", peer_idx))
+        })?;
+        let response = serde_json::json!({
+            "from_party": my_index,
+            "delta_ct": serde_json::to_value(&mta_w_delta.result.ciphertext).unwrap(),
+            "chi_ct": serde_json::to_value(&mta_w_chi.result.ciphertext).unwrap(),
+            "pi_affg_delta": serde_json::to_value(&pi_affg_d).unwrap(),
+            "pi_affg_chi": serde_json::to_value(&pi_affg_c).unwrap(),
+        });
+        let payload =
+            serde_json::to_vec(&response).map_err(|e| CoreError::Serialization(e.to_string()))?;
+        transport
+            .send(ProtocolMessage {
+                from: my_party_id,
+                to: Some(peer_transport_id),
+                round: 32,
+                payload,
+            })
+            .await?;
+    }
+
+    // Aggregate delta and chi
+    let n_big = my_pk.n_biguint();
+    let n_half = &n_big >> 1;
+    let secp_order = BigUint::from_bytes_be(
+        &hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141").unwrap(),
+    );
+
+    let mut delta_scalar = *k_i * *gamma_i;
+    let mut chi_scalar = *k_i * *x_i_add;
+
+    // Subtract beta shares (MtA formula: alpha - beta = a*b)
+    for beta_bytes in &delta_beta_shares {
+        delta_scalar -= crate::protocol::cggmp21::to_scalar_signed(
+            &BigUint::from_bytes_be(beta_bytes),
+            &n_big,
+            &n_half,
+            &secp_order,
+        );
+    }
+    for beta_bytes in &chi_beta_shares {
+        chi_scalar -= crate::protocol::cggmp21::to_scalar_signed(
+            &BigUint::from_bytes_be(beta_bytes),
+            &n_big,
+            &n_half,
+            &secp_order,
+        );
+    }
+
+    // Receive alpha shares from peers
+    for _ in 1..n_signers {
+        let msg = transport.recv().await?;
+        let r3: serde_json::Value = serde_json::from_slice(&msg.payload)
+            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+        let delta_ct: crate::paillier::PaillierCiphertext =
+            serde_json::from_value(r3["delta_ct"].clone())
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        let chi_ct: crate::paillier::PaillierCiphertext =
+            serde_json::from_value(r3["chi_ct"].clone())
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+        // Verify Πaff-g proofs
+        if let Some(pi_d_val) = r3.get("pi_affg_delta").filter(|v| !v.is_null()) {
+            let pi_d: crate::paillier::zk_proofs::PiAffgProof =
+                serde_json::from_value(pi_d_val.clone())
+                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            let verify_pub = PiAffgPublicInput {
+                pk_n0: my_pk.n.clone(),
+                pk_n0_squared: my_pk.n_squared.clone(),
+                c: mta_round1_k.ciphertext.data.clone(),
+                d: delta_ct.data.clone(),
+                n_hat: ped_n_hat.clone(),
+                s: ped_s.clone(),
+                t: ped_t.clone(),
+            };
+            if !crate::paillier::zk_proofs::verify_piaffg(&pi_d, &verify_pub) {
+                return Err(CoreError::Protocol(
+                    "GG20 MtA: Πaff-g (delta) verification failed — identifiable abort".into(),
+                ));
+            }
+        }
+        if let Some(pi_c_val) = r3.get("pi_affg_chi").filter(|v| !v.is_null()) {
+            let pi_c: crate::paillier::zk_proofs::PiAffgProof =
+                serde_json::from_value(pi_c_val.clone())
+                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            let verify_pub = PiAffgPublicInput {
+                pk_n0: my_pk.n.clone(),
+                pk_n0_squared: my_pk.n_squared.clone(),
+                c: mta_round1_k.ciphertext.data.clone(),
+                d: chi_ct.data.clone(),
+                n_hat: ped_n_hat.clone(),
+                s: ped_s.clone(),
+                t: ped_t.clone(),
+            };
+            if !crate::paillier::zk_proofs::verify_piaffg(&pi_c, &verify_pub) {
+                return Err(CoreError::Protocol(
+                    "GG20 MtA: Πaff-g (chi) verification failed — identifiable abort".into(),
+                ));
+            }
+        }
+
+        let alpha_d = mta_party_a_k.round2_finish(&delta_ct);
+        delta_scalar += crate::protocol::cggmp21::to_scalar_signed(
+            &BigUint::from_bytes_be(&alpha_d),
+            &n_big,
+            &n_half,
+            &secp_order,
+        );
+
+        let alpha_c = mta_party_a_k.round2_finish(&chi_ct);
+        chi_scalar += crate::protocol::cggmp21::to_scalar_signed(
+            &BigUint::from_bytes_be(&alpha_c),
+            &n_big,
+            &n_half,
+            &secp_order,
+        );
+    }
+
+    // ── Per-round sync barrier (L-012 fix)
+    transport.wait_ready().await?;
+
+    // ── Round 3: Broadcast delta_i, aggregate ────────────────────────────
+    let delta_payload = serde_json::to_vec(&serde_json::json!({
+        "party_index": my_index,
+        "delta_i": delta_scalar.to_repr().as_slice(),
+    }))
+    .map_err(|e| CoreError::Serialization(e.to_string()))?;
+    transport
+        .send(ProtocolMessage {
+            from: my_party_id,
+            to: None,
+            round: 33,
+            payload: delta_payload,
+        })
+        .await?;
+
+    let mut delta_sum = delta_scalar;
+    for _ in 1..n_signers {
+        let msg = transport.recv().await?;
+        let v: serde_json::Value = serde_json::from_slice(&msg.payload)
+            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        let delta_j_bytes: Vec<u8> = serde_json::from_value(v["delta_i"].clone())
+            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        let delta_j = Scalar::from_repr(*k256::FieldBytes::from_slice(&delta_j_bytes))
+            .into_option()
+            .ok_or_else(|| CoreError::Crypto("invalid delta scalar from peer".into()))?;
+        delta_sum += delta_j;
+    }
+
+    // ── Compute R = δ⁻¹ · Γ_sum = k⁻¹·G ────────────────────────────────
+    let delta_inv = delta_sum
+        .invert()
+        .into_option()
+        .ok_or_else(|| CoreError::Crypto("delta sum is zero — protocol abort".into()))?;
+
+    let big_r_point = (gamma_sum_point * delta_inv).to_affine();
+    let big_r_bytes = big_r_point.to_bytes();
+
+    // Extract r = R.x mod n
+    let r_x_bytes: [u8; 32] = big_r_bytes[1..33]
+        .try_into()
+        .map_err(|_| CoreError::Crypto("failed to extract R.x".into()))?;
+    let r_scalar = Scalar::from_repr(*k256::FieldBytes::from_slice(&r_x_bytes))
+        .into_option()
+        .ok_or_else(|| CoreError::Crypto("R.x does not reduce to valid scalar".into()))?;
+
+    // ── Per-round sync barrier (L-012 fix)
+    transport.wait_ready().await?;
+
+    // ── Round 4: Online signing — σ_i = k_i·m + χ_i·r ──────────────────
+    let hash_bytes = sha2::Sha256::digest(message);
+    use k256::elliptic_curve::ops::Reduce;
+    use k256::U256;
+    let m_scalar =
+        <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&hash_bytes));
+
+    let sigma_i = *k_i * m_scalar + chi_scalar * r_scalar;
+
+    let sigma_payload = serde_json::to_vec(&serde_json::json!({
+        "party_index": my_index,
+        "sigma_i": sigma_i.to_repr().as_slice(),
+    }))
+    .map_err(|e| CoreError::Serialization(e.to_string()))?;
+    transport
+        .send(ProtocolMessage {
+            from: my_party_id,
+            to: None,
+            round: 34,
+            payload: sigma_payload,
+        })
+        .await?;
+
+    let mut s_sum = sigma_i;
+    for _ in 1..n_signers {
+        let msg = transport.recv().await?;
+        let v: serde_json::Value = serde_json::from_slice(&msg.payload)
+            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        let sigma_j_bytes: Vec<u8> = serde_json::from_value(v["sigma_i"].clone())
+            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        let sigma_j = Scalar::from_repr(*k256::FieldBytes::from_slice(&sigma_j_bytes))
+            .into_option()
+            .ok_or_else(|| CoreError::Crypto("invalid sigma scalar from peer".into()))?;
+        s_sum += sigma_j;
+    }
+
+    // s = Σ σ_i = k·(m + xr)
+    let s = s_sum;
+
+    // ── Build and normalize signature ────────────────────────────────────
+    let r_bytes_arr: [u8; 32] = r_scalar.to_repr().into();
+    let s_bytes_arr: [u8; 32] = s.to_repr().into();
+    let mut sig_bytes = [0u8; 64];
+    sig_bytes[..32].copy_from_slice(&r_bytes_arr);
+    sig_bytes[32..].copy_from_slice(&s_bytes_arr);
+
+    let raw_sig = k256::ecdsa::Signature::from_bytes(&sig_bytes.into())
+        .map_err(|e| CoreError::Crypto(format!("invalid ECDSA signature: {e}")))?;
+
+    // Low-s normalization (SEC-012 / EIP-2)
+    let normalized_sig = match raw_sig.normalize_s() {
+        Some(n) => n,
+        None => raw_sig,
+    };
+
+    let norm_bytes = normalized_sig.to_bytes();
+    let final_r: [u8; 32] = norm_bytes[..32].try_into().unwrap();
+    let final_s: [u8; 32] = norm_bytes[32..].try_into().unwrap();
+
+    // Determine recovery_id
+    let pubkey = k256::PublicKey::from_sec1_bytes(key_share.group_public_key.as_bytes())
+        .map_err(|e| CoreError::Crypto(format!("bad group pubkey: {e}")))?;
+    let verifying_key = k256::ecdsa::VerifyingKey::from(&pubkey);
+
+    let recovery_id = (0u8..4)
+        .find(|&v| {
+            let recid = k256::ecdsa::RecoveryId::try_from(v).unwrap();
+            k256::ecdsa::VerifyingKey::recover_from_prehash(&hash_bytes, &normalized_sig, recid)
+                .map(|recovered| recovered == verifying_key)
+                .unwrap_or(false)
+        })
+        .unwrap_or(0);
+
+    Ok(MpcSignature::Ecdsa {
+        r: final_r.to_vec(),
+        s: final_s.to_vec(),
+        recovery_id,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
