@@ -218,13 +218,22 @@ struct AuxInfoBroadcast {
     pedersen_t: Option<Vec<u8>>,
 }
 
-/// Round 2 message for pre-signing with real MtA: encrypted k_i.
+/// Round 2 message for pre-signing with real MtA: encrypted k_i + ZK proofs.
 #[derive(Serialize, Deserialize)]
 struct PreSignMtaRound2 {
     /// Sender party index.
     party_index: u16,
     /// Enc(k_i) — encryption of sender's nonce share under sender's Paillier key.
     encrypted_k: crate::paillier::PaillierCiphertext,
+    /// Πenc proof: proves |k_i| < 2^256 (CGGMP21 Fig. 14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pi_enc: Option<crate::paillier::zk_proofs::PiEncProof>,
+    /// Πlog* proof: proves Enc(k_i) matches K_i = k_i*G (CGGMP21 Fig. 25).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pi_logstar: Option<crate::paillier::zk_proofs::PiLogStarProof>,
+    /// K_i = k_i*G point for Πlog* verification (33 bytes compressed SEC1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    k_point: Option<Vec<u8>>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1235,18 +1244,59 @@ async fn cggmp21_pre_sign(
         let my_sk = share_data.real_paillier_sk.as_ref().unwrap().clone();
         let all_pks = share_data.all_paillier_pks.as_ref().unwrap();
 
-        // Create MtA Party A for k_i
+        // Create MtA Party A for k_i — use witness version for ZK proof generation
         let mta_party_a_k = MtaPartyA::new(
             my_pk.clone(),
             my_sk.clone(),
             Zeroizing::new(k_i.to_repr().to_vec()),
         );
-        let mta_round1_k = mta_party_a_k.round1();
+        let mta_witness = mta_party_a_k.round1_with_witness();
+        let mta_round1_k = mta_witness.message;
 
-        // Broadcast Enc(k_i)
+        // ── Generate Πenc proof (CGGMP21 Fig. 14): |k_i| < 2^256 ────────
+        // Uses prover's own Pedersen params for range commitment
+        let (pi_enc_proof, pi_logstar_proof) = if share_data.has_real_aux_info() {
+            let ped_n_hat = share_data.real_pedersen_n_hat.as_ref().unwrap();
+            let ped_s = share_data.real_pedersen_s.as_ref().unwrap();
+            let ped_t = share_data.real_pedersen_t.as_ref().unwrap();
+
+            let pi_enc_public = crate::paillier::zk_proofs::PiEncPublicInput {
+                pk_n: my_pk.n.clone(),
+                pk_n_squared: my_pk.n_squared.clone(),
+                ciphertext: mta_round1_k.ciphertext.data.clone(),
+                n_hat: ped_n_hat.clone(),
+                s: ped_s.clone(),
+                t: ped_t.clone(),
+            };
+            let m_big = BigUint::from_bytes_be(&mta_witness.plaintext_m);
+            let r_big = BigUint::from_bytes_be(&mta_witness.randomness_r);
+            let enc_proof = crate::paillier::zk_proofs::prove_pienc(&m_big, &r_big, &pi_enc_public);
+
+            // ── Generate Πlog* proof (CGGMP21 Fig. 25): Enc(k_i) ↔ K_i = k_i*G ──
+            let pi_logstar_public = crate::paillier::zk_proofs::PiLogStarPublicInput {
+                pk_n: my_pk.n.clone(),
+                pk_n_squared: my_pk.n_squared.clone(),
+                ciphertext: mta_round1_k.ciphertext.data.clone(),
+                x_commitment: k_point_bytes.clone(),
+                n_hat: ped_n_hat.clone(),
+                s: ped_s.clone(),
+                t: ped_t.clone(),
+            };
+            let logstar_proof =
+                crate::paillier::zk_proofs::prove_pilogstar(&m_big, &r_big, &pi_logstar_public);
+
+            (Some(enc_proof), Some(logstar_proof))
+        } else {
+            (None, None)
+        };
+
+        // Broadcast Enc(k_i) + ZK proofs
         let mta_r2_msg = PreSignMtaRound2 {
             party_index: my_index,
             encrypted_k: mta_round1_k.ciphertext.clone(),
+            pi_enc: pi_enc_proof,
+            pi_logstar: pi_logstar_proof,
+            k_point: Some(k_point_bytes.clone()),
         };
         let mta_r2_payload =
             serde_json::to_vec(&mta_r2_msg).map_err(|e| CoreError::Serialization(e.to_string()))?;
@@ -1286,6 +1336,18 @@ async fn cggmp21_pre_sign(
         let mut delta_beta_shares: Vec<Zeroizing<Vec<u8>>> = Vec::new();
         let mut chi_beta_shares: Vec<Zeroizing<Vec<u8>>> = Vec::new();
 
+        // Get own Pedersen params for proof generation/verification
+        let has_pedersen = share_data.has_real_aux_info();
+        let own_ped = if has_pedersen {
+            Some((
+                share_data.real_pedersen_n_hat.as_ref().unwrap().clone(),
+                share_data.real_pedersen_s.as_ref().unwrap().clone(),
+                share_data.real_pedersen_t.as_ref().unwrap().clone(),
+            ))
+        } else {
+            None
+        };
+
         for peer_msg in &peer_enc_k {
             if peer_msg.party_index == my_index {
                 continue;
@@ -1299,23 +1361,70 @@ async fn cggmp21_pre_sign(
             }
             let peer_pk = &all_pks[peer_pk_idx];
 
-            // MtA for delta: k_j * gamma_i
+            // ── Verify Πenc + Πlog* proofs from peer (if present) ────────
+            if let (Some(ref pi_enc), Some(ref ped)) = (&peer_msg.pi_enc, &own_ped) {
+                let pi_enc_public = crate::paillier::zk_proofs::PiEncPublicInput {
+                    pk_n: peer_pk.n.clone(),
+                    pk_n_squared: peer_pk.n_squared.clone(),
+                    ciphertext: peer_msg.encrypted_k.data.clone(),
+                    n_hat: ped.0.clone(),
+                    s: ped.1.clone(),
+                    t: ped.2.clone(),
+                };
+                if !crate::paillier::zk_proofs::verify_pienc(pi_enc, &pi_enc_public) {
+                    return Err(CoreError::Protocol(format!(
+                        "Πenc proof failed for party {} — identifiable abort",
+                        peer_msg.party_index
+                    )));
+                }
+            }
+            if let (Some(ref pi_logstar), Some(ref k_pt), Some(ref ped)) =
+                (&peer_msg.pi_logstar, &peer_msg.k_point, &own_ped)
+            {
+                let pi_logstar_public = crate::paillier::zk_proofs::PiLogStarPublicInput {
+                    pk_n: peer_pk.n.clone(),
+                    pk_n_squared: peer_pk.n_squared.clone(),
+                    ciphertext: peer_msg.encrypted_k.data.clone(),
+                    x_commitment: k_pt.clone(),
+                    n_hat: ped.0.clone(),
+                    s: ped.1.clone(),
+                    t: ped.2.clone(),
+                };
+                if !crate::paillier::zk_proofs::verify_pilogstar(pi_logstar, &pi_logstar_public) {
+                    return Err(CoreError::Protocol(format!(
+                        "Πlog* proof failed for party {} — identifiable abort",
+                        peer_msg.party_index
+                    )));
+                }
+            }
+
+            // MtA for delta: k_j * gamma_i — use witness for Πaff-g proof
             let mta_b_delta = MtaPartyB::new(peer_pk.clone(), gamma_i_bytes.clone());
             let mta_r1_in = MtaRound1 {
                 ciphertext: peer_msg.encrypted_k.clone(),
             };
-            let mta_out_delta = mta_b_delta.round2(&mta_r1_in);
-            delta_beta_shares.push(mta_out_delta.beta);
+            let mta_w_delta = mta_b_delta.round2_with_witness(&mta_r1_in);
 
-            // MtA for chi: k_j * (x_i * lambda_i)
+            // MtA for chi: k_j * (x_i * lambda_i) — use witness for Πaff-g proof
             let mta_b_chi = MtaPartyB::new(peer_pk.clone(), x_i_lambda_i_bytes.clone());
             let mta_r1_in_chi = MtaRound1 {
                 ciphertext: peer_msg.encrypted_k.clone(),
             };
-            let mta_out_chi = mta_b_chi.round2(&mta_r1_in_chi);
-            chi_beta_shares.push(mta_out_chi.beta);
+            let mta_w_chi = mta_b_chi.round2_with_witness(&mta_r1_in_chi);
 
-            // Send both MtA responses to peer (use transport PartyId, not keygen index)
+            // ── Πaff-g proofs (CGGMP21 Fig. 15) — DEFERRED ─────────────────
+            // Πaff-g requires y (= -beta') to be bounded by 2^256, but our MtA
+            // samples beta' from [0, N) where N ~ 2^1024. The CGGMP21 paper
+            // assumes beta' is sampled from a small range [-2^(ell+eps), 2^(ell+eps)].
+            // TODO(Sprint 29): Change MtA beta sampling to small range + prove.
+            let (pi_affg_delta, pi_affg_chi): (Option<serde_json::Value>, Option<serde_json::Value>) =
+                (None, None);
+
+            // Push beta shares AFTER proof generation (Zeroizing moves on push)
+            delta_beta_shares.push(mta_w_delta.result.beta);
+            chi_beta_shares.push(mta_w_chi.result.beta);
+
+            // Send both MtA responses + Πaff-g proofs to peer
             let peer_transport_id = index_to_transport
                 .get(&peer_msg.party_index)
                 .copied()
@@ -1328,8 +1437,10 @@ async fn cggmp21_pre_sign(
             let combined_response = serde_json::json!({
                 "from_party": my_index,
                 "to_party": peer_msg.party_index,
-                "delta_ct": serde_json::to_value(&mta_out_delta.ciphertext).unwrap(),
-                "chi_ct": serde_json::to_value(&mta_out_chi.ciphertext).unwrap(),
+                "delta_ct": serde_json::to_value(&mta_w_delta.result.ciphertext).unwrap(),
+                "chi_ct": serde_json::to_value(&mta_w_chi.result.ciphertext).unwrap(),
+                "pi_affg_delta": pi_affg_delta,
+                "pi_affg_chi": pi_affg_chi,
             });
             let payload = serde_json::to_vec(&combined_response)
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
@@ -1377,10 +1488,13 @@ async fn cggmp21_pre_sign(
         }
 
         // Receive alpha shares from peers (responses to our Enc(k_i) broadcast)
+        // Verify Πaff-g proofs before decrypting (CGGMP21 Fig. 15)
         for _ in 1..n_signers {
             let msg = transport.recv().await?;
             let r3: serde_json::Value = serde_json::from_slice(&msg.payload)
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+            let _from_party = r3["from_party"].as_u64().unwrap_or(0) as u16;
 
             let delta_ct: crate::paillier::PaillierCiphertext =
                 serde_json::from_value(r3["delta_ct"].clone())
@@ -1388,6 +1502,9 @@ async fn cggmp21_pre_sign(
             let chi_ct: crate::paillier::PaillierCiphertext =
                 serde_json::from_value(r3["chi_ct"].clone())
                     .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+            // Πaff-g verification deferred to Sprint 29 (see comment above)
+            // TODO: Verify pi_affg_delta and pi_affg_chi when MtA beta sampling is fixed
 
             // Decrypt as Party A, reduce to Scalar
             let alpha_d = mta_party_a_k.round2_finish(&delta_ct);
