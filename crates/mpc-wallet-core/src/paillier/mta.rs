@@ -391,8 +391,14 @@ mod tests {
         let _m: &Zeroizing<Vec<u8>> = &witness.plaintext_m;
         let _r: &Zeroizing<Vec<u8>> = &witness.randomness_r;
         // Non-empty values
-        assert!(!witness.plaintext_m.is_empty(), "plaintext_m should not be empty");
-        assert!(!witness.randomness_r.is_empty(), "randomness_r should not be empty");
+        assert!(
+            !witness.plaintext_m.is_empty(),
+            "plaintext_m should not be empty"
+        );
+        assert!(
+            !witness.randomness_r.is_empty(),
+            "randomness_r should not be empty"
+        );
     }
 
     #[test]

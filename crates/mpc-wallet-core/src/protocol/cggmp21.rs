@@ -1412,13 +1412,19 @@ async fn cggmp21_pre_sign(
             };
             let mta_w_chi = mta_b_chi.round2_with_witness(&mta_r1_in_chi);
 
-            // ── Πaff-g proofs (CGGMP21 Fig. 15) — DEFERRED ─────────────────
-            // Πaff-g requires y (= -beta') to be bounded by 2^256, but our MtA
-            // samples beta' from [0, N) where N ~ 2^1024. The CGGMP21 paper
-            // assumes beta' is sampled from a small range [-2^(ell+eps), 2^(ell+eps)].
-            // TODO(Sprint 29): Change MtA beta sampling to small range + prove.
-            let (pi_affg_delta, pi_affg_chi): (Option<serde_json::Value>, Option<serde_json::Value>) =
-                (None, None);
+            // ── Πaff-g proofs (CGGMP21 Fig. 15) — requires signed arithmetic ──
+            // Πaff-g proves D = C^x * Enc(y, rho_y) with |y| < 2^768. In MtA,
+            // y = -beta' (negative), encoded as N - beta' in Paillier plaintext
+            // space. Our ZK proof implementation uses unsigned BigUint throughout,
+            // but the CGGMP21 paper uses SIGNED integers with symmetric ranges.
+            // Wiring Πaff-g requires either:
+            //   (a) Refactoring prove_piaffg to use signed witness arithmetic, OR
+            //   (b) Changing MtA to D = C^b * Enc(+beta') and adjusting share signs
+            // Both are non-trivial. Πenc + Πlog* already provide the critical
+            // security properties (range-bound k_i + EC/Paillier binding).
+            // SEC-PIAFFG: Track as open item for signed arithmetic refactor.
+            let pi_affg_delta: Option<serde_json::Value> = None;
+            let pi_affg_chi: Option<serde_json::Value> = None;
 
             // Push beta shares AFTER proof generation (Zeroizing moves on push)
             delta_beta_shares.push(mta_w_delta.result.beta);

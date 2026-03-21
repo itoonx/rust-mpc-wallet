@@ -306,7 +306,10 @@ mod tests {
 
         // Verify r reproduces same ciphertext
         let ct2 = pk.encrypt_with_r(&m, &r);
-        assert_eq!(ct.data, ct2.data, "same (m, r) must produce same ciphertext");
+        assert_eq!(
+            ct.data, ct2.data,
+            "same (m, r) must produce same ciphertext"
+        );
 
         // Verify r is coprime to N
         let n = pk.n_biguint();
