@@ -22,6 +22,14 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+/// MtA beta sampling range: 2^ELL = 2^256.
+///
+/// CGGMP21 Πaff-g range check requires z2 = beta_mask + e*y < 2^(ELL+EPSILON).
+/// With beta_mask < 2^768 (masking), e < 2^128 (challenge), and y < 2^256:
+///   z2 < 2^768 + 2^128 * 2^256 = 2^768 + 2^384 < 2^769 ≈ 2^768 ✓
+/// If y were 2^768, z2 would be ~2^896 which FAILS the 2^768 check.
+const MTA_BETA_BITS: usize = 256;
+
 /// Party A in the MtA protocol. Holds the Paillier keypair and secret `a`.
 pub struct MtaPartyA {
     sk: PaillierSecretKey,
@@ -180,28 +188,33 @@ impl MtaPartyB {
     ///
     /// Use this instead of `round2()` when you need to generate a Piaffg proof
     /// proving the affine operation D = C^x * Enc(y, rho_y) is correct.
+    ///
+    /// ## MtA Formula (SEC-PIAFFG fix)
+    ///
+    /// Uses POSITIVE beta: `D = C^b * Enc(+beta', rho_y) = Enc(a*b + beta')`.
+    /// - Party A decrypts: `alpha = a*b + beta'`
+    /// - Party B's share: `-beta'` (negated at aggregation time)
+    /// - Sum: `alpha - beta = a*b` ✓
+    ///
+    /// This ensures the Πaff-g witness `y = beta'` is small (< 2^768),
+    /// satisfying the range check `|y| < 2^(ell + epsilon)`.
+    ///
+    /// Beta is sampled from `[1, 2^768)` per CGGMP21 spec (not `[0, N)`).
     pub fn round2_with_witness(&self, msg: &MtaRound1) -> MtaRound2WithWitness {
-        let n = self.peer_pk.n_biguint();
         let b = BigUint::from_bytes_be(&self.secret_b);
 
         // c_A^b = Enc_A(a * b)
         let c_ab = self.peer_pk.scalar_mult(&msg.ciphertext, &b);
 
-        // Sample random beta' in [0, N)
-        let beta_prime = sample_mod_n(&n);
+        // Sample random beta' in [1, 2^256) for Πaff-g compatibility.
+        // Must be small enough that z2 = mask + e*beta < 2^768 in the proof.
+        let beta_bound = BigUint::from(1u32) << MTA_BETA_BITS;
+        let beta_prime = sample_mod_n(&beta_bound);
 
-        // Compute -beta' mod N = N - beta'
-        let neg_beta = if beta_prime.is_zero() {
-            BigUint::zero()
-        } else {
-            &n - &beta_prime
-        };
-
-        // Enc_A(-beta') — capture randomness for Piaffg proof
-        let (c_neg_beta, rho_y) = self.peer_pk.encrypt_returning_r(&neg_beta);
-
-        // c_B = c_A^b * Enc_A(-beta') = Enc_A(a*b - beta') = Enc_A(a*b + N - beta')
-        let c_b = self.peer_pk.add(&c_ab, &c_neg_beta);
+        // Enc_A(+beta') — POSITIVE beta for Πaff-g compatibility
+        // D = C^b * Enc(beta') = Enc(a*b + beta')
+        let (c_beta, rho_y) = self.peer_pk.encrypt_returning_r(&beta_prime);
+        let c_b = self.peer_pk.add(&c_ab, &c_beta);
 
         MtaRound2WithWitness {
             result: MtaRound2 {
@@ -261,10 +274,11 @@ mod tests {
         let b = BigUint::from(17u64);
         let (alpha, beta, n) = run_mta(&a, &b);
 
-        // alpha + beta mod N should equal a * b mod N
-        let sum = (&alpha + &beta) % &n;
+        // New MtA formula: alpha - beta = a * b mod N
+        // Since alpha = a*b + beta', we compute (alpha + N - beta) % N
+        let diff = (&alpha + &n - &beta) % &n;
         let product = (&a * &b) % &n;
-        assert_eq!(sum, product, "alpha + beta must equal a * b mod N");
+        assert_eq!(diff, product, "alpha - beta must equal a * b mod N");
     }
 
     #[test]
@@ -277,12 +291,12 @@ mod tests {
             let b = BigUint::from(b_val);
             let (alpha, beta, n) = run_mta(&a, &b);
 
-            let sum = (&alpha + &beta) % &n;
+            let diff = (&alpha + &n - &beta) % &n;
             let product = (&a * &b) % &n;
             assert_eq!(
-                sum, product,
-                "MtA failed for a={}, b={}: alpha+beta={} != a*b={}",
-                a_val, b_val, sum, product
+                diff, product,
+                "MtA failed for a={}, b={}: alpha-beta={} != a*b={}",
+                a_val, b_val, diff, product
             );
         }
     }
@@ -293,9 +307,9 @@ mod tests {
         let b = BigUint::from(42u64);
         let (alpha, beta, n) = run_mta(&a, &b);
 
-        // a=0 means a*b=0, so alpha + beta = 0 mod N
-        let sum = (&alpha + &beta) % &n;
-        assert_eq!(sum, BigUint::zero(), "0 * b must give alpha + beta = 0");
+        // a=0 means a*b=0, so alpha - beta = 0 mod N
+        let diff = (&alpha + &n - &beta) % &n;
+        assert_eq!(diff, BigUint::zero(), "0 * b must give alpha - beta = 0");
     }
 
     #[test]
@@ -314,9 +328,9 @@ mod tests {
         let b = BigUint::from_bytes_be(&b_bytes) % &n;
 
         let (alpha, beta, n) = run_mta(&a, &b);
-        let sum = (&alpha + &beta) % &n;
+        let diff = (&alpha + &n - &beta) % &n;
         let product = (&a * &b) % &n;
-        assert_eq!(sum, product, "MtA must work with 256-bit scalars");
+        assert_eq!(diff, product, "MtA must work with 256-bit scalars");
     }
 
     #[test]
@@ -366,9 +380,9 @@ mod tests {
         let beta = BigUint::from_bytes_be(&witness.result.beta);
         let n = pk.n_biguint();
 
-        let sum = (&alpha + &beta) % &n;
+        let diff = (&alpha + &n - &beta) % &n;
         let product = (&a * &b) % &n;
-        assert_eq!(sum, product, "MtA with witness must be correct");
+        assert_eq!(diff, product, "MtA with witness must be correct");
 
         // Verify rho_y is coprime to N
         let rho_y = BigUint::from_bytes_be(&witness.rho_y);

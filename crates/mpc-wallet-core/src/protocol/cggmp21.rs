@@ -964,6 +964,9 @@ async fn cggmp21_keygen(
         *final_share += share_scalar;
     }
 
+    // ── Per-round sync barrier (L-012 fix): ensure all Feldman VSS complete
+    transport.wait_ready().await?;
+
     // ── Generate auxiliary info (Paillier + Pedersen) ────────────────────
     // Legacy simulated Paillier (kept for backward compat serialization)
     let sim_paillier = generate_paillier_keypair(&x_i, my_index);
@@ -1226,6 +1229,9 @@ async fn cggmp21_pre_sign(
         gamma_sum_point += gp.to_projective();
     }
 
+    // ── Per-round sync barrier (L-012 fix): ensure all parties completed Round 1
+    transport.wait_ready().await?;
+
     // ── Round 2: MtA — compute shares of k * gamma ────────────────────
     // Check if real Paillier keys are available for secure MtA
     // Real Paillier MtA for pre-signing (enabled Sprint 28 Phase C1).
@@ -1412,19 +1418,51 @@ async fn cggmp21_pre_sign(
             };
             let mta_w_chi = mta_b_chi.round2_with_witness(&mta_r1_in_chi);
 
-            // ── Πaff-g proofs (CGGMP21 Fig. 15) — requires signed arithmetic ──
-            // Πaff-g proves D = C^x * Enc(y, rho_y) with |y| < 2^768. In MtA,
-            // y = -beta' (negative), encoded as N - beta' in Paillier plaintext
-            // space. Our ZK proof implementation uses unsigned BigUint throughout,
-            // but the CGGMP21 paper uses SIGNED integers with symmetric ranges.
-            // Wiring Πaff-g requires either:
-            //   (a) Refactoring prove_piaffg to use signed witness arithmetic, OR
-            //   (b) Changing MtA to D = C^b * Enc(+beta') and adjusting share signs
-            // Both are non-trivial. Πenc + Πlog* already provide the critical
-            // security properties (range-bound k_i + EC/Paillier binding).
-            // SEC-PIAFFG: Track as open item for signed arithmetic refactor.
-            let pi_affg_delta: Option<serde_json::Value> = None;
-            let pi_affg_chi: Option<serde_json::Value> = None;
+            // ── Generate Πaff-g proofs (CGGMP21 Fig. 15) ─────────────────
+            // MtA now uses D = C^b * Enc(+beta') with beta' < 2^768.
+            // Πaff-g witness: x = gamma_i (or x_i*lambda_i), y = beta' (both small).
+            let (pi_affg_delta, pi_affg_chi) = if let Some(ref ped) = own_ped {
+                let beta_d = BigUint::from_bytes_be(&mta_w_delta.result.beta);
+                let rho_d = BigUint::from_bytes_be(&mta_w_delta.rho_y);
+                let proof_d = crate::paillier::zk_proofs::prove_piaffg(
+                    &BigUint::from_bytes_be(&gamma_i_bytes),
+                    &beta_d,
+                    &rho_d,
+                    &crate::paillier::zk_proofs::PiAffgPublicInput {
+                        pk_n0: peer_pk.n.clone(),
+                        pk_n0_squared: peer_pk.n_squared.clone(),
+                        c: peer_msg.encrypted_k.data.clone(),
+                        d: mta_w_delta.result.ciphertext.data.clone(),
+                        n_hat: ped.0.clone(),
+                        s: ped.1.clone(),
+                        t: ped.2.clone(),
+                    },
+                );
+
+                let beta_c = BigUint::from_bytes_be(&mta_w_chi.result.beta);
+                let rho_c = BigUint::from_bytes_be(&mta_w_chi.rho_y);
+                let proof_c = crate::paillier::zk_proofs::prove_piaffg(
+                    &BigUint::from_bytes_be(&x_i_lambda_i_bytes),
+                    &beta_c,
+                    &rho_c,
+                    &crate::paillier::zk_proofs::PiAffgPublicInput {
+                        pk_n0: peer_pk.n.clone(),
+                        pk_n0_squared: peer_pk.n_squared.clone(),
+                        c: peer_msg.encrypted_k.data.clone(),
+                        d: mta_w_chi.result.ciphertext.data.clone(),
+                        n_hat: ped.0.clone(),
+                        s: ped.1.clone(),
+                        t: ped.2.clone(),
+                    },
+                );
+
+                (
+                    Some(serde_json::to_value(&proof_d).unwrap()),
+                    Some(serde_json::to_value(&proof_c).unwrap()),
+                )
+            } else {
+                (None, None)
+            };
 
             // Push beta shares AFTER proof generation (Zeroizing moves on push)
             delta_beta_shares.push(mta_w_delta.result.beta);
@@ -1475,9 +1513,11 @@ async fn cggmp21_pre_sign(
         let mut delta_scalar = *k_i * *gamma_i;
         let mut chi_scalar = *k_i * x_i_lambda_i;
 
-        // Add beta shares (from acting as Party B on peers' broadcasts)
+        // Subtract beta shares (from acting as Party B on peers' broadcasts).
+        // New MtA formula: alpha - beta = a*b (D = C^b * Enc(+beta')),
+        // so Party B's contribution is -beta' (negated here).
         for beta_bytes in &delta_beta_shares {
-            delta_scalar += to_scalar_signed(
+            delta_scalar -= to_scalar_signed(
                 &BigUint::from_bytes_be(beta_bytes),
                 &n_big,
                 &n_half,
@@ -1485,7 +1525,7 @@ async fn cggmp21_pre_sign(
             );
         }
         for beta_bytes in &chi_beta_shares {
-            chi_scalar += to_scalar_signed(
+            chi_scalar -= to_scalar_signed(
                 &BigUint::from_bytes_be(beta_bytes),
                 &n_big,
                 &n_half,
@@ -1509,8 +1549,49 @@ async fn cggmp21_pre_sign(
                 serde_json::from_value(r3["chi_ct"].clone())
                     .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
-            // Πaff-g verification deferred to Sprint 29 (see comment above)
-            // TODO: Verify pi_affg_delta and pi_affg_chi when MtA beta sampling is fixed
+            // ── Verify Πaff-g proofs from peer (CGGMP21 Fig. 15) ─────────
+            if let Some(ref ped) = own_ped {
+                if let Some(pi_affg_d_val) = r3.get("pi_affg_delta").filter(|v| !v.is_null()) {
+                    let pi_affg_d: crate::paillier::zk_proofs::PiAffgProof =
+                        serde_json::from_value(pi_affg_d_val.clone())
+                            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+                    let verify_pub = crate::paillier::zk_proofs::PiAffgPublicInput {
+                        pk_n0: my_pk.n.clone(),
+                        pk_n0_squared: my_pk.n_squared.clone(),
+                        c: mta_round1_k.ciphertext.data.clone(),
+                        d: delta_ct.data.clone(),
+                        n_hat: ped.0.clone(),
+                        s: ped.1.clone(),
+                        t: ped.2.clone(),
+                    };
+                    if !crate::paillier::zk_proofs::verify_piaffg(&pi_affg_d, &verify_pub) {
+                        return Err(CoreError::Protocol(format!(
+                            "Πaff-g (delta) proof failed for party {} — identifiable abort",
+                            _from_party
+                        )));
+                    }
+                }
+                if let Some(pi_affg_c_val) = r3.get("pi_affg_chi").filter(|v| !v.is_null()) {
+                    let pi_affg_c: crate::paillier::zk_proofs::PiAffgProof =
+                        serde_json::from_value(pi_affg_c_val.clone())
+                            .map_err(|e| CoreError::Serialization(e.to_string()))?;
+                    let verify_pub = crate::paillier::zk_proofs::PiAffgPublicInput {
+                        pk_n0: my_pk.n.clone(),
+                        pk_n0_squared: my_pk.n_squared.clone(),
+                        c: mta_round1_k.ciphertext.data.clone(),
+                        d: chi_ct.data.clone(),
+                        n_hat: ped.0.clone(),
+                        s: ped.1.clone(),
+                        t: ped.2.clone(),
+                    };
+                    if !crate::paillier::zk_proofs::verify_piaffg(&pi_affg_c, &verify_pub) {
+                        return Err(CoreError::Protocol(format!(
+                            "Πaff-g (chi) proof failed for party {} — identifiable abort",
+                            _from_party
+                        )));
+                    }
+                }
+            }
 
             // Decrypt as Party A, reduce to Scalar
             let alpha_d = mta_party_a_k.round2_finish(&delta_ct);
@@ -1529,6 +1610,9 @@ async fn cggmp21_pre_sign(
                 &secp_order,
             );
         }
+
+        // ── Per-round sync barrier (L-012 fix): ensure all MtA round 2 complete
+        transport.wait_ready().await?;
 
         // Broadcast delta_i for aggregation (as Scalar bytes, 32 bytes)
         let delta_broadcast = serde_json::json!({
@@ -2339,7 +2423,12 @@ async fn cggmp21_refresh(
 ///
 /// This ensures `to_scalar_signed(alpha) + to_scalar_signed(beta) == a * b` as a
 /// `Scalar`, even when the unsigned sum `alpha + beta` wraps modulo `N`.
-fn to_scalar_signed(big: &BigUint, n: &BigUint, n_half: &BigUint, secp_order: &BigUint) -> Scalar {
+pub fn to_scalar_signed(
+    big: &BigUint,
+    n: &BigUint,
+    n_half: &BigUint,
+    secp_order: &BigUint,
+) -> Scalar {
     use k256::elliptic_curve::ops::Reduce;
     if big <= n_half {
         // Positive: reduce directly mod q
@@ -3376,13 +3465,14 @@ mod tests {
             let alpha = BigUint::from_bytes_be(&alpha_bytes);
             let beta = BigUint::from_bytes_be(&round2.beta);
 
-            // Verify: alpha + beta = k_1 * gamma_2 (mod N)
-            let sum_mod_n = (&alpha + &beta) % &n;
+            // Verify: alpha - beta = k_1 * gamma_2 (mod N)
+            // New MtA: D = C^b * Enc(+beta'), so alpha = a*b + beta'
+            let diff_mod_n = (&alpha + &n - &beta) % &n;
             let k_1_big = BigUint::from_bytes_be(&k_1.to_repr());
             let gamma_2_big = BigUint::from_bytes_be(&gamma_2.to_repr());
             let product_mod_n = (&k_1_big * &gamma_2_big) % &n;
             assert_eq!(
-                sum_mod_n, product_mod_n,
+                diff_mod_n, product_mod_n,
                 "trial {}: MtA basic correctness failed",
                 trial
             );
@@ -3390,10 +3480,10 @@ mod tests {
             // Verify signed Scalar reduction
             let alpha_scalar = to_scalar_signed(&alpha, &n, &n_half, &secp_order);
             let beta_scalar = to_scalar_signed(&beta, &n, &n_half, &secp_order);
-            let sum_scalar = alpha_scalar + beta_scalar;
+            let diff_scalar = alpha_scalar - beta_scalar;
             let expected_scalar = k_1 * gamma_2;
             assert_eq!(
-                sum_scalar, expected_scalar,
+                diff_scalar, expected_scalar,
                 "trial {}: signed reduction failed",
                 trial
             );

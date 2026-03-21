@@ -1950,20 +1950,18 @@ mod tests {
             "Round 1: Pienc proof must verify"
         );
 
-        // ─── Round 2: Party B computes affine operation ───
-        let beta_prime = sample_below(&n);
-        let neg_beta = if beta_prime.is_zero() {
-            BigUint::zero()
-        } else {
-            &n - &beta_prime
-        };
+        // ─── Round 2: Party B computes affine operation (positive beta) ───
+        // Sample beta from [1, 2^256) — same range as secp256k1 scalars.
+        // Ensures Πaff-g range check passes: z2 = mask + e*beta < 2^768.
+        let beta_bound = BigUint::one() << 256usize;
+        let beta_prime = sample_below(&beta_bound);
 
         let c_ab = pk.scalar_mult(&c_a, &b);
         let rho_y = sample_coprime(&n);
-        let c_neg_beta = pk.encrypt_with_r(&neg_beta, &rho_y);
-        let c_b = pk.add(&c_ab, &c_neg_beta);
+        let c_beta = pk.encrypt_with_r(&beta_prime, &rho_y);
+        let c_b = pk.add(&c_ab, &c_beta);
 
-        // Party B generates Πaff-g proof
+        // Party B generates Πaff-g proof with positive beta (small, < 2^768)
         let piaffg_public = PiAffgPublicInput {
             pk_n0: pk.n.clone(),
             pk_n0_squared: pk.n_squared.clone(),
@@ -1973,7 +1971,7 @@ mod tests {
             s: s.clone(),
             t: t.clone(),
         };
-        let piaffg_proof = prove_piaffg(&b, &neg_beta, &rho_y, &piaffg_public);
+        let piaffg_proof = prove_piaffg(&b, &beta_prime, &rho_y, &piaffg_public);
 
         // Party A verifies Πaff-g
         assert!(
@@ -1984,12 +1982,13 @@ mod tests {
         // ─── Finish: Party A decrypts ───
         let alpha = sk.decrypt(pk, &c_b);
 
-        // Verify correctness: alpha + beta' = a * b mod N
-        let sum = (&alpha + &beta_prime) % &n;
+        // Verify correctness: alpha - beta' = a * b mod N
+        // (D = C^b * Enc(+beta') → alpha = a*b + beta')
+        let diff = (&alpha + &n - &beta_prime) % &n;
         let product = (&a * &b) % &n;
         assert_eq!(
-            sum, product,
-            "MtA with proofs: alpha + beta must equal a * b mod N"
+            diff, product,
+            "MtA with proofs: alpha - beta must equal a * b mod N"
         );
     }
 

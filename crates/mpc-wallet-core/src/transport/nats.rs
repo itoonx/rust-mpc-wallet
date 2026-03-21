@@ -369,6 +369,14 @@ impl Transport for NatsTransport {
     fn party_id(&self) -> PartyId {
         self.party_id
     }
+
+    async fn wait_ready(&self) -> Result<(), CoreError> {
+        let map_err = |e| CoreError::Transport(format!("NATS flush failed: {e}"));
+        self.client.flush().await.map_err(map_err)?;
+        tokio::task::yield_now().await;
+        self.client.flush().await.map_err(map_err)?;
+        Ok(())
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

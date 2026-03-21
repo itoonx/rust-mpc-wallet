@@ -48,4 +48,16 @@ pub trait Transport: Send + Sync {
 
     /// The party ID that this transport belongs to.
     fn party_id(&self) -> PartyId;
+
+    /// Synchronization barrier — ensures all pending sends are delivered
+    /// before the next protocol round begins.
+    ///
+    /// For NATS: double flush + yield to confirm server has processed subscriptions.
+    /// For LocalTransport: no-op (in-process channels are synchronous).
+    ///
+    /// Protocol implementations MUST call this between multi-round message
+    /// exchanges to prevent ordering races (L-012).
+    async fn wait_ready(&self) -> Result<(), CoreError> {
+        Ok(()) // Default: no-op for in-process transports
+    }
 }
