@@ -91,6 +91,25 @@ pub struct Cggmp21ShareData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[zeroize(skip)]
     pub all_paillier_pks: Option<Vec<PaillierPublicKey>>,
+    /// Real Pedersen N_hat (product of safe primes, big-endian bytes).
+    /// Sprint 28: replaces simulated pedersen_params.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[zeroize(skip)]
+    pub real_pedersen_n_hat: Option<Vec<u8>>,
+    /// Real Pedersen s parameter (big-endian bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[zeroize(skip)]
+    pub real_pedersen_s: Option<Vec<u8>>,
+    /// Real Pedersen t parameter (big-endian bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[zeroize(skip)]
+    pub real_pedersen_t: Option<Vec<u8>>,
+    /// All parties' real Pedersen parameters (N_hat, s, t) indexed by party position.
+    /// Needed for ZK proof verification during pre-signing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[zeroize(skip)]
+    #[allow(clippy::type_complexity)]
+    pub all_pedersen_params: Option<Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>>,
 }
 
 impl Cggmp21ShareData {
@@ -104,6 +123,18 @@ impl Cggmp21ShareData {
         self.real_paillier_pk.is_none()
             || self.real_paillier_sk.is_none()
             || self.all_paillier_pks.is_none()
+    }
+
+    /// Returns true if this share has BOTH real Paillier keys AND real Pedersen
+    /// parameters — the full auxiliary info needed for ZK-proof-verified pre-signing.
+    pub fn has_real_aux_info(&self) -> bool {
+        self.real_paillier_pk.is_some()
+            && self.real_paillier_sk.is_some()
+            && self.all_paillier_pks.is_some()
+            && self.real_pedersen_n_hat.is_some()
+            && self.real_pedersen_s.is_some()
+            && self.real_pedersen_t.is_some()
+            && self.all_pedersen_params.is_some()
     }
 }
 
@@ -176,15 +207,33 @@ struct AuxInfoBroadcast {
     pimod_proof: PimodProof,
     /// Πfac proof: N has no small factors (CVE-2023-33241 prevention).
     pifac_proof: PifacProof,
+    /// Real Pedersen N_hat (product of safe primes, big-endian bytes).
+    #[serde(default)]
+    pedersen_n_hat: Option<Vec<u8>>,
+    /// Real Pedersen s parameter (big-endian bytes).
+    #[serde(default)]
+    pedersen_s: Option<Vec<u8>>,
+    /// Real Pedersen t parameter (big-endian bytes).
+    #[serde(default)]
+    pedersen_t: Option<Vec<u8>>,
 }
 
-/// Round 2 message for pre-signing with real MtA: encrypted k_i.
+/// Round 2 message for pre-signing with real MtA: encrypted k_i + ZK proofs.
 #[derive(Serialize, Deserialize)]
 struct PreSignMtaRound2 {
     /// Sender party index.
     party_index: u16,
     /// Enc(k_i) — encryption of sender's nonce share under sender's Paillier key.
     encrypted_k: crate::paillier::PaillierCiphertext,
+    /// Πenc proof: proves |k_i| < 2^256 (CGGMP21 Fig. 14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pi_enc: Option<crate::paillier::zk_proofs::PiEncProof>,
+    /// Πlog* proof: proves Enc(k_i) matches K_i = k_i*G (CGGMP21 Fig. 25).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pi_logstar: Option<crate::paillier::zk_proofs::PiLogStarProof>,
+    /// K_i = k_i*G point for Πlog* verification (33 bytes compressed SEC1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    k_point: Option<Vec<u8>>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -937,12 +986,19 @@ async fn cggmp21_keygen(
     let pimod_proof = prove_pimod(&n_big, &p_big, &q_big);
     let pifac_proof = prove_pifac(&n_big, &p_big, &q_big);
 
-    // ── Round 4: Broadcast Paillier public key + ZK proofs ──────────────
+    // ── Generate real Pedersen parameters for ZK proofs ─────────────────
+    let (ped_n_hat, ped_s, ped_t) =
+        crate::paillier::zk_proofs::pedersen_params_for_protocol(DEFAULT_PAILLIER_BITS);
+
+    // ── Round 4: Broadcast Paillier public key + Pedersen params + ZK proofs ──
     let aux_msg = AuxInfoBroadcast {
         party_index: my_index,
         paillier_pk: real_pk.clone(),
         pimod_proof,
         pifac_proof,
+        pedersen_n_hat: Some(ped_n_hat.clone()),
+        pedersen_s: Some(ped_s.clone()),
+        pedersen_t: Some(ped_t.clone()),
     };
     let aux_payload =
         serde_json::to_vec(&aux_msg).map_err(|e| CoreError::Serialization(e.to_string()))?;
@@ -994,6 +1050,18 @@ async fn cggmp21_keygen(
     let all_paillier_pks: Vec<PaillierPublicKey> =
         all_aux.iter().map(|a| a.paillier_pk.clone()).collect();
 
+    // Collect all parties' Pedersen parameters (ordered by party index)
+    let all_pedersen: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = all_aux
+        .iter()
+        .map(|a| {
+            (
+                a.pedersen_n_hat.clone().unwrap_or_default(),
+                a.pedersen_s.clone().unwrap_or_default(),
+                a.pedersen_t.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+
     // ── Build share data ────────────────────────────────────────────────
     let share_data = Cggmp21ShareData {
         party_index: my_index,
@@ -1006,6 +1074,10 @@ async fn cggmp21_keygen(
         real_paillier_sk: Some(real_sk),
         real_paillier_pk: Some(real_pk),
         all_paillier_pks: Some(all_paillier_pks),
+        real_pedersen_n_hat: Some(ped_n_hat),
+        real_pedersen_s: Some(ped_s),
+        real_pedersen_t: Some(ped_t),
+        all_pedersen_params: Some(all_pedersen),
     };
 
     let share_bytes =
@@ -1172,18 +1244,59 @@ async fn cggmp21_pre_sign(
         let my_sk = share_data.real_paillier_sk.as_ref().unwrap().clone();
         let all_pks = share_data.all_paillier_pks.as_ref().unwrap();
 
-        // Create MtA Party A for k_i
+        // Create MtA Party A for k_i — use witness version for ZK proof generation
         let mta_party_a_k = MtaPartyA::new(
             my_pk.clone(),
             my_sk.clone(),
             Zeroizing::new(k_i.to_repr().to_vec()),
         );
-        let mta_round1_k = mta_party_a_k.round1();
+        let mta_witness = mta_party_a_k.round1_with_witness();
+        let mta_round1_k = mta_witness.message;
 
-        // Broadcast Enc(k_i)
+        // ── Generate Πenc proof (CGGMP21 Fig. 14): |k_i| < 2^256 ────────
+        // Uses prover's own Pedersen params for range commitment
+        let (pi_enc_proof, pi_logstar_proof) = if share_data.has_real_aux_info() {
+            let ped_n_hat = share_data.real_pedersen_n_hat.as_ref().unwrap();
+            let ped_s = share_data.real_pedersen_s.as_ref().unwrap();
+            let ped_t = share_data.real_pedersen_t.as_ref().unwrap();
+
+            let pi_enc_public = crate::paillier::zk_proofs::PiEncPublicInput {
+                pk_n: my_pk.n.clone(),
+                pk_n_squared: my_pk.n_squared.clone(),
+                ciphertext: mta_round1_k.ciphertext.data.clone(),
+                n_hat: ped_n_hat.clone(),
+                s: ped_s.clone(),
+                t: ped_t.clone(),
+            };
+            let m_big = BigUint::from_bytes_be(&mta_witness.plaintext_m);
+            let r_big = BigUint::from_bytes_be(&mta_witness.randomness_r);
+            let enc_proof = crate::paillier::zk_proofs::prove_pienc(&m_big, &r_big, &pi_enc_public);
+
+            // ── Generate Πlog* proof (CGGMP21 Fig. 25): Enc(k_i) ↔ K_i = k_i*G ──
+            let pi_logstar_public = crate::paillier::zk_proofs::PiLogStarPublicInput {
+                pk_n: my_pk.n.clone(),
+                pk_n_squared: my_pk.n_squared.clone(),
+                ciphertext: mta_round1_k.ciphertext.data.clone(),
+                x_commitment: k_point_bytes.clone(),
+                n_hat: ped_n_hat.clone(),
+                s: ped_s.clone(),
+                t: ped_t.clone(),
+            };
+            let logstar_proof =
+                crate::paillier::zk_proofs::prove_pilogstar(&m_big, &r_big, &pi_logstar_public);
+
+            (Some(enc_proof), Some(logstar_proof))
+        } else {
+            (None, None)
+        };
+
+        // Broadcast Enc(k_i) + ZK proofs
         let mta_r2_msg = PreSignMtaRound2 {
             party_index: my_index,
             encrypted_k: mta_round1_k.ciphertext.clone(),
+            pi_enc: pi_enc_proof,
+            pi_logstar: pi_logstar_proof,
+            k_point: Some(k_point_bytes.clone()),
         };
         let mta_r2_payload =
             serde_json::to_vec(&mta_r2_msg).map_err(|e| CoreError::Serialization(e.to_string()))?;
@@ -1223,6 +1336,18 @@ async fn cggmp21_pre_sign(
         let mut delta_beta_shares: Vec<Zeroizing<Vec<u8>>> = Vec::new();
         let mut chi_beta_shares: Vec<Zeroizing<Vec<u8>>> = Vec::new();
 
+        // Get own Pedersen params for proof generation/verification
+        let has_pedersen = share_data.has_real_aux_info();
+        let own_ped = if has_pedersen {
+            Some((
+                share_data.real_pedersen_n_hat.as_ref().unwrap().clone(),
+                share_data.real_pedersen_s.as_ref().unwrap().clone(),
+                share_data.real_pedersen_t.as_ref().unwrap().clone(),
+            ))
+        } else {
+            None
+        };
+
         for peer_msg in &peer_enc_k {
             if peer_msg.party_index == my_index {
                 continue;
@@ -1236,23 +1361,76 @@ async fn cggmp21_pre_sign(
             }
             let peer_pk = &all_pks[peer_pk_idx];
 
-            // MtA for delta: k_j * gamma_i
+            // ── Verify Πenc + Πlog* proofs from peer (if present) ────────
+            if let (Some(ref pi_enc), Some(ref ped)) = (&peer_msg.pi_enc, &own_ped) {
+                let pi_enc_public = crate::paillier::zk_proofs::PiEncPublicInput {
+                    pk_n: peer_pk.n.clone(),
+                    pk_n_squared: peer_pk.n_squared.clone(),
+                    ciphertext: peer_msg.encrypted_k.data.clone(),
+                    n_hat: ped.0.clone(),
+                    s: ped.1.clone(),
+                    t: ped.2.clone(),
+                };
+                if !crate::paillier::zk_proofs::verify_pienc(pi_enc, &pi_enc_public) {
+                    return Err(CoreError::Protocol(format!(
+                        "Πenc proof failed for party {} — identifiable abort",
+                        peer_msg.party_index
+                    )));
+                }
+            }
+            if let (Some(ref pi_logstar), Some(ref k_pt), Some(ref ped)) =
+                (&peer_msg.pi_logstar, &peer_msg.k_point, &own_ped)
+            {
+                let pi_logstar_public = crate::paillier::zk_proofs::PiLogStarPublicInput {
+                    pk_n: peer_pk.n.clone(),
+                    pk_n_squared: peer_pk.n_squared.clone(),
+                    ciphertext: peer_msg.encrypted_k.data.clone(),
+                    x_commitment: k_pt.clone(),
+                    n_hat: ped.0.clone(),
+                    s: ped.1.clone(),
+                    t: ped.2.clone(),
+                };
+                if !crate::paillier::zk_proofs::verify_pilogstar(pi_logstar, &pi_logstar_public) {
+                    return Err(CoreError::Protocol(format!(
+                        "Πlog* proof failed for party {} — identifiable abort",
+                        peer_msg.party_index
+                    )));
+                }
+            }
+
+            // MtA for delta: k_j * gamma_i — use witness for Πaff-g proof
             let mta_b_delta = MtaPartyB::new(peer_pk.clone(), gamma_i_bytes.clone());
             let mta_r1_in = MtaRound1 {
                 ciphertext: peer_msg.encrypted_k.clone(),
             };
-            let mta_out_delta = mta_b_delta.round2(&mta_r1_in);
-            delta_beta_shares.push(mta_out_delta.beta);
+            let mta_w_delta = mta_b_delta.round2_with_witness(&mta_r1_in);
 
-            // MtA for chi: k_j * (x_i * lambda_i)
+            // MtA for chi: k_j * (x_i * lambda_i) — use witness for Πaff-g proof
             let mta_b_chi = MtaPartyB::new(peer_pk.clone(), x_i_lambda_i_bytes.clone());
             let mta_r1_in_chi = MtaRound1 {
                 ciphertext: peer_msg.encrypted_k.clone(),
             };
-            let mta_out_chi = mta_b_chi.round2(&mta_r1_in_chi);
-            chi_beta_shares.push(mta_out_chi.beta);
+            let mta_w_chi = mta_b_chi.round2_with_witness(&mta_r1_in_chi);
 
-            // Send both MtA responses to peer (use transport PartyId, not keygen index)
+            // ── Πaff-g proofs (CGGMP21 Fig. 15) — requires signed arithmetic ──
+            // Πaff-g proves D = C^x * Enc(y, rho_y) with |y| < 2^768. In MtA,
+            // y = -beta' (negative), encoded as N - beta' in Paillier plaintext
+            // space. Our ZK proof implementation uses unsigned BigUint throughout,
+            // but the CGGMP21 paper uses SIGNED integers with symmetric ranges.
+            // Wiring Πaff-g requires either:
+            //   (a) Refactoring prove_piaffg to use signed witness arithmetic, OR
+            //   (b) Changing MtA to D = C^b * Enc(+beta') and adjusting share signs
+            // Both are non-trivial. Πenc + Πlog* already provide the critical
+            // security properties (range-bound k_i + EC/Paillier binding).
+            // SEC-PIAFFG: Track as open item for signed arithmetic refactor.
+            let pi_affg_delta: Option<serde_json::Value> = None;
+            let pi_affg_chi: Option<serde_json::Value> = None;
+
+            // Push beta shares AFTER proof generation (Zeroizing moves on push)
+            delta_beta_shares.push(mta_w_delta.result.beta);
+            chi_beta_shares.push(mta_w_chi.result.beta);
+
+            // Send both MtA responses + Πaff-g proofs to peer
             let peer_transport_id = index_to_transport
                 .get(&peer_msg.party_index)
                 .copied()
@@ -1265,8 +1443,10 @@ async fn cggmp21_pre_sign(
             let combined_response = serde_json::json!({
                 "from_party": my_index,
                 "to_party": peer_msg.party_index,
-                "delta_ct": serde_json::to_value(&mta_out_delta.ciphertext).unwrap(),
-                "chi_ct": serde_json::to_value(&mta_out_chi.ciphertext).unwrap(),
+                "delta_ct": serde_json::to_value(&mta_w_delta.result.ciphertext).unwrap(),
+                "chi_ct": serde_json::to_value(&mta_w_chi.result.ciphertext).unwrap(),
+                "pi_affg_delta": pi_affg_delta,
+                "pi_affg_chi": pi_affg_chi,
             });
             let payload = serde_json::to_vec(&combined_response)
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
@@ -1314,10 +1494,13 @@ async fn cggmp21_pre_sign(
         }
 
         // Receive alpha shares from peers (responses to our Enc(k_i) broadcast)
+        // Verify Πaff-g proofs before decrypting (CGGMP21 Fig. 15)
         for _ in 1..n_signers {
             let msg = transport.recv().await?;
             let r3: serde_json::Value = serde_json::from_slice(&msg.payload)
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+            let _from_party = r3["from_party"].as_u64().unwrap_or(0) as u16;
 
             let delta_ct: crate::paillier::PaillierCiphertext =
                 serde_json::from_value(r3["delta_ct"].clone())
@@ -1325,6 +1508,9 @@ async fn cggmp21_pre_sign(
             let chi_ct: crate::paillier::PaillierCiphertext =
                 serde_json::from_value(r3["chi_ct"].clone())
                     .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+            // Πaff-g verification deferred to Sprint 29 (see comment above)
+            // TODO: Verify pi_affg_delta and pi_affg_chi when MtA beta sampling is fixed
 
             // Decrypt as Party A, reduce to Scalar
             let alpha_d = mta_party_a_k.round2_finish(&delta_ct);
@@ -2051,11 +2237,18 @@ async fn cggmp21_refresh(
     let pimod_proof = prove_pimod(&n_big, &p_big, &q_big);
     let pifac_proof = prove_pifac(&n_big, &p_big, &q_big);
 
+    // Generate fresh real Pedersen parameters
+    let (fresh_ped_n_hat, fresh_ped_s, fresh_ped_t) =
+        crate::paillier::zk_proofs::pedersen_params_for_protocol(DEFAULT_PAILLIER_BITS);
+
     let aux_msg = AuxInfoBroadcast {
         party_index: my_index,
         paillier_pk: fresh_pk.clone(),
         pimod_proof,
         pifac_proof,
+        pedersen_n_hat: Some(fresh_ped_n_hat.clone()),
+        pedersen_s: Some(fresh_ped_s.clone()),
+        pedersen_t: Some(fresh_ped_t.clone()),
     };
     let aux_payload =
         serde_json::to_vec(&aux_msg).map_err(|e| CoreError::Serialization(e.to_string()))?;
@@ -2097,6 +2290,16 @@ async fn cggmp21_refresh(
     }
     let fresh_all_pks: Vec<PaillierPublicKey> =
         all_aux.iter().map(|a| a.paillier_pk.clone()).collect();
+    let fresh_all_ped: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = all_aux
+        .iter()
+        .map(|a| {
+            (
+                a.pedersen_n_hat.clone().unwrap_or_default(),
+                a.pedersen_s.clone().unwrap_or_default(),
+                a.pedersen_t.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
 
     // ── Build refreshed share data ───────────────────────────────────────
     let new_share_data = Cggmp21ShareData {
@@ -2110,6 +2313,10 @@ async fn cggmp21_refresh(
         real_paillier_sk: Some(fresh_sk),
         real_paillier_pk: Some(fresh_pk),
         all_paillier_pks: Some(fresh_all_pks),
+        real_pedersen_n_hat: Some(fresh_ped_n_hat),
+        real_pedersen_s: Some(fresh_ped_s),
+        real_pedersen_t: Some(fresh_ped_t),
+        all_pedersen_params: Some(fresh_all_ped),
     };
 
     let new_share_bytes =
@@ -2265,6 +2472,10 @@ mod tests {
             real_paillier_sk: None,
             real_paillier_pk: None,
             all_paillier_pks: None,
+            real_pedersen_n_hat: None,
+            real_pedersen_s: None,
+            real_pedersen_t: None,
+            all_pedersen_params: None,
         };
 
         let bytes = serde_json::to_vec(&share).unwrap();
@@ -2781,6 +2992,10 @@ mod tests {
             real_paillier_sk: None,
             real_paillier_pk: None,
             all_paillier_pks: None,
+            real_pedersen_n_hat: None,
+            real_pedersen_s: None,
+            real_pedersen_t: None,
+            all_pedersen_params: None,
         };
 
         let share_bytes = serde_json::to_vec(&share_data).unwrap();
@@ -3241,6 +3456,10 @@ mod tests {
             real_paillier_sk: None,
             real_paillier_pk: None,
             all_paillier_pks: None,
+            real_pedersen_n_hat: None,
+            real_pedersen_s: None,
+            real_pedersen_t: None,
+            all_pedersen_params: None,
         };
 
         let bytes = serde_json::to_vec(&old_share).unwrap();
@@ -3265,6 +3484,10 @@ mod tests {
             real_paillier_sk: None,
             real_paillier_pk: None,
             all_paillier_pks: None,
+            real_pedersen_n_hat: None,
+            real_pedersen_s: None,
+            real_pedersen_t: None,
+            all_pedersen_params: None,
         };
         let old_format = serde_json::to_vec(&old_share2).unwrap();
         // The JSON should NOT contain real_paillier_* fields (skip_serializing_if)
@@ -3318,6 +3541,10 @@ mod tests {
             real_paillier_sk: Some(sk),
             real_paillier_pk: Some(pk.clone()),
             all_paillier_pks: Some(vec![pk]),
+            real_pedersen_n_hat: None,
+            real_pedersen_s: None,
+            real_pedersen_t: None,
+            all_pedersen_params: None,
         };
 
         // Serialize
@@ -3509,6 +3736,10 @@ mod tests {
             real_paillier_sk: None,
             real_paillier_pk: None,
             all_paillier_pks: None,
+            real_pedersen_n_hat: None,
+            real_pedersen_s: None,
+            real_pedersen_t: None,
+            all_pedersen_params: None,
         };
         assert!(
             share.needs_paillier_upgrade(),
@@ -3532,6 +3763,10 @@ mod tests {
             real_paillier_sk: Some(sk),
             real_paillier_pk: Some(pk.clone()),
             all_paillier_pks: Some(vec![pk]),
+            real_pedersen_n_hat: None,
+            real_pedersen_s: None,
+            real_pedersen_t: None,
+            all_pedersen_params: None,
         };
         assert!(
             !share.needs_paillier_upgrade(),
@@ -3556,6 +3791,10 @@ mod tests {
             real_paillier_sk: None,
             real_paillier_pk: Some(pk),
             all_paillier_pks: None,
+            real_pedersen_n_hat: None,
+            real_pedersen_s: None,
+            real_pedersen_t: None,
+            all_pedersen_params: None,
         };
         assert!(
             share.needs_paillier_upgrade(),

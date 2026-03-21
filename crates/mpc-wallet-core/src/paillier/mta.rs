@@ -65,6 +65,51 @@ pub struct MtaRound2Message {
     pub ciphertext: PaillierCiphertext,
 }
 
+/// Round 1 output with encryption witness for ZK proof generation.
+///
+/// Contains the plaintext m and randomness r needed for Pienc proof:
+/// proves Enc(m, r) is well-formed with |m| < 2^256.
+pub struct MtaRound1WithWitness {
+    /// The round 1 message to send to Party B.
+    pub message: MtaRound1,
+    /// Plaintext m (= secret a) in big-endian bytes. Zeroized on drop.
+    pub plaintext_m: Zeroizing<Vec<u8>>,
+    /// Encryption randomness r in big-endian bytes. Zeroized on drop.
+    pub randomness_r: Zeroizing<Vec<u8>>,
+}
+
+// Redact witness material in debug output.
+impl std::fmt::Debug for MtaRound1WithWitness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MtaRound1WithWitness")
+            .field("message", &self.message)
+            .field("plaintext_m", &"[REDACTED]")
+            .field("randomness_r", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Round 2 output with encryption witness for ZK proof generation.
+///
+/// Contains the randomness rho_y used for Enc(-beta') needed for Piaffg proof:
+/// proves D = C^x * Enc(y, rho_y) with |x|, |y| < 2^256.
+pub struct MtaRound2WithWitness {
+    /// The standard round 2 result (ciphertext + beta).
+    pub result: MtaRound2,
+    /// Randomness rho_y used in Enc_A(-beta'). Zeroized on drop.
+    pub rho_y: Zeroizing<Vec<u8>>,
+}
+
+// Redact witness material in debug output.
+impl std::fmt::Debug for MtaRound2WithWitness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MtaRound2WithWitness")
+            .field("result", &self.result)
+            .field("rho_y", &"[REDACTED]")
+            .finish()
+    }
+}
+
 // Manual Debug to redact secret beta.
 impl std::fmt::Debug for MtaRound2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -86,6 +131,20 @@ impl MtaPartyA {
         let a = BigUint::from_bytes_be(&self.secret_a);
         let ciphertext = self.pk.encrypt(&a);
         MtaRound1 { ciphertext }
+    }
+
+    /// Round 1 with witness: returns encryption randomness r for ZK proof generation.
+    ///
+    /// Use this instead of `round1()` when you need to generate a Pienc proof
+    /// proving the ciphertext encrypts a value in range [0, 2^256).
+    pub fn round1_with_witness(&self) -> MtaRound1WithWitness {
+        let a = BigUint::from_bytes_be(&self.secret_a);
+        let (ciphertext, r) = self.pk.encrypt_returning_r(&a);
+        MtaRound1WithWitness {
+            message: MtaRound1 { ciphertext },
+            plaintext_m: Zeroizing::new(a.to_bytes_be()),
+            randomness_r: Zeroizing::new(r.to_bytes_be()),
+        }
     }
 
     /// Finish: decrypt Party B's response to get alpha (Party A's additive share).
@@ -114,6 +173,14 @@ impl MtaPartyB {
     /// Computes: `c_B = c_A^b * Enc_A(-beta') mod N^2 = Enc_A(a*b - beta')`
     /// Returns the message for Party A plus Party B's local share beta.
     pub fn round2(&self, msg: &MtaRound1) -> MtaRound2 {
+        self.round2_with_witness(msg).result
+    }
+
+    /// Round 2 with witness: returns encryption randomness rho_y for ZK proof generation.
+    ///
+    /// Use this instead of `round2()` when you need to generate a Piaffg proof
+    /// proving the affine operation D = C^x * Enc(y, rho_y) is correct.
+    pub fn round2_with_witness(&self, msg: &MtaRound1) -> MtaRound2WithWitness {
         let n = self.peer_pk.n_biguint();
         let b = BigUint::from_bytes_be(&self.secret_b);
 
@@ -130,15 +197,18 @@ impl MtaPartyB {
             &n - &beta_prime
         };
 
-        // Enc_A(-beta')
-        let c_neg_beta = self.peer_pk.encrypt(&neg_beta);
+        // Enc_A(-beta') — capture randomness for Piaffg proof
+        let (c_neg_beta, rho_y) = self.peer_pk.encrypt_returning_r(&neg_beta);
 
         // c_B = c_A^b * Enc_A(-beta') = Enc_A(a*b - beta') = Enc_A(a*b + N - beta')
         let c_b = self.peer_pk.add(&c_ab, &c_neg_beta);
 
-        MtaRound2 {
-            ciphertext: c_b,
-            beta: Zeroizing::new(beta_prime.to_bytes_be()),
+        MtaRound2WithWitness {
+            result: MtaRound2 {
+                ciphertext: c_b,
+                beta: Zeroizing::new(beta_prime.to_bytes_be()),
+            },
+            rho_y: Zeroizing::new(rho_y.to_bytes_be()),
         }
     }
 }
@@ -160,6 +230,7 @@ fn sample_mod_n(n: &BigUint) -> BigUint {
 mod tests {
     use super::*;
     use crate::paillier::keygen::test_keypair;
+    use num_traits::One;
     use std::sync::LazyLock;
 
     // Shared 512-bit keypair — delegates to keygen::test_keypair() (process-wide LazyLock cache).
@@ -246,6 +317,88 @@ mod tests {
         let sum = (&alpha + &beta) % &n;
         let product = (&a * &b) % &n;
         assert_eq!(sum, product, "MtA must work with 256-bit scalars");
+    }
+
+    #[test]
+    fn test_mta_round1_witness_correctness() {
+        let (pk, sk) = &*TEST_KEYS;
+        let a = BigUint::from(42u64);
+        let party_a = MtaPartyA::new(pk.clone(), sk.clone(), Zeroizing::new(a.to_bytes_be()));
+
+        let witness = party_a.round1_with_witness();
+
+        // Verify the witness produces the same ciphertext
+        let m = BigUint::from_bytes_be(&witness.plaintext_m);
+        let r = BigUint::from_bytes_be(&witness.randomness_r);
+        let ct_from_witness = pk.encrypt_with_r(&m, &r);
+        assert_eq!(
+            witness.message.ciphertext.data, ct_from_witness.data,
+            "witness (m, r) must reproduce the same ciphertext"
+        );
+
+        // Verify plaintext matches input
+        assert_eq!(m, a, "witness plaintext must equal secret a");
+
+        // Verify r is coprime to N (required for valid Paillier encryption)
+        let n = pk.n_biguint();
+        assert_eq!(
+            super::super::gcd(&r, &n),
+            BigUint::one(),
+            "randomness r must be coprime to N"
+        );
+    }
+
+    #[test]
+    fn test_mta_round2_witness_correctness() {
+        let (pk, sk) = &*TEST_KEYS;
+        let a = BigUint::from(42u64);
+        let b = BigUint::from(17u64);
+
+        let party_a = MtaPartyA::new(pk.clone(), sk.clone(), Zeroizing::new(a.to_bytes_be()));
+        let party_b = MtaPartyB::new(pk.clone(), Zeroizing::new(b.to_bytes_be()));
+
+        let round1_msg = party_a.round1();
+        let witness = party_b.round2_with_witness(&round1_msg);
+
+        // Verify MtA correctness with witness path
+        let alpha_bytes = party_a.round2_finish(&witness.result.ciphertext);
+        let alpha = BigUint::from_bytes_be(&alpha_bytes);
+        let beta = BigUint::from_bytes_be(&witness.result.beta);
+        let n = pk.n_biguint();
+
+        let sum = (&alpha + &beta) % &n;
+        let product = (&a * &b) % &n;
+        assert_eq!(sum, product, "MtA with witness must be correct");
+
+        // Verify rho_y is coprime to N
+        let rho_y = BigUint::from_bytes_be(&witness.rho_y);
+        assert_eq!(
+            super::super::gcd(&rho_y, &n),
+            BigUint::one(),
+            "rho_y must be coprime to N"
+        );
+    }
+
+    #[test]
+    fn test_mta_witness_values_are_zeroizing() {
+        let (pk, sk) = &*TEST_KEYS;
+        let a = BigUint::from(42u64);
+        let party_a = MtaPartyA::new(pk.clone(), sk.clone(), Zeroizing::new(a.to_bytes_be()));
+
+        let witness = party_a.round1_with_witness();
+        // Zeroizing wrapper means these are cleared on drop.
+        // We just verify the types are Zeroizing (compile-time check):
+        let _m: &Zeroizing<Vec<u8>> = &witness.plaintext_m;
+        let _r: &Zeroizing<Vec<u8>> = &witness.randomness_r;
+        // Non-empty values
+        assert!(
+            !witness.plaintext_m.is_empty(),
+            "plaintext_m should not be empty"
+        );
+        assert!(
+            !witness.randomness_r.is_empty(),
+            "randomness_r should not be empty"
+        );
     }
 
     #[test]

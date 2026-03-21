@@ -1286,6 +1286,29 @@ pub fn generate_pedersen_params(bits: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     (n_hat.to_bytes_be(), s.to_bytes_be(), t.to_bytes_be())
 }
 
+/// Cached 512-bit Pedersen parameters for tests (avoids slow safe-prime generation).
+/// Uses same gate as `keypair_for_protocol()` in keygen.rs — `cfg(test)` alone
+/// doesn't work for lib code called from test binaries.
+#[cfg(any(test, feature = "local-transport"))]
+static CACHED_PEDERSEN_512: std::sync::LazyLock<(Vec<u8>, Vec<u8>, Vec<u8>)> =
+    std::sync::LazyLock::new(|| generate_pedersen_params(512));
+
+/// Generate Pedersen parameters for protocol use.
+///
+/// In test/local-transport mode: returns a cached 512-bit parameter set (fast).
+/// In production: generates fresh `bits`-bit parameters (slow, requires safe primes).
+pub fn pedersen_params_for_protocol(bits: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    #[cfg(any(test, feature = "local-transport"))]
+    {
+        let _ = bits;
+        CACHED_PEDERSEN_512.clone()
+    }
+    #[cfg(not(any(test, feature = "local-transport")))]
+    {
+        generate_pedersen_params(bits)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

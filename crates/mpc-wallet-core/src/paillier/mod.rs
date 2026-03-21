@@ -80,6 +80,14 @@ impl PaillierPublicKey {
     /// Uses the simplified generator g = N+1 which gives (N+1)^m = 1 + m*N mod N^2
     /// for the L-function optimization. The randomness r is sampled from Z*_N.
     pub fn encrypt(&self, plaintext: &BigUint) -> PaillierCiphertext {
+        self.encrypt_returning_r(plaintext).0
+    }
+
+    /// Encrypt plaintext m and return both the ciphertext and the randomness r.
+    ///
+    /// The randomness r is needed for ZK proofs (Pienc, Piaffg, Pilogstar) which
+    /// require the prover to know the encryption witness (m, r).
+    pub fn encrypt_returning_r(&self, plaintext: &BigUint) -> (PaillierCiphertext, BigUint) {
         let n = self.n_biguint();
         let n_sq = self.n_squared_biguint();
 
@@ -93,9 +101,12 @@ impl PaillierPublicKey {
 
         let c = (g_m * r_n) % &n_sq;
 
-        PaillierCiphertext {
-            data: c.to_bytes_be(),
-        }
+        (
+            PaillierCiphertext {
+                data: c.to_bytes_be(),
+            },
+            r,
+        )
     }
 
     /// Encrypt with explicit randomness (for testing determinism).
@@ -194,6 +205,7 @@ pub(crate) fn gcd(a: &BigUint, b: &BigUint) -> BigUint {
 mod tests {
     use super::*;
     use crate::paillier::keygen::{generate_paillier_keypair, test_keypair};
+    use num_traits::One;
     use std::sync::LazyLock;
 
     // Shared 512-bit keypair — delegates to keygen::test_keypair() (process-wide LazyLock cache).
@@ -280,6 +292,28 @@ mod tests {
             "N should be at least ~512 bits, got {}",
             n.bits()
         );
+    }
+
+    #[test]
+    fn test_paillier_encrypt_returning_r() {
+        let (pk, sk) = &*TEST_KEYS;
+        let m = BigUint::from(42u64);
+        let (ct, r) = pk.encrypt_returning_r(&m);
+
+        // Verify decrypt works
+        let decrypted = sk.decrypt(pk, &ct);
+        assert_eq!(decrypted, m);
+
+        // Verify r reproduces same ciphertext
+        let ct2 = pk.encrypt_with_r(&m, &r);
+        assert_eq!(
+            ct.data, ct2.data,
+            "same (m, r) must produce same ciphertext"
+        );
+
+        // Verify r is coprime to N
+        let n = pk.n_biguint();
+        assert_eq!(gcd(&r, &n), BigUint::one(), "r must be coprime to N");
     }
 
     #[test]
