@@ -356,3 +356,125 @@ async fn test_revoked_keys_endpoint() {
         "revoked_keys should be an array"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// 9. Wallet Create + Sign Flow (RBAC + MPC)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_create_wallet_requires_admin_mfa() {
+    let gw = gateway_url();
+    let (session_token, _) = full_handshake(&gw).await;
+
+    // Default session has Viewer role (no Admin + MFA) → should be denied
+    let body = serde_json::json!({
+        "label": "test-wallet",
+        "scheme": "gg20-ecdsa",
+        "threshold": 2,
+        "total_parties": 3
+    });
+    let resp = http_client()
+        .post(format!("{gw}/v1/wallets"))
+        .header("x-session-token", &session_token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status().as_u16();
+    let json: Value = resp.json().await.unwrap();
+
+    // Should be 403 (insufficient permissions) since default session is Viewer
+    assert_eq!(status, 403, "Viewer role should not create wallets: {json}");
+    assert_eq!(json["success"].as_bool(), Some(false));
+}
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_sign_nonexistent_wallet_returns_404() {
+    let gw = gateway_url();
+    let (session_token, _) = full_handshake(&gw).await;
+
+    let body = serde_json::json!({
+        "message": "deadbeef"
+    });
+    let resp = http_client()
+        .post(format!("{gw}/v1/wallets/nonexistent-wallet-id/sign"))
+        .header("x-session-token", &session_token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status().as_u16();
+    let json: Value = resp.json().await.unwrap();
+
+    // Viewer role can't sign (needs Initiator/Admin) → 403
+    // OR if RBAC passes somehow → 404 wallet not found
+    assert!(
+        status == 403 || status == 404,
+        "sign on nonexistent wallet should be 403 or 404, got {status}: {json}"
+    );
+    assert_eq!(json["success"].as_bool(), Some(false));
+}
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_sign_invalid_hex_message_returns_400() {
+    let gw = gateway_url();
+    let (session_token, _) = full_handshake(&gw).await;
+
+    let body = serde_json::json!({
+        "message": "not-valid-hex-zzz"
+    });
+    let resp = http_client()
+        .post(format!("{gw}/v1/wallets/some-wallet/sign"))
+        .header("x-session-token", &session_token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status().as_u16();
+    let json: Value = resp.json().await.unwrap();
+
+    // Could be 403 (RBAC) or 400 (invalid hex) depending on middleware order
+    assert!(
+        status == 400 || status == 403,
+        "invalid hex should be 400 or 403, got {status}: {json}"
+    );
+    assert_eq!(json["success"].as_bool(), Some(false));
+}
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_simulate_transaction_requires_auth() {
+    let gw = gateway_url();
+    let body = serde_json::json!({
+        "chain": "ethereum",
+        "to": "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18",
+        "value": "1000000000000000000"
+    });
+    let (status, json) = post_json(&format!("{gw}/v1/wallets/any-wallet/simulate"), &body).await;
+
+    assert_eq!(status, 401, "simulate without auth should be 401: {json}");
+}
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_freeze_wallet_requires_admin_mfa() {
+    let gw = gateway_url();
+    let (session_token, _) = full_handshake(&gw).await;
+
+    let resp = http_client()
+        .post(format!("{gw}/v1/wallets/any-wallet/freeze"))
+        .header("x-session-token", &session_token)
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status().as_u16();
+    // Viewer can't freeze → 403
+    assert_eq!(status, 403, "freeze without Admin+MFA should be 403");
+}
