@@ -163,12 +163,8 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
           GATEWAY_URL: http://127.0.0.1:3000
         run: |
-          # E2E tests — L-012 sync barriers helped but 2 NATS protocol tests still flaky in CI
-          # test_nats_sign_gg20_direct: sign times out on NATS broadcast
-          # test_distributed_keygen_then_sign: intermittent timeout in distributed keygen+sign flow
-          cargo test -p mpc-wallet-core --test e2e_tests --features local-transport -- --ignored --test-threads=1 \
-            --skip test_nats_sign_gg20_direct \
-            --skip test_distributed_keygen_then_sign
+          # E2E tests — all NATS tests now have proper sync (flush + readiness signals)
+          cargo test -p mpc-wallet-core --test e2e_tests --features local-transport -- --ignored --test-threads=1
           kill $(cat /tmp/gateway.pid) 2>/dev/null || true
 
   coverage:

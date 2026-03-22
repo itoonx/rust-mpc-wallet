@@ -122,6 +122,13 @@ async fn run_node_sign(
     let nats = async_nats::connect(nats_url).await.unwrap();
 
     let mut sub = nats.subscribe("mpc.control.sign.*").await.unwrap();
+    // Flush to ensure SUB reaches NATS server before orchestrator publishes
+    nats.flush().await.unwrap();
+    // Signal readiness so orchestrator knows we're subscribed
+    nats.publish(format!("mpc.ready.sign.{party_id}"), "ready".into())
+        .await
+        .unwrap();
+    nats.flush().await.unwrap();
 
     let msg = sub.next().await.unwrap();
     let req: rpc::SignRequest = serde_json::from_slice(&msg.payload).unwrap();
@@ -441,6 +448,10 @@ async fn test_distributed_keygen_then_sign() {
         })
         .collect();
 
+    // Subscribe to readiness signals BEFORE spawning nodes
+    let mut ready_sub = nats.subscribe("mpc.ready.sign.*").await.unwrap();
+    nats.flush().await.unwrap();
+
     // Spawn sign node tasks (only parties 1+2 participate)
     let mut sign_handles = Vec::new();
     for i in 0..2u16 {
@@ -452,7 +463,13 @@ async fn test_distributed_keygen_then_sign() {
         }));
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Wait for both nodes to confirm they're subscribed (replaces flaky sleep(500ms))
+    for _ in 0..2 {
+        tokio::time::timeout(std::time::Duration::from_secs(10), ready_sub.next())
+            .await
+            .expect("node readiness signal timeout")
+            .expect("readiness subscription closed");
+    }
 
     // Orchestrator uses NATS request-reply for sign phase
     let sign_inbox = nats.new_inbox();

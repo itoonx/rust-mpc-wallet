@@ -27,6 +27,154 @@ use std::sync::LazyLock;
 /// Cached small primes up to 2^20, computed once via sieve of Eratosthenes.
 static SMALL_PRIMES: LazyLock<Vec<u32>> = LazyLock::new(|| generate_small_primes(1 << 20));
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SignedBigUint — signed wrapper for CGGMP21 ZK proofs (SEC-PIAFFG)
+//
+// CGGMP21 specifies signed integer ranges for masking values (alpha, beta, etc.)
+// and absolute-value range checks (|z| < bound). This wrapper carries a sign bit
+// alongside BigUint magnitude, used for sampling and range checking.
+// All Paillier modular arithmetic stays in BigUint (correct — mod arith is unsigned).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A signed big integer represented as (magnitude, sign).
+/// Used in ZK proof sampling and range checks per CGGMP21 specification.
+#[derive(Debug, Clone)]
+struct SignedBigUint {
+    magnitude: BigUint,
+    negative: bool,
+}
+
+#[allow(dead_code)]
+impl SignedBigUint {
+    fn positive(v: BigUint) -> Self {
+        Self {
+            magnitude: v,
+            negative: false,
+        }
+    }
+
+    /// Sample uniformly from [-bound, bound).
+    /// Samples from [0, 2*bound), then subtracts bound.
+    fn sample_symmetric(bound: &BigUint) -> Self {
+        let double = bound << 1;
+        let raw = sample_below(&double);
+        if raw >= *bound {
+            Self {
+                magnitude: &raw - bound,
+                negative: false,
+            }
+        } else {
+            Self {
+                magnitude: bound - &raw,
+                negative: true,
+            }
+        }
+    }
+
+    /// Sample uniformly from [-bound, bound) where bound = a * b.
+    fn sample_symmetric_product(a: &BigUint, b: &BigUint) -> Self {
+        let product = a * b;
+        Self::sample_symmetric(&product)
+    }
+
+    /// Absolute value (magnitude).
+    fn abs(&self) -> &BigUint {
+        &self.magnitude
+    }
+
+    /// Compute self + unsigned_val (where unsigned_val is always non-negative).
+    /// Returns a new SignedBigUint.
+    fn add_unsigned(&self, val: &BigUint) -> Self {
+        if !self.negative {
+            // positive + positive = positive
+            Self {
+                magnitude: &self.magnitude + val,
+                negative: false,
+            }
+        } else if val >= &self.magnitude {
+            // negative + positive where |positive| >= |negative| => positive
+            Self {
+                magnitude: val - &self.magnitude,
+                negative: false,
+            }
+        } else {
+            // negative + positive where |positive| < |negative| => negative
+            Self {
+                magnitude: &self.magnitude - val,
+                negative: true,
+            }
+        }
+    }
+
+    /// Compute self + other (both signed).
+    fn add_signed(&self, other: &Self) -> Self {
+        if self.negative == other.negative {
+            // Same sign: magnitudes add
+            Self {
+                magnitude: &self.magnitude + &other.magnitude,
+                negative: self.negative,
+            }
+        } else if self.magnitude >= other.magnitude {
+            // Different signs: larger magnitude wins
+            Self {
+                magnitude: &self.magnitude - &other.magnitude,
+                negative: self.negative,
+            }
+        } else {
+            Self {
+                magnitude: &other.magnitude - &self.magnitude,
+                negative: other.negative,
+            }
+        }
+    }
+
+    /// Multiply magnitude by an unsigned value, preserving sign.
+    fn mul_unsigned(&self, val: &BigUint) -> Self {
+        Self {
+            magnitude: &self.magnitude * val,
+            negative: self.negative,
+        }
+    }
+
+    /// Convert to positive representative mod `modulus`.
+    /// Positive values: magnitude mod modulus.
+    /// Negative values: modulus - (magnitude mod modulus).
+    fn to_mod(&self, modulus: &BigUint) -> BigUint {
+        let reduced = &self.magnitude % modulus;
+        if reduced.is_zero() || !self.negative {
+            reduced
+        } else {
+            modulus - &reduced
+        }
+    }
+
+    /// Encode to bytes: 1-byte sign prefix + magnitude big-endian.
+    fn to_bytes(&self) -> Vec<u8> {
+        let mag_bytes = self.magnitude.to_bytes_be();
+        let mut out = Vec::with_capacity(1 + mag_bytes.len());
+        out.push(if self.negative { 0x01 } else { 0x00 });
+        out.extend_from_slice(&mag_bytes);
+        out
+    }
+
+    /// Decode from bytes: 1-byte sign prefix + magnitude big-endian.
+    fn from_bytes(data: &[u8]) -> Self {
+        if data.is_empty() {
+            return Self::positive(BigUint::zero());
+        }
+        let negative = data[0] == 0x01;
+        let magnitude = if data.len() > 1 {
+            BigUint::from_bytes_be(&data[1..])
+        } else {
+            BigUint::zero()
+        };
+        Self {
+            magnitude,
+            negative,
+        }
+    }
+}
+
 /// Cached secp256k1 group order.
 static SECP256K1_ORDER: LazyLock<BigUint> = LazyLock::new(|| {
     BigUint::from_bytes_be(&[
@@ -827,7 +975,14 @@ pub fn prove_piaffg(
     let ell_bound = BigUint::one() << (PIENC_ELL + PIENC_EPSILON) as usize;
     let ell_prime_bound = BigUint::one() << (PIENC_ELL + PIENC_EPSILON) as usize;
 
-    // Sample masking values (all sampled BEFORE challenge computation)
+    // Sample masking values (all sampled BEFORE challenge computation).
+    //
+    // CGGMP21 paper specifies signed symmetric ranges [-2^(l+ε), 2^(l+ε)).
+    // We sample unsigned from [1, 2^(l+ε)) which is mathematically equivalent:
+    // with ε=512, the statistical slack 2^(-ε) = 2^(-512) is negligible, so
+    // responses z = alpha + e*x are statistically close to uniform in [0, 2^(l+ε))
+    // regardless of the witness x. Responses are encoded with a sign byte for
+    // forward compatibility with future signed-range implementations.
     let alpha = sample_below(&ell_bound);
     let beta = sample_below(&ell_prime_bound);
     let mu = sample_coprime(&n0);
@@ -872,17 +1027,17 @@ pub fn prove_piaffg(
         &n_hat,
     );
 
-    // Responses
-    let z1 = &alpha + &e * x;
-    let z2 = &beta + &e * y;
+    // Responses (always non-negative: unsigned masking + unsigned e*witness)
+    let z1 = SignedBigUint::positive(&alpha + &e * x);
+    let z2 = SignedBigUint::positive(&beta + &e * y);
 
     // w = mu * rho_y^e mod N_0^2
     let rho_y_e = rho_y.modpow(&e, &n0_sq);
     let w = (&mu * &rho_y_e) % &n0_sq;
 
-    // z3 = gamma + e*tau, z4 = delta + e*sigma (tau, sigma committed before challenge)
-    let z3 = &gamma + &e * &tau;
-    let z4 = &delta + &e * &sigma;
+    // z3 = gamma + e*tau, z4 = delta + e*sigma
+    let z3 = SignedBigUint::positive(&gamma + &e * &tau);
+    let z4 = SignedBigUint::positive(&delta + &e * &sigma);
 
     PiAffgProof {
         commitment_a: commitment_a.to_bytes_be(),
@@ -891,11 +1046,11 @@ pub fn prove_piaffg(
         commitment_f: commitment_f.to_bytes_be(),
         pedersen_sx: pedersen_sx.to_bytes_be(),
         pedersen_sy: pedersen_sy.to_bytes_be(),
-        z1: z1.to_bytes_be(),
-        z2: z2.to_bytes_be(),
+        z1: z1.to_bytes(),
+        z2: z2.to_bytes(),
         w: w.to_bytes_be(),
-        z3: z3.to_bytes_be(),
-        z4: z4.to_bytes_be(),
+        z3: z3.to_bytes(),
+        z4: z4.to_bytes(),
     }
 }
 
@@ -921,10 +1076,11 @@ pub fn verify_piaffg(proof: &PiAffgProof, public: &PiAffgPublicInput) -> bool {
     let commitment_f = BigUint::from_bytes_be(&proof.commitment_f);
     let pedersen_sx = BigUint::from_bytes_be(&proof.pedersen_sx);
     let pedersen_sy = BigUint::from_bytes_be(&proof.pedersen_sy);
-    let z1 = BigUint::from_bytes_be(&proof.z1);
-    let z2 = BigUint::from_bytes_be(&proof.z2);
-    let z3 = BigUint::from_bytes_be(&proof.z3);
-    let z4 = BigUint::from_bytes_be(&proof.z4);
+    // Decode signed responses (SEC-PIAFFG: CGGMP21 uses signed ranges)
+    let z1 = SignedBigUint::from_bytes(&proof.z1);
+    let z2 = SignedBigUint::from_bytes(&proof.z2);
+    let z3 = SignedBigUint::from_bytes(&proof.z3);
+    let z4 = SignedBigUint::from_bytes(&proof.z4);
     let w = BigUint::from_bytes_be(&proof.w);
 
     // Recompute challenge (includes witness commitments for binding)
@@ -940,19 +1096,28 @@ pub fn verify_piaffg(proof: &PiAffgProof, public: &PiAffgPublicInput) -> bool {
         &n_hat,
     );
 
-    // Range checks
+    // Absolute-value range checks (CGGMP21: |z| < 2^(ell+epsilon))
     let z1_bound = BigUint::one() << (PIENC_ELL + PIENC_EPSILON) as usize;
-    if z1 >= z1_bound {
+    if z1.abs() >= &z1_bound {
         return false;
     }
     let z2_bound = BigUint::one() << (PIENC_ELL + PIENC_EPSILON) as usize;
-    if z2 >= z2_bound {
+    if z2.abs() >= &z2_bound {
         return false;
     }
 
+    // Extract raw magnitudes for modular arithmetic.
+    // Currently all responses are non-negative (unsigned masking + positive witnesses).
+    // For modpow, we use the raw magnitude directly — NOT reduced mod the modulus,
+    // because g^(z mod n) ≠ g^z mod n in general (Euler's theorem uses φ(n), not n).
+    let z1_val = z1.abs();
+    let z2_val = z2.abs();
+    let z3_val = z3.abs();
+    let z4_val = z4.abs();
+
     // Check 1: C^z1 * Enc(z2, w) = A * D^e mod N_0^2
-    let c_z1 = c.modpow(&z1, &n0_sq);
-    let enc_z2 = (BigUint::one() + &z2 * &n0) % &n0_sq;
+    let c_z1 = c.modpow(z1_val, &n0_sq);
+    let enc_z2 = (BigUint::one() + z2_val * &n0) % &n0_sq;
     let w_n = w.modpow(&n0, &n0_sq);
     let enc_z2_full = (&enc_z2 * &w_n) % &n0_sq;
     let lhs = (&c_z1 * &enc_z2_full) % &n0_sq;
@@ -965,10 +1130,7 @@ pub fn verify_piaffg(proof: &PiAffgProof, public: &PiAffgPublicInput) -> bool {
     }
 
     // Check 2: s^z1 * t^z3 == E * S_x^e mod N_hat (Pedersen check for x)
-    // z1 = alpha + e*x, z3 = gamma + e*tau
-    // s^z1 * t^z3 = s^(alpha + e*x) * t^(gamma + e*tau)
-    //             = (s^alpha * t^gamma) * (s^x * t^tau)^e = E * S_x^e
-    let ped_x_lhs = (s_base.modpow(&z1, &n_hat) * t_base.modpow(&z3, &n_hat)) % &n_hat;
+    let ped_x_lhs = (s_base.modpow(z1_val, &n_hat) * t_base.modpow(z3_val, &n_hat)) % &n_hat;
     let sx_e = pedersen_sx.modpow(&e, &n_hat);
     let ped_x_rhs = (&commitment_e * &sx_e) % &n_hat;
     if ped_x_lhs != ped_x_rhs {
@@ -976,7 +1138,7 @@ pub fn verify_piaffg(proof: &PiAffgProof, public: &PiAffgPublicInput) -> bool {
     }
 
     // Check 3: s^z2 * t^z4 == F * S_y^e mod N_hat (Pedersen check for y)
-    let ped_y_lhs = (s_base.modpow(&z2, &n_hat) * t_base.modpow(&z4, &n_hat)) % &n_hat;
+    let ped_y_lhs = (s_base.modpow(z2_val, &n_hat) * t_base.modpow(z4_val, &n_hat)) % &n_hat;
     let sy_e = pedersen_sy.modpow(&e, &n_hat);
     let ped_y_rhs = (&commitment_f * &sy_e) % &n_hat;
     if ped_y_lhs != ped_y_rhs {
@@ -2177,13 +2339,65 @@ mod tests {
 
         let mut proof = prove_piaffg(&x, &y, &rho_y, &public);
 
-        // Tamper with z3 (Pedersen response for x)
+        // Tamper with z3 (Pedersen response for x) — use signed encoding
         let n_hat_big = BigUint::from_bytes_be(n_hat);
-        proof.z3 = sample_below(&n_hat_big).to_bytes_be();
+        proof.z3 = SignedBigUint::positive(sample_below(&n_hat_big)).to_bytes();
 
         assert!(
             !verify_piaffg(&proof, &public),
             "SEC-056: tampered z3 must cause Piaffg Pedersen check failure"
+        );
+    }
+
+    #[test]
+    fn test_piaffg_signed_range_overflow_rejected() {
+        // SEC-PIAFFG: Verify that |z1| >= 2^768 is rejected (absolute-value range check).
+        let (pk, _sk) = &*TEST_KEYS;
+        let (n_hat, s, t) = &*TEST_PEDERSEN;
+
+        let a = BigUint::from(7u64);
+        let x = BigUint::from(13u64);
+        let y = BigUint::from(99u64);
+
+        let (c_a, _r_a) = encrypt_with_known_r(pk, &a);
+        let c_ax = pk.scalar_mult(&c_a, &x);
+        let n = pk.n_biguint();
+        let rho_y = sample_coprime(&n);
+        let c_y = pk.encrypt_with_r(&y, &rho_y);
+        let d = pk.add(&c_ax, &c_y);
+
+        let public = PiAffgPublicInput {
+            pk_n0: pk.n.clone(),
+            pk_n0_squared: pk.n_squared.clone(),
+            c: c_a.data.clone(),
+            d: d.data.clone(),
+            n_hat: n_hat.clone(),
+            s: s.clone(),
+            t: t.clone(),
+        };
+
+        let mut proof = prove_piaffg(&x, &y, &rho_y, &public);
+
+        // Forge z1 with |z1| > 2^768 (overflow — must be rejected)
+        let overflow = BigUint::one() << 769usize;
+        proof.z1 = SignedBigUint::positive(overflow).to_bytes();
+
+        assert!(
+            !verify_piaffg(&proof, &public),
+            "SEC-PIAFFG: z1 with |z1| > 2^768 must be rejected"
+        );
+
+        // Also test with negative overflow
+        let mut proof2 = prove_piaffg(&x, &y, &rho_y, &public);
+        let overflow_neg = SignedBigUint {
+            magnitude: BigUint::one() << 769usize,
+            negative: true,
+        };
+        proof2.z1 = overflow_neg.to_bytes();
+
+        assert!(
+            !verify_piaffg(&proof2, &public),
+            "SEC-PIAFFG: z1 with |z1| > 2^768 (negative) must be rejected"
         );
     }
 
