@@ -64,6 +64,7 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tempfile = "3"
 criterion = { workspace = true }
+proptest = "1"
 # E2E test deps
 mpc-wallet-chains = { path = "../mpc-wallet-chains" }
 reqwest = { workspace = true }

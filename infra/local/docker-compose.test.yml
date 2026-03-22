@@ -1,0 +1,69 @@
+# CI-like local E2E testing environment
+#
+# Replicates the GitHub Actions E2E job locally:
+#   docker compose -f infra/local/docker-compose.test.yml up --build --abort-on-container-exit
+#
+# Starts Vault (dev) + Redis + NATS, builds the gateway, runs E2E tests, exits.
+
+services:
+  # ── Infrastructure (same images as CI) ─────────────────────────────
+  vault:
+    image: hashicorp/vault:1.15
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: dev-root-token
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--maxmemory", "128mb", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
+  nats:
+    image: nats:2.10-alpine
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["-js", "-m", "8222"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
+  # ── Test runner ────────────────────────────────────────────────────
+  test-runner:
+    build:
+      context: ../..
+      dockerfile: infra/local/Dockerfile.test
+    depends_on:
+      vault:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: dev-root-token
+      NATS_URL: nats://nats:4222
+      REDIS_URL: redis://redis:6379
+      GATEWAY_URL: http://localhost:3000
+      RUST_BACKTRACE: "1"

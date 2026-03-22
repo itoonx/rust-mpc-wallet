@@ -29,6 +29,7 @@ ENV_EXAMPLE="infra/local/.env.example"
 COMPOSE_FILE="infra/local/docker-compose.yml"
 COMPOSE_PROJECT="mpc-local"
 PID_FILE="/tmp/mpc-wallet-gateway.pid"
+KEY_DIR="infra/local/.keys"
 
 # ── Colors ────────────────────────────────────────────────────────────
 
@@ -79,6 +80,7 @@ check_prereqs() {
   command -v curl    >/dev/null 2>&1 || missing+=("curl")
   command -v jq      >/dev/null 2>&1 || missing+=("jq (brew install jq)")
   command -v openssl >/dev/null 2>&1 || missing+=("openssl")
+  command -v xxd     >/dev/null 2>&1 || missing+=("xxd (usually bundled with vim)")
   command -v cargo   >/dev/null 2>&1 || missing+=("cargo (rustup)")
 
   if [ ${#missing[@]} -gt 0 ]; then
@@ -180,12 +182,36 @@ cmd_logs() {
 
 cmd_restart_gw() {
   step "Rebuilding gateway + nodes"
+  generate_gateway_keys
   stop_gateway
   stop_nodes
   build_binaries
   start_nodes
   start_gateway
   smoke_test
+}
+
+# ── Gateway Ed25519 key management ───────────────────────────────────
+
+generate_gateway_keys() {
+  mkdir -p "$KEY_DIR"
+
+  if [ -f "$KEY_DIR/gateway_signing.pem" ]; then
+    log "Reusing existing gateway signing key from $KEY_DIR/"
+  else
+    log "Generating gateway Ed25519 signing keypair"
+    openssl genpkey -algorithm Ed25519 -out "$KEY_DIR/gateway_signing.pem" 2>/dev/null
+  fi
+
+  # Extract raw 32-byte private seed (PKCS8 DER: last 32 bytes)
+  GATEWAY_SIGNING_KEY_HEX=$(openssl pkey -in "$KEY_DIR/gateway_signing.pem" -outform DER 2>/dev/null \
+    | tail -c 32 | xxd -p -c 64)
+
+  # Extract raw 32-byte public key (SubjectPublicKeyInfo DER: last 32 bytes)
+  GATEWAY_PUBKEY_HEX=$(openssl pkey -in "$KEY_DIR/gateway_signing.pem" -pubout -outform DER 2>/dev/null \
+    | tail -c 32 | xxd -p -c 64)
+
+  log "Gateway pubkey: ${GATEWAY_PUBKEY_HEX:0:16}... (GATEWAY_PUBKEY for MPC nodes)"
 }
 
 # ── Core functions ────────────────────────────────────────────────────
@@ -222,6 +248,9 @@ provision_vault() {
   jwt_secret=$(openssl rand -hex 32)
   server_signing_key=$(openssl rand -hex 32)
   session_encryption_key=$(openssl rand -hex 32)
+
+  # Use gateway Ed25519 key as server_signing_key (ensures GATEWAY_PUBKEY matches)
+  server_signing_key="${GATEWAY_SIGNING_KEY_HEX}"
 
   # Write secrets
   vault_api POST "${mount}/data/${path}" \
@@ -306,6 +335,7 @@ start_nodes() {
     KEY_STORE_DIR="$key_dir" \
     KEY_STORE_PASSWORD="dev-password-local-test" \
     NODE_SIGNING_KEY="$signing_key" \
+    GATEWAY_PUBKEY="$GATEWAY_PUBKEY_HEX" \
     RUST_LOG="mpc_wallet_node=info" \
       "$binary" &
 
@@ -381,6 +411,8 @@ print_summary() {
   printf "  %-10s %s\n" "Gateway"  "${GATEWAY_URL}  (PID: ${pid}, orchestrator mode)"
   echo ""
   echo "  Vault secrets: ${VAULT_MOUNT:-secret}/${VAULT_SECRETS_PATH:-mpc-wallet/gateway}"
+  echo "  Gateway key:   ${KEY_DIR}/gateway_signing.pem"
+  echo "  GATEWAY_PUBKEY: ${GATEWAY_PUBKEY_HEX}"
   echo ""
   echo "  Commands:"
   echo "    ./scripts/local-infra.sh status       # health check"
@@ -405,6 +437,7 @@ cmd_up() {
   $DC down -v 2>/dev/null || true
   stop_gateway
 
+  generate_gateway_keys
   start_containers
   provision_vault
   build_binaries

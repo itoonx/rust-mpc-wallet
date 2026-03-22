@@ -1,0 +1,46 @@
+# E2E test runner — builds workspace + runs ignored tests against live infra
+FROM rust:1.82-bookworm
+
+WORKDIR /app
+
+# Install system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl jq openssl pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace
+COPY . .
+
+# Build workspace (tests + gateway binary)
+RUN cargo build -p mpc-wallet-api && \
+    cargo test --workspace --features local-transport --no-run
+
+# Provision Vault, start gateway, run E2E tests
+CMD ["bash", "-c", "\
+  set -e && \
+  echo '--- Provisioning Vault ---' && \
+  JWT_SECRET=$(openssl rand -hex 32) && \
+  SERVER_SIGNING_KEY=$(openssl rand -hex 32) && \
+  SESSION_ENCRYPTION_KEY=$(openssl rand -hex 32) && \
+  curl -sf -X POST \"$VAULT_ADDR/v1/secret/data/mpc-wallet/gateway\" \
+    -H \"X-Vault-Token: $VAULT_TOKEN\" \
+    -H 'Content-Type: application/json' \
+    -d \"{\\\"data\\\":{\\\"jwt_secret\\\":\\\"$JWT_SECRET\\\",\\\"server_signing_key\\\":\\\"$SERVER_SIGNING_KEY\\\",\\\"session_encryption_key\\\":\\\"$SESSION_ENCRYPTION_KEY\\\",\\\"redis_url\\\":\\\"$REDIS_URL\\\"}}\" && \
+  echo '--- Starting gateway ---' && \
+  SECRETS_BACKEND=vault \
+  NETWORK=testnet \
+  SESSION_BACKEND=redis \
+  PORT=3000 \
+  RUST_LOG=mpc_wallet_api=info \
+    ./target/debug/mpc-wallet-api & \
+  GW_PID=$! && \
+  for i in $(seq 1 30); do \
+    curl -sf http://localhost:3000/v1/health >/dev/null 2>&1 && break; \
+    [ $i -eq 30 ] && echo 'Gateway failed to start' && exit 1; \
+    sleep 1; \
+  done && \
+  echo '--- Running E2E tests ---' && \
+  cargo test -p mpc-wallet-core --test e2e_tests --features local-transport -- --ignored --test-threads=1 && \
+  echo '--- All E2E tests passed ---' && \
+  kill $GW_PID 2>/dev/null || true \
+"]

@@ -5,4 +5,5 @@
 
 # Local infra secrets (never commit)
 infra/local/.env
+infra/local/.keys/
 infra/docker/docker-compose.local.yml

@@ -1,0 +1,32 @@
+[package]
+name = "mpc-wallet-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mpc-wallet-core = { path = "..", features = ["local-transport"] }
+serde_json = "1"
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_protocol_message"
+path = "fuzz_targets/protocol_message.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_share_data"
+path = "fuzz_targets/share_data.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_paillier_ops"
+path = "fuzz_targets/paillier_ops.rs"
+doc = false
