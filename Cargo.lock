@@ -3545,6 +3545,7 @@ dependencies = [
  "num-integer",
  "num-modular",
  "num-traits",
+ "proptest",
  "rand 0.8.5",
  "redis",
  "reqwest",

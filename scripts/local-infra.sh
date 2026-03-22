@@ -79,8 +79,7 @@ check_prereqs() {
   command -v docker  >/dev/null 2>&1 || missing+=("docker")
   command -v curl    >/dev/null 2>&1 || missing+=("curl")
   command -v jq      >/dev/null 2>&1 || missing+=("jq (brew install jq)")
-  command -v openssl >/dev/null 2>&1 || missing+=("openssl")
-  command -v xxd     >/dev/null 2>&1 || missing+=("xxd (usually bundled with vim)")
+  # openssl + xxd no longer needed — Ed25519 keygen uses Rust (cross-platform)
   command -v cargo   >/dev/null 2>&1 || missing+=("cargo (rustup)")
 
   if [ ${#missing[@]} -gt 0 ]; then
@@ -196,20 +195,19 @@ cmd_restart_gw() {
 generate_gateway_keys() {
   mkdir -p "$KEY_DIR"
 
-  if [ -f "$KEY_DIR/gateway_signing.pem" ]; then
-    log "Reusing existing gateway signing key from $KEY_DIR/"
-  else
-    log "Generating gateway Ed25519 signing keypair"
-    openssl genpkey -algorithm Ed25519 -out "$KEY_DIR/gateway_signing.pem" 2>/dev/null
+  # Cross-platform: use Rust (ed25519-dalek) instead of openssl for Ed25519 keygen.
+  # LibreSSL (macOS default) doesn't support Ed25519, and different Linux distros
+  # ship different OpenSSL versions. Rust + cargo are already prerequisites.
+  log "Generating gateway Ed25519 keypair (Rust cross-platform)"
+  local keygen_output
+  keygen_output=$(cargo run -p mpc-wallet-core --example gen_gateway_keys -- "$KEY_DIR" 2>/dev/null)
+
+  GATEWAY_SIGNING_KEY_HEX=$(echo "$keygen_output" | grep '^SEED=' | cut -d= -f2)
+  GATEWAY_PUBKEY_HEX=$(echo "$keygen_output" | grep '^PUBKEY=' | cut -d= -f2)
+
+  if [ -z "$GATEWAY_SIGNING_KEY_HEX" ] || [ -z "$GATEWAY_PUBKEY_HEX" ]; then
+    err "Failed to generate gateway keys — check cargo build output"
   fi
-
-  # Extract raw 32-byte private seed (PKCS8 DER: last 32 bytes)
-  GATEWAY_SIGNING_KEY_HEX=$(openssl pkey -in "$KEY_DIR/gateway_signing.pem" -outform DER 2>/dev/null \
-    | tail -c 32 | xxd -p -c 64)
-
-  # Extract raw 32-byte public key (SubjectPublicKeyInfo DER: last 32 bytes)
-  GATEWAY_PUBKEY_HEX=$(openssl pkey -in "$KEY_DIR/gateway_signing.pem" -pubout -outform DER 2>/dev/null \
-    | tail -c 32 | xxd -p -c 64)
 
   log "Gateway pubkey: ${GATEWAY_PUBKEY_HEX:0:16}... (GATEWAY_PUBKEY for MPC nodes)"
 }
