@@ -211,7 +211,8 @@ async fn test_nats_sign_gg20_direct() {
         protocol.sign(&share2, &s2, &m2, &t2).await
     });
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+    // 90s timeout: MtA sign path has 5 rounds with Paillier crypto on CI shared vCPU
+    let result = tokio::time::timeout(std::time::Duration::from_secs(90), async {
         let sig1 = h1.await.unwrap()?;
         let _sig2 = h2.await.unwrap()?;
         Ok::<_, mpc_wallet_core::error::CoreError>(sig1)

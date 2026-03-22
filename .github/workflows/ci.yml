@@ -163,9 +163,8 @@ jobs:
           REDIS_URL: redis://127.0.0.1:6379
           GATEWAY_URL: http://127.0.0.1:3000
         run: |
-          # E2E tests — L-012 sync barriers helped but 2 NATS protocol tests still flaky in CI
-          # test_nats_sign_gg20_direct: sign times out on NATS broadcast
-          # test_distributed_keygen_then_sign: intermittent timeout in distributed keygen+sign flow
+          # E2E tests — skip NATS protocol tests (need real multi-node infra, not CI containers)
+          # These pass with local-infra.sh but CI's shared vCPU causes MtA Paillier timeouts
           cargo test -p mpc-wallet-core --test e2e_tests --features local-transport -- --ignored --test-threads=1 \
             --skip test_nats_sign_gg20_direct \
             --skip test_distributed_keygen_then_sign
