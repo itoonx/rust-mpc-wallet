@@ -1,0 +1,358 @@
+//! API Regression Tests — Real HTTP via reqwest
+//!
+//! These tests hit a **running** gateway over real HTTP (not in-process Router).
+//! They catch integration issues that in-process tests miss: middleware ordering,
+//! header parsing, session serialization, CORS, etc.
+//!
+//! Requires: `./scripts/local-infra.sh up` (Vault + Redis + NATS + Gateway)
+//! Run:      `cargo test -p mpc-wallet-api --test api_regression -- --ignored --test-threads=1`
+
+use mpc_wallet_api::auth::client::HandshakeClient;
+use mpc_wallet_api::auth::types::*;
+use reqwest::Client;
+use serde_json::Value;
+
+// ═══════════════════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════════════════
+
+fn gateway_url() -> String {
+    std::env::var("GATEWAY_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".into())
+}
+
+fn http_client() -> Client {
+    Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap()
+}
+
+async fn get(url: &str) -> (u16, Value) {
+    let resp = http_client().get(url).send().await.expect("GET failed");
+    let status = resp.status().as_u16();
+    let json = resp.json().await.unwrap_or(Value::Null);
+    (status, json)
+}
+
+async fn get_with_session(url: &str, token: &str) -> (u16, Value) {
+    let resp = http_client()
+        .get(url)
+        .header("x-session-token", token)
+        .send()
+        .await
+        .expect("GET with session failed");
+    let status = resp.status().as_u16();
+    let json = resp.json().await.unwrap_or(Value::Null);
+    (status, json)
+}
+
+async fn post_json(url: &str, body: &Value) -> (u16, Value) {
+    let resp = http_client()
+        .post(url)
+        .json(body)
+        .send()
+        .await
+        .expect("POST failed");
+    let status = resp.status().as_u16();
+    let json = resp.json().await.unwrap_or(Value::Null);
+    (status, json)
+}
+
+/// Perform full 3-message handshake via real HTTP.
+/// Returns (session_token, session_id).
+async fn full_handshake(gw: &str) -> (String, String) {
+    let client_key = gen_ed25519_key();
+    let client = HandshakeClient::new(client_key, None);
+    let bundle = client.build_client_hello();
+
+    // Step 1: POST /v1/auth/hello
+    let hello_body = serde_json::to_value(&bundle.client_hello).unwrap();
+    let (status, hello_resp) = post_json(&format!("{gw}/v1/auth/hello"), &hello_body).await;
+    assert_eq!(status, 200, "auth/hello failed: {hello_resp}");
+
+    let server_hello: ServerHello =
+        serde_json::from_value(hello_resp["data"].clone()).expect("parse ServerHello");
+
+    // Step 2: Client processes ServerHello → build ClientAuth
+    let (client_auth, _derived) = client
+        .process_server_hello(
+            &bundle.client_hello,
+            &server_hello,
+            bundle.ephemeral_secret,
+            &bundle.client_nonce,
+        )
+        .expect("process_server_hello failed");
+
+    // Step 3: POST /v1/auth/verify
+    let verify_body = serde_json::json!({
+        "server_challenge": server_hello.server_challenge,
+        "client_signature": client_auth.client_signature,
+        "client_static_pubkey": client_auth.client_static_pubkey,
+    });
+    let (status, verify_resp) = post_json(&format!("{gw}/v1/auth/verify"), &verify_body).await;
+    assert_eq!(status, 200, "auth/verify failed: {verify_resp}");
+
+    let session_token = verify_resp["data"]["session_token"]
+        .as_str()
+        .expect("no session_token")
+        .to_string();
+    let session_id = verify_resp["data"]["session_id"]
+        .as_str()
+        .expect("no session_id")
+        .to_string();
+
+    (session_token, session_id)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 1. Health Endpoints
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_health_endpoint() {
+    let gw = gateway_url();
+    let (status, json) = get(&format!("{gw}/v1/health")).await;
+
+    assert_eq!(status, 200);
+    assert_eq!(json["success"].as_bool(), Some(true));
+    assert_eq!(json["data"]["status"].as_str(), Some("healthy"));
+    assert!(json["data"]["chains_supported"].as_u64().unwrap_or(0) >= 50);
+}
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_health_live() {
+    let gw = gateway_url();
+    let (status, json) = get(&format!("{gw}/v1/health/live")).await;
+
+    assert_eq!(status, 200);
+    assert_eq!(json["data"]["status"].as_str(), Some("ok"));
+}
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_health_ready() {
+    let gw = gateway_url();
+    let (status, json) = get(&format!("{gw}/v1/health/ready")).await;
+
+    assert_eq!(status, 200);
+    let comp = &json["data"]["components"];
+    // At minimum, NATS should be connected since local-infra starts it
+    assert!(
+        comp["nats"].as_str().is_some(),
+        "readiness should report NATS status"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 2. Chains Endpoint
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_chains_returns_50() {
+    let gw = gateway_url();
+    let (status, json) = get(&format!("{gw}/v1/chains")).await;
+
+    assert_eq!(status, 200);
+    assert_eq!(json["data"]["total"].as_u64(), Some(50));
+    let chains = json["data"]["chains"].as_array().unwrap();
+    let names: Vec<&str> = chains.iter().filter_map(|c| c["name"].as_str()).collect();
+    assert!(names.contains(&"ethereum"), "missing ethereum");
+    assert!(names.contains(&"bitcoin-mainnet"), "missing bitcoin");
+    assert!(names.contains(&"solana"), "missing solana");
+    assert!(names.contains(&"sui"), "missing sui");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 3. Auth Handshake — Full Flow via Real HTTP
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_full_handshake_and_session_access() {
+    let gw = gateway_url();
+    let (session_token, session_id) = full_handshake(&gw).await;
+
+    assert!(!session_token.is_empty(), "session_token must not be empty");
+    assert!(!session_id.is_empty(), "session_id must not be empty");
+
+    // Use session to access protected endpoint
+    let (status, json) = get_with_session(&format!("{gw}/v1/wallets"), &session_token).await;
+    assert_eq!(
+        status, 200,
+        "session token should grant access to /v1/wallets"
+    );
+    assert_eq!(json["success"].as_bool(), Some(true));
+}
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_session_refresh() {
+    let gw = gateway_url();
+    let (session_token, _) = full_handshake(&gw).await;
+
+    // Refresh session
+    let refresh_body = serde_json::json!({ "session_token": session_token });
+    let (status, json) = post_json(&format!("{gw}/v1/auth/refresh-session"), &refresh_body).await;
+    assert_eq!(status, 200, "refresh should succeed: {json}");
+
+    let new_token = json["data"]["session_token"]
+        .as_str()
+        .expect("refresh must return new session_token");
+    assert!(!new_token.is_empty());
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 4. Protected Endpoints Without Auth → 401
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_wallets_without_auth_returns_401() {
+    let gw = gateway_url();
+    let (status, json) = get(&format!("{gw}/v1/wallets")).await;
+
+    assert_eq!(status, 401);
+    assert_eq!(json["success"].as_bool(), Some(false));
+    assert_eq!(json["error"]["code"].as_str(), Some("AUTH_FAILED"));
+}
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_create_wallet_without_auth_returns_401() {
+    let gw = gateway_url();
+    let body = serde_json::json!({
+        "chain": "ethereum",
+        "threshold": 2,
+        "parties": 3
+    });
+    let (status, json) = post_json(&format!("{gw}/v1/wallets"), &body).await;
+
+    assert_eq!(status, 401);
+    assert_eq!(json["error"]["code"].as_str(), Some("AUTH_FAILED"));
+}
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_revoke_key_without_auth_returns_401() {
+    let gw = gateway_url();
+    let body = serde_json::json!({ "key_id": "deadbeef" });
+    let (status, json) = post_json(&format!("{gw}/v1/auth/revoke-key"), &body).await;
+
+    assert_eq!(status, 401);
+    assert_eq!(json["error"]["code"].as_str(), Some("AUTH_FAILED"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 5. Invalid Auth Headers → 401
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_invalid_session_token_returns_401() {
+    let gw = gateway_url();
+    let (status, json) = get_with_session(&format!("{gw}/v1/wallets"), "garbage-token").await;
+
+    assert_eq!(status, 401);
+    assert_eq!(json["error"]["code"].as_str(), Some("AUTH_FAILED"));
+}
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_invalid_bearer_token_returns_401() {
+    let gw = gateway_url();
+    let resp = http_client()
+        .get(format!("{gw}/v1/wallets"))
+        .header("Authorization", "Bearer invalid-jwt-token")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 401);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 6. Error Response Format Consistency
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_error_response_format() {
+    let gw = gateway_url();
+
+    // 401 error format
+    let (_, json_401) = get(&format!("{gw}/v1/wallets")).await;
+    assert_eq!(json_401["success"].as_bool(), Some(false));
+    assert!(
+        json_401["error"]["code"].is_string(),
+        "error must have code"
+    );
+    assert!(
+        json_401["error"]["message"].is_string(),
+        "error must have message"
+    );
+    assert!(json_401["data"].is_null(), "error must not have data");
+
+    // 404 error format (nonexistent wallet)
+    let (session_token, _) = full_handshake(&gw).await;
+    let (status_404, json_404) =
+        get_with_session(&format!("{gw}/v1/wallets/nonexistent-id"), &session_token).await;
+    assert_eq!(status_404, 404);
+    assert_eq!(json_404["success"].as_bool(), Some(false));
+    assert!(
+        json_404["error"]["code"].is_string(),
+        "404 error must have code"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 7. Rate Limiting
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_rate_limit_on_auth_hello() {
+    let gw = gateway_url();
+
+    // Use the same client_key_id to trigger rate limiting (10 req/sec)
+    let client_key = gen_ed25519_key();
+    let mut got_429 = false;
+
+    for _ in 0..20 {
+        let client = HandshakeClient::new(client_key.clone(), None);
+        let bundle = client.build_client_hello();
+        let body = serde_json::to_value(&bundle.client_hello).unwrap();
+        let (status, _) = post_json(&format!("{gw}/v1/auth/hello"), &body).await;
+
+        if status == 429 {
+            got_429 = true;
+            break;
+        }
+    }
+
+    assert!(
+        got_429,
+        "should get 429 after rapid-fire handshake attempts"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 8. Revoked Keys Endpoint (Public)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_revoked_keys_endpoint() {
+    let gw = gateway_url();
+    let (status, json) = get(&format!("{gw}/v1/auth/revoked-keys")).await;
+
+    assert_eq!(status, 200);
+    assert_eq!(json["success"].as_bool(), Some(true));
+    // data should be an array (possibly empty)
+    assert!(
+        json["data"]["revoked_keys"].is_array(),
+        "revoked_keys should be an array"
+    );
+}
