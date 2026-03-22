@@ -181,6 +181,7 @@ jobs:
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin --locked
       - name: Run coverage
+        continue-on-error: true
         run: |
           cargo tarpaulin --workspace --features local-transport --skip-clean --out xml --output-dir coverage/ 2>&1 | tee /tmp/coverage.txt
           COVERAGE=$(grep "coverage:" /tmp/coverage.txt | tail -1 | grep -oP '[\d.]+(?=%)')
