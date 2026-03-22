@@ -127,7 +127,8 @@ async fn test_health_live() {
     let (status, json) = get(&format!("{gw}/v1/health/live")).await;
 
     assert_eq!(status, 200);
-    assert_eq!(json["data"]["status"].as_str(), Some("ok"));
+    // /health/live returns flat JSON (no data wrapper): {"status":"ok"}
+    assert_eq!(json["status"].as_str(), Some("ok"));
 }
 
 #[tokio::test]
@@ -137,7 +138,8 @@ async fn test_health_ready() {
     let (status, json) = get(&format!("{gw}/v1/health/ready")).await;
 
     assert_eq!(status, 200);
-    let comp = &json["data"]["components"];
+    // /health/ready returns flat JSON (no data wrapper): {"status":"ready","components":{...}}
+    let comp = &json["components"];
     // At minimum, NATS should be connected since local-infra starts it
     assert!(
         comp["nats"].as_str().is_some(),
@@ -350,10 +352,10 @@ async fn test_revoked_keys_endpoint() {
 
     assert_eq!(status, 200);
     assert_eq!(json["success"].as_bool(), Some(true));
-    // data should be an array (possibly empty)
+    // data is a flat array of revoked keys (possibly empty)
     assert!(
-        json["data"]["revoked_keys"].is_array(),
-        "revoked_keys should be an array"
+        json["data"].is_array(),
+        "data should be an array of revoked keys"
     );
 }
 
