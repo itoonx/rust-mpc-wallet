@@ -55,8 +55,25 @@ async fn main() {
 
     // Connect MPC orchestrator to NATS if NATS_URL is configured.
     if let Ok(nats_url) = std::env::var("NATS_URL") {
-        match mpc_wallet_api::orchestrator::MpcOrchestrator::connect(&nats_url).await {
-            Ok(orch) => {
+        let result = mpc_wallet_api::orchestrator::MpcOrchestrator::connect_with_key(
+            &nats_url,
+            state.server_signing_key.as_ref().clone(),
+        )
+        .await;
+        match result {
+            Ok(mut orch) => {
+                // Load node verifying keys if configured (required for keygen/sign).
+                if let Some(ref path) = config.node_verifying_keys_file {
+                    if let Ok(content) = std::fs::read_to_string(path) {
+                        if let Ok(keys) = serde_json::from_str::<
+                            Vec<mpc_wallet_core::rpc::PeerKeyEntry>,
+                        >(&content)
+                        {
+                            tracing::info!(count = keys.len(), "loaded MPC node verifying keys");
+                            orch.set_node_verifying_keys(keys);
+                        }
+                    }
+                }
                 state.orchestrator = orch;
                 tracing::info!("MPC orchestrator connected to NATS — distributed mode active");
             }

@@ -27,6 +27,9 @@ pub struct ClientKeyEntry {
     pub role: String,
     /// Human-readable label.
     pub label: String,
+    /// Trusted MFA status — when true, sessions from this key have MFA verified.
+    #[serde(default)]
+    pub mfa: bool,
 }
 
 impl ClientKeyEntry {

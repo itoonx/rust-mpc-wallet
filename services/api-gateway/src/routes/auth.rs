@@ -151,23 +151,34 @@ pub async fn auth_verify(
             auth_failed()
         })?;
 
-    // Verify client is in trusted registry (only if registry has entries).
-    if !state.app.client_registry.keys.is_empty()
-        && state
+    // Verify client is in trusted registry (only if registry has entries AND network is mainnet).
+    // On testnet, unknown keys are allowed but get Viewer role (open enrollment).
+    // On mainnet, unknown keys are rejected for security.
+    if !state.app.client_registry.keys.is_empty() {
+        let is_trusted = state
             .app
             .client_registry
             .verify_trusted(
                 &pending.client_hello.client_key_id,
                 &req.client_auth.client_static_pubkey,
             )
-            .is_none()
-    {
-        state.app.metrics.handshake_failures.inc();
-        tracing::warn!(
-            client_key_id = %pending.client_hello.client_key_id,
-            "handshake verify: untrusted client key"
-        );
-        return Err(auth_failed());
+            .is_some();
+        if !is_trusted {
+            let network = std::env::var("NETWORK").unwrap_or_default();
+            if network == "mainnet" {
+                state.app.metrics.handshake_failures.inc();
+                tracing::warn!(
+                    client_key_id = %pending.client_hello.client_key_id,
+                    "handshake verify: untrusted client key rejected (mainnet)"
+                );
+                return Err(auth_failed());
+            }
+            // Testnet: allow unknown keys with Viewer role (logged for visibility)
+            tracing::debug!(
+                client_key_id = %pending.client_hello.client_key_id,
+                "handshake verify: unknown key allowed on testnet (Viewer role)"
+            );
+        }
     }
 
     let session = pending

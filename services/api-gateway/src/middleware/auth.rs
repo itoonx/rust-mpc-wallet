@@ -18,17 +18,14 @@ use crate::state::AppState;
 
 /// Build AuthContext from a session's client_key_id.
 fn session_auth_context(state: &AppState, client_key_id: &str) -> AuthContext {
-    let role = state
-        .client_registry
-        .keys
-        .get(client_key_id)
-        .map(|e| e.api_role())
-        .unwrap_or(ApiRole::Viewer);
+    let entry = state.client_registry.keys.get(client_key_id);
+    let role = entry.map(|e| e.api_role()).unwrap_or(ApiRole::Viewer);
+    let mfa = entry.map(|e| e.mfa).unwrap_or(false);
     AuthContext::with_attributes(
         format!("session:{client_key_id}"),
         vec![role],
         AbacAttributes::default(),
-        false,
+        mfa,
     )
 }
 

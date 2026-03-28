@@ -62,6 +62,9 @@ pub struct AppConfig {
     pub client_keys_file: Option<String>,
     /// Revoked key IDs file (JSON array of hex key_id strings).
     pub revoked_keys_file: Option<String>,
+    /// MPC node verifying keys file (JSON array of PeerKeyEntry).
+    /// Required for keygen/sign — nodes verify each other's SignedEnvelope with these keys.
+    pub node_verifying_keys_file: Option<String>,
     /// Session TTL in seconds. Default: 3600 (1 hour).
     pub session_ttl: u64,
     /// mTLS service registry file (JSON array of MtlsServiceEntry).
@@ -165,6 +168,7 @@ impl AppConfig {
             server_signing_key,
             client_keys_file: std::env::var("CLIENT_KEYS_FILE").ok(),
             revoked_keys_file: std::env::var("REVOKED_KEYS_FILE").ok(),
+            node_verifying_keys_file: std::env::var("NODE_VERIFYING_KEYS_FILE").ok(),
             session_ttl: std::env::var("SESSION_TTL")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -248,6 +252,7 @@ impl AppConfig {
             server_signing_key: None, // auto-generated in AppState for tests
             client_keys_file: None,
             revoked_keys_file: None,
+            node_verifying_keys_file: None,
             session_ttl: 3600,
             mtls_services_file: None,
             session_backend: BackendType::Memory,

@@ -368,6 +368,8 @@ start_gateway() {
   NATS_URL="nats://127.0.0.1:${NATS_CLIENT_PORT:-4222}" \
   PORT="${GATEWAY_PORT:-3000}" \
   RATE_LIMIT_RPS="${RATE_LIMIT_RPS:-100}" \
+  CLIENT_KEYS_FILE="${KEY_DIR}/test-client-keys.json" \
+  NODE_VERIFYING_KEYS_FILE="${KEY_DIR}/node-verifying-keys.json" \
   RUST_LOG="${RUST_LOG:-mpc_wallet_api=info}" \
     "$binary" &
 

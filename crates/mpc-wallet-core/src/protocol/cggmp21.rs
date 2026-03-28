@@ -1246,6 +1246,17 @@ async fn cggmp21_pre_sign(
         // Each party i: encrypt k_i under their own Paillier key, broadcast
         // Enc(k_i). Then for each pair (i,j), run MtA to compute additive
         // shares of k_i * gamma_j (for delta) and k_i * x_j * lambda_j (for chi).
+
+        // Sprint 28a: ZK proofs are MANDATORY — require full aux info (Pedersen params).
+        // Without Pedersen parameters, we cannot generate or verify Πenc, Πlog*, Πaff-g.
+        if !share_data.has_real_aux_info() {
+            return Err(CoreError::Protocol(
+                "CGGMP21 pre-signing requires real Pedersen parameters for ZK proofs \
+                 — run key refresh to upgrade legacy shares"
+                    .into(),
+            ));
+        }
+
         let my_pk = share_data.real_paillier_pk.as_ref().unwrap().clone();
         let my_sk = share_data.real_paillier_sk.as_ref().unwrap().clone();
         let all_pks = share_data.all_paillier_pks.as_ref().unwrap();
@@ -1260,48 +1271,42 @@ async fn cggmp21_pre_sign(
         let mta_round1_k = mta_witness.message;
 
         // ── Generate Πenc proof (CGGMP21 Fig. 14): |k_i| < 2^256 ────────
-        // Uses prover's own Pedersen params for range commitment
-        let (pi_enc_proof, pi_logstar_proof) = if share_data.has_real_aux_info() {
-            let ped_n_hat = share_data.real_pedersen_n_hat.as_ref().unwrap();
-            let ped_s = share_data.real_pedersen_s.as_ref().unwrap();
-            let ped_t = share_data.real_pedersen_t.as_ref().unwrap();
+        // Sprint 28a: ZK proofs are MANDATORY — no conditional guards.
+        let ped_n_hat = share_data.real_pedersen_n_hat.as_ref().unwrap();
+        let ped_s = share_data.real_pedersen_s.as_ref().unwrap();
+        let ped_t = share_data.real_pedersen_t.as_ref().unwrap();
 
-            let pi_enc_public = crate::paillier::zk_proofs::PiEncPublicInput {
-                pk_n: my_pk.n.clone(),
-                pk_n_squared: my_pk.n_squared.clone(),
-                ciphertext: mta_round1_k.ciphertext.data.clone(),
-                n_hat: ped_n_hat.clone(),
-                s: ped_s.clone(),
-                t: ped_t.clone(),
-            };
-            let m_big = BigUint::from_bytes_be(&mta_witness.plaintext_m);
-            let r_big = BigUint::from_bytes_be(&mta_witness.randomness_r);
-            let enc_proof = crate::paillier::zk_proofs::prove_pienc(&m_big, &r_big, &pi_enc_public);
-
-            // ── Generate Πlog* proof (CGGMP21 Fig. 25): Enc(k_i) ↔ K_i = k_i*G ──
-            let pi_logstar_public = crate::paillier::zk_proofs::PiLogStarPublicInput {
-                pk_n: my_pk.n.clone(),
-                pk_n_squared: my_pk.n_squared.clone(),
-                ciphertext: mta_round1_k.ciphertext.data.clone(),
-                x_commitment: k_point_bytes.clone(),
-                n_hat: ped_n_hat.clone(),
-                s: ped_s.clone(),
-                t: ped_t.clone(),
-            };
-            let logstar_proof =
-                crate::paillier::zk_proofs::prove_pilogstar(&m_big, &r_big, &pi_logstar_public);
-
-            (Some(enc_proof), Some(logstar_proof))
-        } else {
-            (None, None)
+        let pi_enc_public = crate::paillier::zk_proofs::PiEncPublicInput {
+            pk_n: my_pk.n.clone(),
+            pk_n_squared: my_pk.n_squared.clone(),
+            ciphertext: mta_round1_k.ciphertext.data.clone(),
+            n_hat: ped_n_hat.clone(),
+            s: ped_s.clone(),
+            t: ped_t.clone(),
         };
+        let m_big = BigUint::from_bytes_be(&mta_witness.plaintext_m);
+        let r_big = BigUint::from_bytes_be(&mta_witness.randomness_r);
+        let pi_enc_proof = crate::paillier::zk_proofs::prove_pienc(&m_big, &r_big, &pi_enc_public);
 
-        // Broadcast Enc(k_i) + ZK proofs
+        // ── Generate Πlog* proof (CGGMP21 Fig. 25): Enc(k_i) ↔ K_i = k_i*G ──
+        let pi_logstar_public = crate::paillier::zk_proofs::PiLogStarPublicInput {
+            pk_n: my_pk.n.clone(),
+            pk_n_squared: my_pk.n_squared.clone(),
+            ciphertext: mta_round1_k.ciphertext.data.clone(),
+            x_commitment: k_point_bytes.clone(),
+            n_hat: ped_n_hat.clone(),
+            s: ped_s.clone(),
+            t: ped_t.clone(),
+        };
+        let pi_logstar_proof =
+            crate::paillier::zk_proofs::prove_pilogstar(&m_big, &r_big, &pi_logstar_public);
+
+        // Broadcast Enc(k_i) + ZK proofs (mandatory since Sprint 28a)
         let mta_r2_msg = PreSignMtaRound2 {
             party_index: my_index,
             encrypted_k: mta_round1_k.ciphertext.clone(),
-            pi_enc: pi_enc_proof,
-            pi_logstar: pi_logstar_proof,
+            pi_enc: Some(pi_enc_proof),
+            pi_logstar: Some(pi_logstar_proof),
             k_point: Some(k_point_bytes.clone()),
         };
         let mta_r2_payload =
@@ -1342,17 +1347,12 @@ async fn cggmp21_pre_sign(
         let mut delta_beta_shares: Vec<Zeroizing<Vec<u8>>> = Vec::new();
         let mut chi_beta_shares: Vec<Zeroizing<Vec<u8>>> = Vec::new();
 
-        // Get own Pedersen params for proof generation/verification
-        let has_pedersen = share_data.has_real_aux_info();
-        let own_ped = if has_pedersen {
-            Some((
-                share_data.real_pedersen_n_hat.as_ref().unwrap().clone(),
-                share_data.real_pedersen_s.as_ref().unwrap().clone(),
-                share_data.real_pedersen_t.as_ref().unwrap().clone(),
-            ))
-        } else {
-            None
-        };
+        // Pedersen params for proof generation/verification (mandatory since Sprint 28a)
+        let own_ped = (
+            share_data.real_pedersen_n_hat.as_ref().unwrap().clone(),
+            share_data.real_pedersen_s.as_ref().unwrap().clone(),
+            share_data.real_pedersen_t.as_ref().unwrap().clone(),
+        );
 
         for peer_msg in &peer_enc_k {
             if peer_msg.party_index == my_index {
@@ -1367,41 +1367,54 @@ async fn cggmp21_pre_sign(
             }
             let peer_pk = &all_pks[peer_pk_idx];
 
-            // ── Verify Πenc + Πlog* proofs from peer (if present) ────────
-            if let (Some(ref pi_enc), Some(ref ped)) = (&peer_msg.pi_enc, &own_ped) {
-                let pi_enc_public = crate::paillier::zk_proofs::PiEncPublicInput {
-                    pk_n: peer_pk.n.clone(),
-                    pk_n_squared: peer_pk.n_squared.clone(),
-                    ciphertext: peer_msg.encrypted_k.data.clone(),
-                    n_hat: ped.0.clone(),
-                    s: ped.1.clone(),
-                    t: ped.2.clone(),
-                };
-                if !crate::paillier::zk_proofs::verify_pienc(pi_enc, &pi_enc_public) {
-                    return Err(CoreError::Protocol(format!(
-                        "Πenc proof failed for party {} — identifiable abort",
-                        peer_msg.party_index
-                    )));
-                }
+            // ── Verify Πenc + Πlog* proofs from peer (MANDATORY since Sprint 28a) ──
+            let pi_enc = peer_msg.pi_enc.as_ref().ok_or_else(|| {
+                CoreError::Protocol(format!(
+                    "missing Πenc proof from party {} — all parties must provide ZK proofs",
+                    peer_msg.party_index
+                ))
+            })?;
+            let pi_enc_public = crate::paillier::zk_proofs::PiEncPublicInput {
+                pk_n: peer_pk.n.clone(),
+                pk_n_squared: peer_pk.n_squared.clone(),
+                ciphertext: peer_msg.encrypted_k.data.clone(),
+                n_hat: own_ped.0.clone(),
+                s: own_ped.1.clone(),
+                t: own_ped.2.clone(),
+            };
+            if !crate::paillier::zk_proofs::verify_pienc(pi_enc, &pi_enc_public) {
+                return Err(CoreError::Protocol(format!(
+                    "Πenc proof failed for party {} — identifiable abort",
+                    peer_msg.party_index
+                )));
             }
-            if let (Some(ref pi_logstar), Some(ref k_pt), Some(ref ped)) =
-                (&peer_msg.pi_logstar, &peer_msg.k_point, &own_ped)
-            {
-                let pi_logstar_public = crate::paillier::zk_proofs::PiLogStarPublicInput {
-                    pk_n: peer_pk.n.clone(),
-                    pk_n_squared: peer_pk.n_squared.clone(),
-                    ciphertext: peer_msg.encrypted_k.data.clone(),
-                    x_commitment: k_pt.clone(),
-                    n_hat: ped.0.clone(),
-                    s: ped.1.clone(),
-                    t: ped.2.clone(),
-                };
-                if !crate::paillier::zk_proofs::verify_pilogstar(pi_logstar, &pi_logstar_public) {
-                    return Err(CoreError::Protocol(format!(
-                        "Πlog* proof failed for party {} — identifiable abort",
-                        peer_msg.party_index
-                    )));
-                }
+
+            let pi_logstar = peer_msg.pi_logstar.as_ref().ok_or_else(|| {
+                CoreError::Protocol(format!(
+                    "missing Πlog* proof from party {} — all parties must provide ZK proofs",
+                    peer_msg.party_index
+                ))
+            })?;
+            let k_pt = peer_msg.k_point.as_ref().ok_or_else(|| {
+                CoreError::Protocol(format!(
+                    "missing K_i point from party {} — required for Πlog* verification",
+                    peer_msg.party_index
+                ))
+            })?;
+            let pi_logstar_public = crate::paillier::zk_proofs::PiLogStarPublicInput {
+                pk_n: peer_pk.n.clone(),
+                pk_n_squared: peer_pk.n_squared.clone(),
+                ciphertext: peer_msg.encrypted_k.data.clone(),
+                x_commitment: k_pt.clone(),
+                n_hat: own_ped.0.clone(),
+                s: own_ped.1.clone(),
+                t: own_ped.2.clone(),
+            };
+            if !crate::paillier::zk_proofs::verify_pilogstar(pi_logstar, &pi_logstar_public) {
+                return Err(CoreError::Protocol(format!(
+                    "Πlog* proof failed for party {} — identifiable abort",
+                    peer_msg.party_index
+                )));
             }
 
             // MtA for delta: k_j * gamma_i — use witness for Πaff-g proof
@@ -1418,51 +1431,42 @@ async fn cggmp21_pre_sign(
             };
             let mta_w_chi = mta_b_chi.round2_with_witness(&mta_r1_in_chi);
 
-            // ── Generate Πaff-g proofs (CGGMP21 Fig. 15) ─────────────────
+            // ── Generate Πaff-g proofs (CGGMP21 Fig. 15, MANDATORY since Sprint 28a) ──
             // MtA now uses D = C^b * Enc(+beta') with beta' < 2^768.
             // Πaff-g witness: x = gamma_i (or x_i*lambda_i), y = beta' (both small).
-            let (pi_affg_delta, pi_affg_chi) = if let Some(ref ped) = own_ped {
-                let beta_d = BigUint::from_bytes_be(&mta_w_delta.result.beta);
-                let rho_d = BigUint::from_bytes_be(&mta_w_delta.rho_y);
-                let proof_d = crate::paillier::zk_proofs::prove_piaffg(
-                    &BigUint::from_bytes_be(&gamma_i_bytes),
-                    &beta_d,
-                    &rho_d,
-                    &crate::paillier::zk_proofs::PiAffgPublicInput {
-                        pk_n0: peer_pk.n.clone(),
-                        pk_n0_squared: peer_pk.n_squared.clone(),
-                        c: peer_msg.encrypted_k.data.clone(),
-                        d: mta_w_delta.result.ciphertext.data.clone(),
-                        n_hat: ped.0.clone(),
-                        s: ped.1.clone(),
-                        t: ped.2.clone(),
-                    },
-                );
+            let beta_d = BigUint::from_bytes_be(&mta_w_delta.result.beta);
+            let rho_d = BigUint::from_bytes_be(&mta_w_delta.rho_y);
+            let pi_affg_delta = crate::paillier::zk_proofs::prove_piaffg(
+                &BigUint::from_bytes_be(&gamma_i_bytes),
+                &beta_d,
+                &rho_d,
+                &crate::paillier::zk_proofs::PiAffgPublicInput {
+                    pk_n0: peer_pk.n.clone(),
+                    pk_n0_squared: peer_pk.n_squared.clone(),
+                    c: peer_msg.encrypted_k.data.clone(),
+                    d: mta_w_delta.result.ciphertext.data.clone(),
+                    n_hat: own_ped.0.clone(),
+                    s: own_ped.1.clone(),
+                    t: own_ped.2.clone(),
+                },
+            );
 
-                let beta_c = BigUint::from_bytes_be(&mta_w_chi.result.beta);
-                let rho_c = BigUint::from_bytes_be(&mta_w_chi.rho_y);
-                let proof_c = crate::paillier::zk_proofs::prove_piaffg(
-                    &BigUint::from_bytes_be(&x_i_lambda_i_bytes),
-                    &beta_c,
-                    &rho_c,
-                    &crate::paillier::zk_proofs::PiAffgPublicInput {
-                        pk_n0: peer_pk.n.clone(),
-                        pk_n0_squared: peer_pk.n_squared.clone(),
-                        c: peer_msg.encrypted_k.data.clone(),
-                        d: mta_w_chi.result.ciphertext.data.clone(),
-                        n_hat: ped.0.clone(),
-                        s: ped.1.clone(),
-                        t: ped.2.clone(),
-                    },
-                );
-
-                (
-                    Some(serde_json::to_value(&proof_d).unwrap()),
-                    Some(serde_json::to_value(&proof_c).unwrap()),
-                )
-            } else {
-                (None, None)
-            };
+            let beta_c = BigUint::from_bytes_be(&mta_w_chi.result.beta);
+            let rho_c = BigUint::from_bytes_be(&mta_w_chi.rho_y);
+            let pi_affg_chi = crate::paillier::zk_proofs::prove_piaffg(
+                &BigUint::from_bytes_be(&x_i_lambda_i_bytes),
+                &beta_c,
+                &rho_c,
+                &crate::paillier::zk_proofs::PiAffgPublicInput {
+                    pk_n0: peer_pk.n.clone(),
+                    pk_n0_squared: peer_pk.n_squared.clone(),
+                    c: peer_msg.encrypted_k.data.clone(),
+                    d: mta_w_chi.result.ciphertext.data.clone(),
+                    n_hat: own_ped.0.clone(),
+                    s: own_ped.1.clone(),
+                    t: own_ped.2.clone(),
+                },
+            );
 
             // Push beta shares AFTER proof generation (Zeroizing moves on push)
             delta_beta_shares.push(mta_w_delta.result.beta);
@@ -1483,8 +1487,8 @@ async fn cggmp21_pre_sign(
                 "to_party": peer_msg.party_index,
                 "delta_ct": serde_json::to_value(&mta_w_delta.result.ciphertext).unwrap(),
                 "chi_ct": serde_json::to_value(&mta_w_chi.result.ciphertext).unwrap(),
-                "pi_affg_delta": pi_affg_delta,
-                "pi_affg_chi": pi_affg_chi,
+                "pi_affg_delta": serde_json::to_value(&pi_affg_delta).unwrap(),
+                "pi_affg_chi": serde_json::to_value(&pi_affg_chi).unwrap(),
             });
             let payload = serde_json::to_vec(&combined_response)
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
@@ -1549,48 +1553,58 @@ async fn cggmp21_pre_sign(
                 serde_json::from_value(r3["chi_ct"].clone())
                     .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
-            // ── Verify Πaff-g proofs from peer (CGGMP21 Fig. 15) ─────────
-            if let Some(ref ped) = own_ped {
-                if let Some(pi_affg_d_val) = r3.get("pi_affg_delta").filter(|v| !v.is_null()) {
-                    let pi_affg_d: crate::paillier::zk_proofs::PiAffgProof =
-                        serde_json::from_value(pi_affg_d_val.clone())
-                            .map_err(|e| CoreError::Serialization(e.to_string()))?;
-                    let verify_pub = crate::paillier::zk_proofs::PiAffgPublicInput {
-                        pk_n0: my_pk.n.clone(),
-                        pk_n0_squared: my_pk.n_squared.clone(),
-                        c: mta_round1_k.ciphertext.data.clone(),
-                        d: delta_ct.data.clone(),
-                        n_hat: ped.0.clone(),
-                        s: ped.1.clone(),
-                        t: ped.2.clone(),
-                    };
-                    if !crate::paillier::zk_proofs::verify_piaffg(&pi_affg_d, &verify_pub) {
-                        return Err(CoreError::Protocol(format!(
-                            "Πaff-g (delta) proof failed for party {} — identifiable abort",
-                            _from_party
-                        )));
-                    }
-                }
-                if let Some(pi_affg_c_val) = r3.get("pi_affg_chi").filter(|v| !v.is_null()) {
-                    let pi_affg_c: crate::paillier::zk_proofs::PiAffgProof =
-                        serde_json::from_value(pi_affg_c_val.clone())
-                            .map_err(|e| CoreError::Serialization(e.to_string()))?;
-                    let verify_pub = crate::paillier::zk_proofs::PiAffgPublicInput {
-                        pk_n0: my_pk.n.clone(),
-                        pk_n0_squared: my_pk.n_squared.clone(),
-                        c: mta_round1_k.ciphertext.data.clone(),
-                        d: chi_ct.data.clone(),
-                        n_hat: ped.0.clone(),
-                        s: ped.1.clone(),
-                        t: ped.2.clone(),
-                    };
-                    if !crate::paillier::zk_proofs::verify_piaffg(&pi_affg_c, &verify_pub) {
-                        return Err(CoreError::Protocol(format!(
-                            "Πaff-g (chi) proof failed for party {} — identifiable abort",
-                            _from_party
-                        )));
-                    }
-                }
+            // ── Verify Πaff-g proofs from peer (MANDATORY since Sprint 28a) ─────
+            let pi_affg_d_val = r3.get("pi_affg_delta").filter(|v| !v.is_null()).ok_or_else(|| {
+                CoreError::Protocol(format!(
+                    "missing Πaff-g (delta) proof from party {} — all parties must provide ZK proofs",
+                    _from_party
+                ))
+            })?;
+            let pi_affg_d: crate::paillier::zk_proofs::PiAffgProof =
+                serde_json::from_value(pi_affg_d_val.clone())
+                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            let verify_pub_d = crate::paillier::zk_proofs::PiAffgPublicInput {
+                pk_n0: my_pk.n.clone(),
+                pk_n0_squared: my_pk.n_squared.clone(),
+                c: mta_round1_k.ciphertext.data.clone(),
+                d: delta_ct.data.clone(),
+                n_hat: own_ped.0.clone(),
+                s: own_ped.1.clone(),
+                t: own_ped.2.clone(),
+            };
+            if !crate::paillier::zk_proofs::verify_piaffg(&pi_affg_d, &verify_pub_d) {
+                return Err(CoreError::Protocol(format!(
+                    "Πaff-g (delta) proof failed for party {} — identifiable abort",
+                    _from_party
+                )));
+            }
+
+            let pi_affg_c_val =
+                r3.get("pi_affg_chi")
+                    .filter(|v| !v.is_null())
+                    .ok_or_else(|| {
+                        CoreError::Protocol(format!(
+                    "missing Πaff-g (chi) proof from party {} — all parties must provide ZK proofs",
+                    _from_party
+                ))
+                    })?;
+            let pi_affg_c: crate::paillier::zk_proofs::PiAffgProof =
+                serde_json::from_value(pi_affg_c_val.clone())
+                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            let verify_pub_c = crate::paillier::zk_proofs::PiAffgPublicInput {
+                pk_n0: my_pk.n.clone(),
+                pk_n0_squared: my_pk.n_squared.clone(),
+                c: mta_round1_k.ciphertext.data.clone(),
+                d: chi_ct.data.clone(),
+                n_hat: own_ped.0.clone(),
+                s: own_ped.1.clone(),
+                t: own_ped.2.clone(),
+            };
+            if !crate::paillier::zk_proofs::verify_piaffg(&pi_affg_c, &verify_pub_c) {
+                return Err(CoreError::Protocol(format!(
+                    "Πaff-g (chi) proof failed for party {} — identifiable abort",
+                    _from_party
+                )));
             }
 
             // Decrypt as Party A, reduce to Scalar
@@ -1646,68 +1660,14 @@ async fn cggmp21_pre_sign(
 
         (delta_sum, Zeroizing::new(chi_scalar))
     } else {
-        // ── Legacy shares without real Paillier keys (SEC-034) ───────────
-        // In production, reject legacy shares that lack Paillier keys.
-        // The simulated MtA path broadcasts raw k_i and gamma_i in plaintext,
-        // which is insecure. Users must run key refresh to upgrade.
-        #[cfg(not(any(test, feature = "local-transport")))]
-        {
-            return Err(CoreError::Protocol(
-                "CGGMP21 pre-signing requires real Paillier keys \
-                 — run key refresh to upgrade legacy shares"
-                    .into(),
-            ));
-        }
-
-        // In test builds, keep the simulated path for testing convenience.
-        #[cfg(any(test, feature = "local-transport"))]
-        {
-            let combined_r2 = serde_json::json!({
-                "party_index": my_index,
-                "k_i": k_i.to_repr().as_slice(),
-                "gamma_i": gamma_i.to_repr().as_slice(),
-            });
-            let round2_payload = serde_json::to_vec(&combined_r2)
-                .map_err(|e| CoreError::Serialization(e.to_string()))?;
-
-            transport
-                .send(ProtocolMessage {
-                    from: my_party_id,
-                    to: None,
-                    round: 11,
-                    payload: round2_payload,
-                })
-                .await?;
-
-            let mut k_sum = *k_i;
-            let mut gamma_sum_scalar = *gamma_i;
-
-            for _ in 1..n_signers {
-                let msg = transport.recv().await?;
-                let r2: serde_json::Value = serde_json::from_slice(&msg.payload)
-                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
-
-                let k_j_bytes: Vec<u8> = serde_json::from_value(r2["k_i"].clone())
-                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
-                let gamma_j_bytes: Vec<u8> = serde_json::from_value(r2["gamma_i"].clone())
-                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
-
-                let k_j = Scalar::from_repr(*k256::FieldBytes::from_slice(&k_j_bytes))
-                    .into_option()
-                    .ok_or_else(|| CoreError::Crypto("invalid k_j scalar".into()))?;
-                let gamma_j = Scalar::from_repr(*k256::FieldBytes::from_slice(&gamma_j_bytes))
-                    .into_option()
-                    .ok_or_else(|| CoreError::Crypto("invalid gamma_j scalar".into()))?;
-
-                k_sum += k_j;
-                gamma_sum_scalar += gamma_j;
-            }
-
-            let delta = k_sum * gamma_sum_scalar;
-            let chi_i_scalar = Zeroizing::new(k_sum * *x_i * lambda_i);
-            gamma_sum_scalar.zeroize();
-            (delta, chi_i_scalar)
-        }
+        // Sprint 28: Legacy shares without real Paillier keys are unconditionally rejected.
+        // No simulated MtA fallback — even in test builds. All keygen paths now generate
+        // real Paillier keys, so this path should never be reached for well-formed shares.
+        return Err(CoreError::Protocol(
+            "CGGMP21 pre-signing requires real Paillier keys \
+             — run key refresh to upgrade legacy shares"
+                .into(),
+        ));
     };
 
     // ── Compute R = delta^{-1} * Gamma_sum ────────────────────────────
