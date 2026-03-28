@@ -1,9 +1,10 @@
 //! API request types.
 
 use serde::Deserialize;
+use utoipa::ToSchema;
 
 /// Request body for `POST /v1/wallets` — create a new MPC wallet.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateWalletRequest {
     /// Human-readable label for the wallet.
     pub label: String,
@@ -16,14 +17,14 @@ pub struct CreateWalletRequest {
 }
 
 /// Request body for `POST /v1/wallets/:id/sign` — sign a message.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SignRequest {
     /// Hex-encoded message to sign.
     pub message: String,
 }
 
 /// Request body for `POST /v1/wallets/:id/transactions` — build + sign + broadcast.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct TransactionRequest {
     /// Target chain: "ethereum", "bitcoin", "solana", etc.
     pub chain: String,
@@ -38,7 +39,7 @@ pub struct TransactionRequest {
 }
 
 /// Request body for `POST /v1/wallets/:id/simulate`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SimulateRequest {
     /// Target chain.
     pub chain: String,

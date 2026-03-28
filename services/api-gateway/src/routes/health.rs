@@ -12,6 +12,9 @@ use crate::models::response::{ApiResponse, HealthResponse};
 use crate::state::AppState;
 
 /// `GET /v1/health` — basic health check (backward compatible).
+#[utoipa::path(get, path = "/v1/health", tag = "Health",
+    responses((status = 200, description = "Service is healthy", body = ApiResponse<HealthResponse>))
+)]
 pub async fn health() -> Json<ApiResponse<HealthResponse>> {
     Json(ApiResponse::ok(HealthResponse {
         status: "healthy".into(),
@@ -21,6 +24,9 @@ pub async fn health() -> Json<ApiResponse<HealthResponse>> {
 }
 
 /// `GET /v1/health/live` — liveness probe, always returns 200.
+#[utoipa::path(get, path = "/v1/health/live", tag = "Health",
+    responses((status = 200, description = "Service is alive", body = LivenessResponse))
+)]
 pub async fn health_live() -> Json<LivenessResponse> {
     Json(LivenessResponse {
         status: "ok".to_string(),
@@ -28,6 +34,12 @@ pub async fn health_live() -> Json<LivenessResponse> {
 }
 
 /// `GET /v1/health/ready` — readiness probe, checks backend connectivity.
+#[utoipa::path(get, path = "/v1/health/ready", tag = "Health",
+    responses(
+        (status = 200, description = "Service is ready", body = ReadinessResponse),
+        (status = 503, description = "Service degraded", body = ReadinessResponse)
+    )
+)]
 pub async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<ReadinessResponse>) {
     let nats_status = if state.orchestrator.is_connected() {
         ComponentStatus::Connected
@@ -79,6 +91,9 @@ pub async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<Re
 }
 
 /// `GET /v1/metrics` — Prometheus metrics export.
+#[utoipa::path(get, path = "/v1/metrics", tag = "Metrics",
+    responses((status = 200, description = "Prometheus text format metrics", body = String))
+)]
 pub async fn metrics() -> String {
     let encoder = prometheus::TextEncoder::new();
     let metric_families = prometheus::gather();
@@ -90,20 +105,20 @@ pub async fn metrics() -> String {
 // ── Response Types ─────────────────────────────────────────────────────
 
 /// Liveness probe response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct LivenessResponse {
     pub status: String,
 }
 
 /// Readiness probe response with component health.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ReadinessResponse {
     pub status: String,
     pub components: ComponentStatuses,
 }
 
 /// Individual component health statuses.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ComponentStatuses {
     pub nats: ComponentStatus,
     pub redis: ComponentStatus,
@@ -111,7 +126,7 @@ pub struct ComponentStatuses {
 }
 
 /// Status of an individual component.
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ComponentStatus {
     Connected,

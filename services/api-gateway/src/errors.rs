@@ -13,9 +13,10 @@ use axum::{
 };
 use mpc_wallet_core::error::CoreError;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// Machine-readable error code for programmatic client handling.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     // Auth
@@ -49,7 +50,7 @@ pub enum ErrorCode {
 }
 
 /// Structured error body in JSON responses.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorBody {
     pub code: ErrorCode,
     pub message: String,

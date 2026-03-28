@@ -14,7 +14,7 @@ use mpc_wallet_core::protocol::MpcSignature;
 use mpc_wallet_core::rbac::{ApiRole, AuthContext, Permissions};
 use sha2::{Digest, Sha256};
 
-use crate::errors::{ApiError, ErrorCode};
+use crate::errors::{ApiError, ErrorBody, ErrorCode};
 use crate::models::request::{CreateWalletRequest, SignRequest};
 use crate::models::response::{
     AddressEntry, ApiResponse, SignResponse, WalletDetailResponse, WalletListResponse,
@@ -41,6 +41,15 @@ fn require_admin_mfa(ctx: &AuthContext) -> Result<(), ApiError> {
 }
 
 /// `POST /v1/wallets` — create a new MPC wallet (distributed keygen).
+#[utoipa::path(post, path = "/v1/wallets", tag = "Wallets",
+    request_body = CreateWalletRequest,
+    security(("session_token" = [])),
+    responses(
+        (status = 201, description = "Wallet created", body = ApiResponse<WalletResponse>),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Admin+MFA required", body = ErrorBody)
+    )
+)]
 pub async fn create_wallet(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -91,6 +100,13 @@ pub async fn create_wallet(
 }
 
 /// `GET /v1/wallets` — list all wallets.
+#[utoipa::path(get, path = "/v1/wallets", tag = "Wallets",
+    security(("session_token" = [])),
+    responses(
+        (status = 200, description = "Wallet list", body = ApiResponse<WalletListResponse>),
+        (status = 401, description = "Unauthorized", body = ErrorBody)
+    )
+)]
 pub async fn list_wallets(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -124,6 +140,14 @@ pub async fn list_wallets(
 }
 
 /// `GET /v1/wallets/:id` — get wallet details with derived addresses.
+#[utoipa::path(get, path = "/v1/wallets/{id}", tag = "Wallets",
+    params(("id" = String, Path, description = "Wallet ID")),
+    security(("session_token" = [])),
+    responses(
+        (status = 200, description = "Wallet details", body = ApiResponse<WalletDetailResponse>),
+        (status = 404, description = "Wallet not found", body = ErrorBody)
+    )
+)]
 pub async fn get_wallet(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -185,6 +209,15 @@ pub async fn get_wallet(
 }
 
 /// `POST /v1/wallets/:id/sign` — distributed MPC sign.
+#[utoipa::path(post, path = "/v1/wallets/{id}/sign", tag = "Wallets",
+    params(("id" = String, Path, description = "Wallet ID")),
+    request_body = SignRequest,
+    security(("session_token" = [])),
+    responses(
+        (status = 200, description = "Signature result", body = ApiResponse<SignResponse>),
+        (status = 404, description = "Wallet not found", body = ErrorBody)
+    )
+)]
 pub async fn sign_message(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -260,6 +293,14 @@ pub async fn sign_message(
 }
 
 /// `POST /v1/wallets/:id/refresh` — proactive key refresh (distributed).
+#[utoipa::path(post, path = "/v1/wallets/{id}/refresh", tag = "Wallets",
+    params(("id" = String, Path, description = "Wallet ID")),
+    security(("session_token" = [])),
+    responses(
+        (status = 501, description = "Not yet implemented"),
+        (status = 403, description = "Admin+MFA required", body = ErrorBody)
+    )
+)]
 pub async fn refresh_wallet(
     State(_state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -274,6 +315,15 @@ pub async fn refresh_wallet(
 }
 
 /// `POST /v1/wallets/:id/freeze` — freeze wallet (gateway + all nodes).
+#[utoipa::path(post, path = "/v1/wallets/{id}/freeze", tag = "Wallets",
+    params(("id" = String, Path, description = "Wallet ID")),
+    security(("session_token" = [])),
+    responses(
+        (status = 200, description = "Wallet frozen"),
+        (status = 403, description = "Admin+MFA required", body = ErrorBody),
+        (status = 404, description = "Wallet not found", body = ErrorBody)
+    )
+)]
 pub async fn freeze_wallet(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -293,6 +343,15 @@ pub async fn freeze_wallet(
 }
 
 /// `POST /v1/wallets/:id/unfreeze` — unfreeze wallet (gateway + all nodes).
+#[utoipa::path(post, path = "/v1/wallets/{id}/unfreeze", tag = "Wallets",
+    params(("id" = String, Path, description = "Wallet ID")),
+    security(("session_token" = [])),
+    responses(
+        (status = 200, description = "Wallet unfrozen"),
+        (status = 403, description = "Admin+MFA required", body = ErrorBody),
+        (status = 404, description = "Wallet not found", body = ErrorBody)
+    )
+)]
 pub async fn unfreeze_wallet(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,

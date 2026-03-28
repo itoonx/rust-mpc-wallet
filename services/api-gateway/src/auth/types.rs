@@ -139,21 +139,21 @@ pub fn derive_session_keys(
 // ── Algorithm Enums ────────────────────────────────────────────────
 
 /// Supported ECDH algorithms.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum KeyExchangeAlgorithm {
     #[serde(rename = "x25519")]
     X25519,
 }
 
 /// Supported signature algorithms.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum SignatureAlgorithm {
     #[serde(rename = "ed25519")]
     Ed25519,
 }
 
 /// Supported AEAD algorithms.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum AeadAlgorithm {
     #[serde(rename = "chacha20-poly1305")]
     ChaCha20Poly1305,
@@ -162,7 +162,7 @@ pub enum AeadAlgorithm {
 // ── Message Types ──────────────────────────────────────────────────
 
 /// Client's initial handshake message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ClientHello {
     pub protocol_version: String,
     pub supported_kex: Vec<KeyExchangeAlgorithm>,
@@ -177,7 +177,7 @@ pub struct ClientHello {
 }
 
 /// Server's response with ephemeral key and challenge.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ServerHello {
     pub protocol_version: String,
     pub selected_kex: KeyExchangeAlgorithm,
@@ -192,14 +192,14 @@ pub struct ServerHello {
 }
 
 /// Client's authentication proof.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ClientAuth {
     pub client_signature: String,
     pub client_static_pubkey: String,
 }
 
 /// Session establishment confirmation from server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SessionEstablished {
     pub session_id: String,
     pub expires_at: u64,
