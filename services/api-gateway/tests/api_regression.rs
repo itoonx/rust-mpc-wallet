@@ -659,3 +659,119 @@ async fn test_admin_can_list_created_wallet() {
         "wallets should be an array"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// 12. Full Endpoint Coverage (Sprint 28 — fill remaining gaps)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// GET /v1/metrics — Prometheus metrics endpoint returns text format.
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_metrics_returns_prometheus_format() {
+    let gw = gateway_url();
+    let (session_token, _) = full_handshake(&gw).await;
+
+    let resp = http_client()
+        .get(format!("{gw}/v1/metrics"))
+        .header("x-session-token", &session_token)
+        .send()
+        .await
+        .expect("GET /v1/metrics failed");
+
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    assert_eq!(status, 200, "metrics should return 200: {body}");
+    assert!(
+        body.contains("mpc_api_requests_total")
+            || body.contains("# HELP")
+            || body.contains("# TYPE"),
+        "metrics body should contain Prometheus text format: {body}"
+    );
+}
+
+/// GET /v1/wallets/{id} — wallet detail by ID (404 for nonexistent).
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_get_wallet_by_id_nonexistent_returns_404() {
+    let gw = gateway_url();
+    let admin_key = load_admin_key().expect("Admin key not found");
+    let (session_token, _) = full_handshake_with_key(&gw, admin_key).await;
+
+    let (status, json) = get_with_session(
+        &format!("{gw}/v1/wallets/nonexistent-wallet-id"),
+        &session_token,
+    )
+    .await;
+    assert_eq!(status, 404, "nonexistent wallet should return 404: {json}");
+    assert_eq!(json["success"].as_bool(), Some(false));
+}
+
+/// POST /v1/wallets/{id}/unfreeze — requires Admin+MFA (viewer gets 403).
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_unfreeze_wallet_requires_admin_mfa() {
+    let gw = gateway_url();
+    let (session_token, _) = full_handshake(&gw).await;
+
+    let resp = http_client()
+        .post(format!("{gw}/v1/wallets/any-wallet/unfreeze"))
+        .header("x-session-token", &session_token)
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status().as_u16();
+    // Viewer can't unfreeze → 403
+    assert_eq!(status, 403, "unfreeze without Admin+MFA should be 403");
+}
+
+/// GET /v1/chains/{chain}/address/{id} — requires auth (401 without).
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_derive_address_requires_auth() {
+    let gw = gateway_url();
+
+    let (status, json) = get(&format!("{gw}/v1/chains/ethereum/address/any-wallet")).await;
+    assert_eq!(
+        status, 401,
+        "derive address without auth should be 401: {json}"
+    );
+}
+
+/// POST /v1/wallets/{id}/transactions — requires auth (401 without).
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_create_transaction_requires_auth() {
+    let gw = gateway_url();
+    let body = serde_json::json!({
+        "chain": "ethereum",
+        "to": "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18",
+        "value": "1000000000000000000"
+    });
+
+    let (status, json) =
+        post_json(&format!("{gw}/v1/wallets/any-wallet/transactions"), &body).await;
+    assert_eq!(
+        status, 401,
+        "create transaction without auth should be 401: {json}"
+    );
+}
+
+/// POST /v1/wallets/{id}/refresh — not yet implemented (viewer → 403).
+#[tokio::test]
+#[ignore = "requires running gateway: ./scripts/local-infra.sh up"]
+async fn test_refresh_wallet_requires_admin() {
+    let gw = gateway_url();
+    let (session_token, _) = full_handshake(&gw).await;
+
+    let resp = http_client()
+        .post(format!("{gw}/v1/wallets/any-wallet/refresh"))
+        .header("x-session-token", &session_token)
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status().as_u16();
+    // Viewer can't refresh → 403 (RBAC rejects before reaching 501)
+    assert_eq!(status, 403, "refresh without Admin+MFA should be 403");
+}
