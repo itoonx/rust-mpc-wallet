@@ -1,9 +1,10 @@
 //! API response types.
 
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// Generic API response wrapper.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ApiResponse<T: Serialize> {
     pub success: bool,
     pub data: Option<T>,
@@ -30,7 +31,7 @@ impl<T: Serialize> ApiResponse<T> {
 }
 
 /// Response for wallet creation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct WalletResponse {
     pub id: String,
     pub label: String,
@@ -41,13 +42,13 @@ pub struct WalletResponse {
 }
 
 /// Response for wallet list.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct WalletListResponse {
     pub wallets: Vec<WalletResponse>,
 }
 
 /// Response for wallet details with addresses.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct WalletDetailResponse {
     pub id: String,
     pub label: String,
@@ -59,21 +60,21 @@ pub struct WalletDetailResponse {
 }
 
 /// A chain-specific address derived from the wallet's group public key.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AddressEntry {
     pub chain: String,
     pub address: String,
 }
 
 /// Response for signing.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SignResponse {
     pub signature: serde_json::Value,
     pub scheme: String,
 }
 
 /// Response for transaction broadcast.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TransactionResponse {
     pub tx_hash: String,
     pub chain: String,
@@ -83,7 +84,7 @@ pub struct TransactionResponse {
 }
 
 /// Response for simulation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SimulationResponse {
     pub success: bool,
     pub gas_used: u64,
@@ -92,7 +93,7 @@ pub struct SimulationResponse {
 }
 
 /// Single chain info in the chains list.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ChainInfo {
     pub name: String,
     pub display_name: String,
@@ -100,14 +101,14 @@ pub struct ChainInfo {
 }
 
 /// Response for chains list.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ChainsListResponse {
     pub chains: Vec<ChainInfo>,
     pub total: usize,
 }
 
 /// Health check response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,

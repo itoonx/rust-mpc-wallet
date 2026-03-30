@@ -50,6 +50,11 @@ pub struct MpcOrchestrator {
     /// Ed25519 signing key for control plane message authentication (SEC-026).
     /// All control messages are signed before publishing on NATS.
     signing_key: Option<SigningKey>,
+    /// Registered MPC node verifying keys (party_id → hex verifying key).
+    /// Used as peer_keys in keygen/sign requests so nodes can verify each other's
+    /// SignedEnvelope messages. Without this, orchestrator generates random keys
+    /// that don't match nodes' actual signing keys → MPC protocol fails.
+    node_verifying_keys: Vec<rpc::PeerKeyEntry>,
 }
 
 impl Default for MpcOrchestrator {
@@ -67,6 +72,7 @@ impl MpcOrchestrator {
             wallets: Arc::new(RwLock::new(HashMap::new())),
             ceremony_timeout: Duration::from_secs(60),
             signing_key: None,
+            node_verifying_keys: Vec::new(),
         }
     }
 
@@ -88,6 +94,7 @@ impl MpcOrchestrator {
             wallets: Arc::new(RwLock::new(HashMap::new())),
             ceremony_timeout: Duration::from_secs(60),
             signing_key: None,
+            node_verifying_keys: Vec::new(),
         })
     }
 
@@ -115,7 +122,14 @@ impl MpcOrchestrator {
             wallets: Arc::new(RwLock::new(HashMap::new())),
             ceremony_timeout: Duration::from_secs(60),
             signing_key: Some(signing_key),
+            node_verifying_keys: Vec::new(),
         })
+    }
+
+    /// Register MPC node verifying keys so peer_keys in keygen/sign requests
+    /// match the nodes' actual signing keys (required for SignedEnvelope verification).
+    pub fn set_node_verifying_keys(&mut self, keys: Vec<rpc::PeerKeyEntry>) {
+        self.node_verifying_keys = keys;
     }
 
     /// Get the NATS client, or return an error if not connected.
@@ -154,19 +168,28 @@ impl MpcOrchestrator {
     ) -> Result<WalletMetadata, mpc_wallet_core::error::CoreError> {
         let session_id = uuid::Uuid::new_v4().to_string();
 
-        // Generate Ed25519 keys for each party's envelope signing.
-        // In production, nodes have persistent keys — this is for session-scoped keys.
-        let peer_keys: Vec<rpc::PeerKeyEntry> = (1..=total_parties)
-            .map(|i| {
-                let mut bytes = [0u8; 32];
-                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
-                let key = ed25519_dalek::SigningKey::from_bytes(&bytes);
-                rpc::PeerKeyEntry {
-                    party_id: i,
-                    verifying_key_hex: hex::encode(key.verifying_key().as_bytes()),
-                }
-            })
-            .collect();
+        // Use registered node verifying keys if available (from NODE_VERIFYING_KEYS_FILE).
+        // These must match the nodes' actual NODE_SIGNING_KEY so SignedEnvelope verification works.
+        // Falls back to random keys (will fail MPC protocol if nodes verify peer signatures).
+        let peer_keys: Vec<rpc::PeerKeyEntry> = if !self.node_verifying_keys.is_empty() {
+            self.node_verifying_keys
+                .iter()
+                .filter(|k| k.party_id <= total_parties)
+                .cloned()
+                .collect()
+        } else {
+            (1..=total_parties)
+                .map(|i| {
+                    let mut bytes = [0u8; 32];
+                    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+                    let key = ed25519_dalek::SigningKey::from_bytes(&bytes);
+                    rpc::PeerKeyEntry {
+                        party_id: i,
+                        verifying_key_hex: hex::encode(key.verifying_key().as_bytes()),
+                    }
+                })
+                .collect()
+        };
 
         // Include the NATS URL so nodes know where to connect for protocol transport
         let nats_url = self
@@ -334,19 +357,27 @@ impl MpcOrchestrator {
         // Select first t parties as signers (coordinator = Party 1)
         let signer_ids: Vec<u16> = (1..=threshold).collect();
 
-        // Generate session peer keys for signing
-        let peer_keys: Vec<rpc::PeerKeyEntry> = signer_ids
-            .iter()
-            .map(|&i| {
-                let mut bytes = [0u8; 32];
-                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
-                let key = ed25519_dalek::SigningKey::from_bytes(&bytes);
-                rpc::PeerKeyEntry {
-                    party_id: i,
-                    verifying_key_hex: hex::encode(key.verifying_key().as_bytes()),
-                }
-            })
-            .collect();
+        // Use registered node verifying keys for signing peers (must match NODE_SIGNING_KEY).
+        let peer_keys: Vec<rpc::PeerKeyEntry> = if !self.node_verifying_keys.is_empty() {
+            self.node_verifying_keys
+                .iter()
+                .filter(|k| signer_ids.contains(&k.party_id))
+                .cloned()
+                .collect()
+        } else {
+            signer_ids
+                .iter()
+                .map(|&i| {
+                    let mut bytes = [0u8; 32];
+                    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+                    let key = ed25519_dalek::SigningKey::from_bytes(&bytes);
+                    rpc::PeerKeyEntry {
+                        party_id: i,
+                        verifying_key_hex: hex::encode(key.verifying_key().as_bytes()),
+                    }
+                })
+                .collect()
+        };
 
         // Include the NATS URL so nodes know where to connect for protocol transport
         let nats_url = self

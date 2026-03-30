@@ -8,7 +8,7 @@ use axum::{
 use mpc_wallet_chains::provider::Chain;
 use mpc_wallet_chains::registry::ChainRegistry;
 
-use crate::errors::{ApiError, ErrorCode};
+use crate::errors::{ApiError, ErrorBody, ErrorCode};
 use crate::models::response::{ApiResponse, ChainInfo, ChainsListResponse};
 use crate::state::AppState;
 
@@ -122,6 +122,9 @@ fn chain_display_name(chain: Chain) -> &'static str {
 }
 
 /// `GET /v1/chains` — list all supported chains.
+#[utoipa::path(get, path = "/v1/chains", tag = "Chains",
+    responses((status = 200, description = "List of supported chains", body = ApiResponse<ChainsListResponse>))
+)]
 pub async fn list_chains() -> Json<ApiResponse<ChainsListResponse>> {
     let chains: Vec<ChainInfo> = ChainRegistry::supported_chains()
         .into_iter()
@@ -140,6 +143,15 @@ pub async fn list_chains() -> Json<ApiResponse<ChainsListResponse>> {
 /// NOTE: In a production system this would load the wallet's group public key
 /// from the key store and derive the chain-specific address. This stub returns
 /// a placeholder demonstrating the routing.
+#[utoipa::path(get, path = "/v1/chains/{chain}/address/{id}", tag = "Chains",
+    params(("chain" = String, Path, description = "Chain name"), ("id" = String, Path, description = "Wallet ID")),
+    security(("session_token" = [])),
+    responses(
+        (status = 200, description = "Derived address"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 404, description = "Wallet not found", body = ErrorBody)
+    )
+)]
 pub async fn derive_address(
     State(state): State<AppState>,
     Path((chain_name, wallet_id)): Path<(String, String)>,

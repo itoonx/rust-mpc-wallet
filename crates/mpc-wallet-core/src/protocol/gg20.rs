@@ -305,18 +305,10 @@ impl MpcProtocol for Gg20Protocol {
 
         #[cfg(not(feature = "gg20-simulation"))]
         {
-            // Auto-detect: use MtA-based distributed nonce if real aux info available,
-            // otherwise fall back to coordinator-based signing.
-            let share_data_copy = key_share.share_data.clone();
-            let has_mta = serde_json::from_slice::<Gg20ShareData>(&share_data_copy)
-                .map(|sd| sd.has_real_aux_info())
-                .unwrap_or(false);
-
-            if has_mta {
-                distributed_sign_mta(key_share, signers, message, transport).await
-            } else {
-                distributed_sign(key_share, signers, message, transport).await
-            }
+            // Sprint 28b: Always use MtA-based signing with mandatory ZK proofs.
+            // Legacy shares without real Paillier + Pedersen keys are rejected inside
+            // distributed_sign_mta() (line 812 check).
+            distributed_sign_mta(key_share, signers, message, transport).await
         }
     }
 
@@ -565,7 +557,10 @@ async fn distributed_keygen(
 /// eliminate this trust assumption. The Paillier MtA infrastructure is in place
 /// (see `crate::paillier::mta`), but wiring it into the signing protocol is
 /// deferred to a future sprint.
+// Sprint 28b: This function is superseded by distributed_sign_mta() which uses
+// mandatory ZK proofs. Retained as reference implementation for the transition period.
 #[cfg(not(feature = "gg20-simulation"))]
+#[allow(dead_code)]
 async fn distributed_sign(
     key_share: &KeyShare,
     signers: &[PartyId],
@@ -966,54 +961,65 @@ async fn distributed_sign_mta(
         let peer_idx = v["party_index"].as_u64().unwrap_or(0) as u16;
         index_to_transport.insert(peer_idx, msg.from);
 
-        // Verify Πenc + Πlog* from peer
+        // Verify Πenc + Πlog* from peer (MANDATORY since Sprint 28b)
         let peer_pk_idx = (peer_idx - 1) as usize;
         let peer_pk = &all_pks[peer_pk_idx];
-        if let Ok(pi_enc_peer) =
-            serde_json::from_value::<crate::paillier::zk_proofs::PiEncProof>(v["pi_enc"].clone())
-        {
-            let enc_ct: crate::paillier::PaillierCiphertext =
-                serde_json::from_value(v["encrypted_k"].clone())
-                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
-            let pub_input = PiEncPublicInput {
-                pk_n: peer_pk.n.clone(),
-                pk_n_squared: peer_pk.n_squared.clone(),
-                ciphertext: enc_ct.data.clone(),
-                n_hat: ped_n_hat.clone(),
-                s: ped_s.clone(),
-                t: ped_t.clone(),
-            };
-            if !crate::paillier::zk_proofs::verify_pienc(&pi_enc_peer, &pub_input) {
-                return Err(CoreError::Protocol(format!(
-                    "GG20 MtA: Πenc failed for party {} — identifiable abort",
-                    peer_idx
-                )));
-            }
+
+        let pi_enc_peer: crate::paillier::zk_proofs::PiEncProof =
+            serde_json::from_value(v["pi_enc"].clone()).map_err(|e| {
+                CoreError::Protocol(format!(
+                    "missing or invalid Πenc proof from party {} — all parties must provide ZK proofs: {}",
+                    peer_idx, e
+                ))
+            })?;
+        let enc_ct: crate::paillier::PaillierCiphertext =
+            serde_json::from_value(v["encrypted_k"].clone())
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        let pub_input = PiEncPublicInput {
+            pk_n: peer_pk.n.clone(),
+            pk_n_squared: peer_pk.n_squared.clone(),
+            ciphertext: enc_ct.data.clone(),
+            n_hat: ped_n_hat.clone(),
+            s: ped_s.clone(),
+            t: ped_t.clone(),
+        };
+        if !crate::paillier::zk_proofs::verify_pienc(&pi_enc_peer, &pub_input) {
+            return Err(CoreError::Protocol(format!(
+                "GG20 MtA: Πenc failed for party {} — identifiable abort",
+                peer_idx
+            )));
         }
-        if let (Ok(pi_ls), Ok(kp_bytes)) = (
-            serde_json::from_value::<crate::paillier::zk_proofs::PiLogStarProof>(
-                v["pi_logstar"].clone(),
-            ),
-            serde_json::from_value::<Vec<u8>>(v["k_point"].clone()),
-        ) {
-            let enc_ct: crate::paillier::PaillierCiphertext =
-                serde_json::from_value(v["encrypted_k"].clone())
-                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
-            let pub_input = PiLogStarPublicInput {
-                pk_n: peer_pk.n.clone(),
-                pk_n_squared: peer_pk.n_squared.clone(),
-                ciphertext: enc_ct.data.clone(),
-                x_commitment: kp_bytes,
-                n_hat: ped_n_hat.clone(),
-                s: ped_s.clone(),
-                t: ped_t.clone(),
-            };
-            if !crate::paillier::zk_proofs::verify_pilogstar(&pi_ls, &pub_input) {
-                return Err(CoreError::Protocol(format!(
-                    "GG20 MtA: Πlog* failed for party {} — identifiable abort",
-                    peer_idx
-                )));
-            }
+
+        let pi_ls: crate::paillier::zk_proofs::PiLogStarProof =
+            serde_json::from_value(v["pi_logstar"].clone()).map_err(|e| {
+                CoreError::Protocol(format!(
+                    "missing or invalid Πlog* proof from party {} — all parties must provide ZK proofs: {}",
+                    peer_idx, e
+                ))
+            })?;
+        let kp_bytes: Vec<u8> = serde_json::from_value(v["k_point"].clone()).map_err(|e| {
+            CoreError::Protocol(format!(
+                "missing K_i point from party {} — required for Πlog* verification: {}",
+                peer_idx, e
+            ))
+        })?;
+        let enc_ct2: crate::paillier::PaillierCiphertext =
+            serde_json::from_value(v["encrypted_k"].clone())
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        let pub_input2 = PiLogStarPublicInput {
+            pk_n: peer_pk.n.clone(),
+            pk_n_squared: peer_pk.n_squared.clone(),
+            ciphertext: enc_ct2.data.clone(),
+            x_commitment: kp_bytes,
+            n_hat: ped_n_hat.clone(),
+            s: ped_s.clone(),
+            t: ped_t.clone(),
+        };
+        if !crate::paillier::zk_proofs::verify_pilogstar(&pi_ls, &pub_input2) {
+            return Err(CoreError::Protocol(format!(
+                "GG20 MtA: Πlog* failed for party {} — identifiable abort",
+                peer_idx
+            )));
         }
 
         peer_enc_k.push(v);
@@ -1155,44 +1161,57 @@ async fn distributed_sign_mta(
             serde_json::from_value(r3["chi_ct"].clone())
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
-        // Verify Πaff-g proofs
-        if let Some(pi_d_val) = r3.get("pi_affg_delta").filter(|v| !v.is_null()) {
-            let pi_d: crate::paillier::zk_proofs::PiAffgProof =
-                serde_json::from_value(pi_d_val.clone())
-                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
-            let verify_pub = PiAffgPublicInput {
-                pk_n0: my_pk.n.clone(),
-                pk_n0_squared: my_pk.n_squared.clone(),
-                c: mta_round1_k.ciphertext.data.clone(),
-                d: delta_ct.data.clone(),
-                n_hat: ped_n_hat.clone(),
-                s: ped_s.clone(),
-                t: ped_t.clone(),
-            };
-            if !crate::paillier::zk_proofs::verify_piaffg(&pi_d, &verify_pub) {
-                return Err(CoreError::Protocol(
-                    "GG20 MtA: Πaff-g (delta) verification failed — identifiable abort".into(),
-                ));
-            }
+        // Verify Πaff-g proofs (MANDATORY since Sprint 28b)
+        let pi_d_val = r3
+            .get("pi_affg_delta")
+            .filter(|v| !v.is_null())
+            .ok_or_else(|| {
+                CoreError::Protocol(
+                    "missing Πaff-g (delta) proof — all parties must provide ZK proofs".into(),
+                )
+            })?;
+        let pi_d: crate::paillier::zk_proofs::PiAffgProof =
+            serde_json::from_value(pi_d_val.clone())
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        let verify_pub_d = PiAffgPublicInput {
+            pk_n0: my_pk.n.clone(),
+            pk_n0_squared: my_pk.n_squared.clone(),
+            c: mta_round1_k.ciphertext.data.clone(),
+            d: delta_ct.data.clone(),
+            n_hat: ped_n_hat.clone(),
+            s: ped_s.clone(),
+            t: ped_t.clone(),
+        };
+        if !crate::paillier::zk_proofs::verify_piaffg(&pi_d, &verify_pub_d) {
+            return Err(CoreError::Protocol(
+                "GG20 MtA: Πaff-g (delta) verification failed — identifiable abort".into(),
+            ));
         }
-        if let Some(pi_c_val) = r3.get("pi_affg_chi").filter(|v| !v.is_null()) {
-            let pi_c: crate::paillier::zk_proofs::PiAffgProof =
-                serde_json::from_value(pi_c_val.clone())
-                    .map_err(|e| CoreError::Serialization(e.to_string()))?;
-            let verify_pub = PiAffgPublicInput {
-                pk_n0: my_pk.n.clone(),
-                pk_n0_squared: my_pk.n_squared.clone(),
-                c: mta_round1_k.ciphertext.data.clone(),
-                d: chi_ct.data.clone(),
-                n_hat: ped_n_hat.clone(),
-                s: ped_s.clone(),
-                t: ped_t.clone(),
-            };
-            if !crate::paillier::zk_proofs::verify_piaffg(&pi_c, &verify_pub) {
-                return Err(CoreError::Protocol(
-                    "GG20 MtA: Πaff-g (chi) verification failed — identifiable abort".into(),
-                ));
-            }
+
+        let pi_c_val = r3
+            .get("pi_affg_chi")
+            .filter(|v| !v.is_null())
+            .ok_or_else(|| {
+                CoreError::Protocol(
+                    "missing Πaff-g (chi) proof — all parties must provide ZK proofs".into(),
+                )
+            })?;
+        let pi_c: crate::paillier::zk_proofs::PiAffgProof =
+            serde_json::from_value(pi_c_val.clone())
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        let verify_pub_c = PiAffgPublicInput {
+            pk_n0: my_pk.n.clone(),
+            pk_n0_squared: my_pk.n_squared.clone(),
+            c: mta_round1_k.ciphertext.data.clone(),
+            d: chi_ct.data.clone(),
+            n_hat: ped_n_hat.clone(),
+            s: ped_s.clone(),
+            t: ped_t.clone(),
+        };
+        if !crate::paillier::zk_proofs::verify_piaffg(&pi_c, &verify_pub_c) {
+            return Err(CoreError::Protocol(
+                "GG20 MtA: Πaff-g (chi) verification failed — identifiable abort".into(),
+            ));
         }
 
         let alpha_d = mta_party_a_k.round2_finish(&delta_ct);
@@ -1609,18 +1628,99 @@ async fn distributed_reshare(
             new_share_scalar += eval;
         }
 
-        // Build new Gg20ShareData with new share value.
-        // Paillier keys are not carried over during reshare (new group).
+        // ── Per-round sync barrier: ensure all new parties have received evaluations
+        transport.wait_ready().await?;
+
+        // ── Aux info exchange: generate Paillier keys + Pedersen params + ZK proofs ──
+        // Same pattern as distributed_keygen Phase 2 (Sprint 28).
+        // Without this, reshared shares cannot participate in MtA-based signing.
+        let (real_pk, real_sk) = crate::paillier::keygen::keypair_for_protocol(GG20_PAILLIER_BITS)?;
+
+        let p_big = BigUint::from_bytes_be(&real_sk.p);
+        let q_big = BigUint::from_bytes_be(&real_sk.q);
+        let n_big = real_pk.n_biguint();
+
+        let pimod_proof = prove_pimod(&n_big, &p_big, &q_big);
+        let pifac_proof = prove_pifac(&n_big, &p_big, &q_big);
+
+        let (ped_n_hat, ped_s, ped_t) =
+            crate::paillier::zk_proofs::pedersen_params_for_protocol(GG20_PAILLIER_BITS);
+
+        let aux_msg = Gg20AuxInfoBroadcast {
+            party_index: my_party.0,
+            paillier_pk: real_pk.clone(),
+            pimod_proof,
+            pifac_proof,
+            pedersen_n_hat: Some(ped_n_hat.clone()),
+            pedersen_s: Some(ped_s.clone()),
+            pedersen_t: Some(ped_t.clone()),
+        };
+        let aux_payload =
+            serde_json::to_vec(&aux_msg).map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+        transport
+            .send(ProtocolMessage {
+                from: my_party,
+                to: None,
+                round: 201,
+                payload: aux_payload,
+            })
+            .await?;
+
+        let n_new = new_config.total_parties;
+        let mut all_aux: Vec<Gg20AuxInfoBroadcast> = vec![aux_msg];
+        for _ in 1..n_new {
+            let msg = transport.recv().await?;
+            let aux: Gg20AuxInfoBroadcast = serde_json::from_slice(&msg.payload)
+                .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            all_aux.push(aux);
+        }
+        all_aux.sort_by_key(|a| a.party_index);
+
+        // Verify Πmod + Πfac proofs from each peer
+        for aux in &all_aux {
+            if aux.party_index == my_party.0 {
+                continue;
+            }
+            let peer_n = aux.paillier_pk.n_biguint();
+            if !verify_pimod(&peer_n, &aux.pimod_proof) {
+                return Err(CoreError::Protocol(format!(
+                    "GG20 reshare: Πmod proof failed for party {}",
+                    aux.party_index
+                )));
+            }
+            if !verify_pifac(&peer_n, &aux.pifac_proof) {
+                return Err(CoreError::Protocol(format!(
+                    "GG20 reshare: Πfac proof failed for party {}",
+                    aux.party_index
+                )));
+            }
+        }
+
+        let all_paillier_pks: Vec<PaillierPublicKey> =
+            all_aux.iter().map(|a| a.paillier_pk.clone()).collect();
+        let all_pedersen: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = all_aux
+            .iter()
+            .map(|a| {
+                (
+                    a.pedersen_n_hat.clone().unwrap_or_default(),
+                    a.pedersen_s.clone().unwrap_or_default(),
+                    a.pedersen_t.clone().unwrap_or_default(),
+                )
+            })
+            .collect();
+
+        // Build final share data with Paillier keys + Pedersen params
         let new_share_data = Gg20ShareData {
             x: my_party.0,
             y: new_share_scalar.to_repr().to_vec(),
-            real_paillier_sk: None,
-            real_paillier_pk: None,
-            all_paillier_pks: None,
-            real_pedersen_n_hat: None,
-            real_pedersen_s: None,
-            real_pedersen_t: None,
-            all_pedersen_params: None,
+            real_paillier_sk: Some(real_sk),
+            real_paillier_pk: Some(real_pk),
+            all_paillier_pks: Some(all_paillier_pks),
+            real_pedersen_n_hat: Some(ped_n_hat),
+            real_pedersen_s: Some(ped_s),
+            real_pedersen_t: Some(ped_t),
+            all_pedersen_params: Some(all_pedersen),
         };
         let new_share_bytes = serde_json::to_vec(&new_share_data)
             .map_err(|e| CoreError::Serialization(format!("serialize reshared share: {e}")))?;

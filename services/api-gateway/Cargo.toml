@@ -56,6 +56,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 prometheus = "0.13"
 
+# OpenAPI documentation (source of truth = code)
+utoipa = { version = "5", features = ["axum_extras"] }
+
 # Secrets management
 reqwest = { workspace = true }
 

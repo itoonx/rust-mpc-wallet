@@ -9,7 +9,7 @@ use axum::{
 use mpc_wallet_chains::provider::{Chain, TransactionParams};
 use mpc_wallet_core::rbac::{ApiRole, AuthContext, Permissions};
 
-use crate::errors::{ApiError, ErrorCode};
+use crate::errors::{ApiError, ErrorBody, ErrorCode};
 use crate::models::request::{SimulateRequest, TransactionRequest};
 use crate::models::response::{ApiResponse, SimulationResponse, TransactionResponse};
 use crate::state::AppState;
@@ -35,6 +35,15 @@ fn explorer_url(chain: Chain, tx_hash: &str) -> Option<String> {
 
 /// `POST /v1/wallets/:id/transactions` — build + sign + broadcast.
 /// Requires: Initiator or Admin + risk tier check
+#[utoipa::path(post, path = "/v1/wallets/{id}/transactions", tag = "Transactions",
+    params(("id" = String, Path, description = "Wallet ID")),
+    request_body = TransactionRequest,
+    security(("session_token" = [])),
+    responses(
+        (status = 200, description = "Transaction broadcast", body = ApiResponse<TransactionResponse>),
+        (status = 404, description = "Wallet not found", body = ErrorBody)
+    )
+)]
 pub async fn create_transaction(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -83,6 +92,15 @@ pub async fn create_transaction(
 
 /// `POST /v1/wallets/:id/simulate` — simulate transaction risk.
 /// Requires: Viewer+
+#[utoipa::path(post, path = "/v1/wallets/{id}/simulate", tag = "Transactions",
+    params(("id" = String, Path, description = "Wallet ID")),
+    request_body = SimulateRequest,
+    security(("session_token" = [])),
+    responses(
+        (status = 200, description = "Simulation result", body = ApiResponse<SimulationResponse>),
+        (status = 401, description = "Unauthorized", body = ErrorBody)
+    )
+)]
 pub async fn simulate_transaction(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,

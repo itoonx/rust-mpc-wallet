@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 
 use crate::auth::handshake::ServerHandshake;
 use crate::auth::types::*;
-use crate::errors::{ApiError, ErrorCode};
+use crate::errors::{ApiError, ErrorBody, ErrorCode};
 use crate::models::response::ApiResponse;
 use crate::state::AppState;
 
@@ -63,6 +63,13 @@ pub struct AuthRouteState {
 }
 
 /// `POST /v1/auth/hello`
+#[utoipa::path(post, path = "/v1/auth/hello", tag = "Auth",
+    request_body = ClientHello,
+    responses(
+        (status = 200, description = "ServerHello with challenge", body = ApiResponse<ServerHello>),
+        (status = 429, description = "Rate limited", body = ErrorBody)
+    )
+)]
 pub async fn auth_hello(
     State(state): State<AuthRouteState>,
     Json(client_hello): Json<ClientHello>,
@@ -129,7 +136,7 @@ pub async fn auth_hello(
 }
 
 /// Request for `/v1/auth/verify` — uses `#[serde(flatten)]` to embed ClientAuth.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct AuthVerifyRequest {
     pub server_challenge: String,
     #[serde(flatten)]
@@ -137,6 +144,13 @@ pub struct AuthVerifyRequest {
 }
 
 /// `POST /v1/auth/verify`
+#[utoipa::path(post, path = "/v1/auth/verify", tag = "Auth",
+    request_body = AuthVerifyRequest,
+    responses(
+        (status = 200, description = "Session established", body = ApiResponse<SessionEstablished>),
+        (status = 401, description = "Authentication failed", body = ErrorBody)
+    )
+)]
 pub async fn auth_verify(
     State(state): State<AuthRouteState>,
     Json(req): Json<AuthVerifyRequest>,
@@ -151,23 +165,34 @@ pub async fn auth_verify(
             auth_failed()
         })?;
 
-    // Verify client is in trusted registry (only if registry has entries).
-    if !state.app.client_registry.keys.is_empty()
-        && state
+    // Verify client is in trusted registry (only if registry has entries AND network is mainnet).
+    // On testnet, unknown keys are allowed but get Viewer role (open enrollment).
+    // On mainnet, unknown keys are rejected for security.
+    if !state.app.client_registry.keys.is_empty() {
+        let is_trusted = state
             .app
             .client_registry
             .verify_trusted(
                 &pending.client_hello.client_key_id,
                 &req.client_auth.client_static_pubkey,
             )
-            .is_none()
-    {
-        state.app.metrics.handshake_failures.inc();
-        tracing::warn!(
-            client_key_id = %pending.client_hello.client_key_id,
-            "handshake verify: untrusted client key"
-        );
-        return Err(auth_failed());
+            .is_some();
+        if !is_trusted {
+            let network = std::env::var("NETWORK").unwrap_or_default();
+            if network == "mainnet" {
+                state.app.metrics.handshake_failures.inc();
+                tracing::warn!(
+                    client_key_id = %pending.client_hello.client_key_id,
+                    "handshake verify: untrusted client key rejected (mainnet)"
+                );
+                return Err(auth_failed());
+            }
+            // Testnet: allow unknown keys with Viewer role (logged for visibility)
+            tracing::debug!(
+                client_key_id = %pending.client_hello.client_key_id,
+                "handshake verify: unknown key allowed on testnet (Viewer role)"
+            );
+        }
     }
 
     let session = pending
@@ -207,13 +232,13 @@ pub async fn auth_verify(
 }
 
 /// Request for session refresh.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct RefreshSessionRequest {
     pub session_token: String,
 }
 
 /// Response for session refresh.
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct RefreshSessionResponse {
     pub session_id: String,
     pub expires_at: u64,
@@ -221,6 +246,13 @@ pub struct RefreshSessionResponse {
 }
 
 /// `POST /v1/auth/refresh-session`
+#[utoipa::path(post, path = "/v1/auth/refresh-session", tag = "Auth",
+    request_body = RefreshSessionRequest,
+    responses(
+        (status = 200, description = "Session refreshed", body = ApiResponse<RefreshSessionResponse>),
+        (status = 401, description = "Invalid session", body = ErrorBody)
+    )
+)]
 pub async fn refresh_session(
     State(state): State<AuthRouteState>,
     Json(req): Json<RefreshSessionRequest>,
@@ -264,13 +296,16 @@ pub async fn refresh_session(
 }
 
 /// `GET /v1/auth/revoked-keys`
+#[utoipa::path(get, path = "/v1/auth/revoked-keys", tag = "Auth",
+    responses((status = 200, description = "List of revoked key IDs", body = ApiResponse<Vec<String>>))
+)]
 pub async fn revoked_keys(State(state): State<AuthRouteState>) -> Json<ApiResponse<Vec<String>>> {
     let keys = state.app.revoked_keys.list().await;
     Json(ApiResponse::ok(keys))
 }
 
 /// Request for dynamic key revocation.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct RevokeKeyRequest {
     pub key_id: String,
 }
@@ -279,6 +314,15 @@ pub struct RevokeKeyRequest {
 ///
 /// This endpoint is behind auth + HMAC middleware (protected route).
 /// Only admin role can revoke keys.
+#[utoipa::path(post, path = "/v1/auth/revoke-key", tag = "Auth",
+    request_body = RevokeKeyRequest,
+    security(("session_token" = [])),
+    responses(
+        (status = 200, description = "Key revoked"),
+        (status = 401, description = "Unauthorized", body = ErrorBody),
+        (status = 403, description = "Admin role required", body = ErrorBody)
+    )
+)]
 pub async fn revoke_key(
     State(state): State<crate::state::AppState>,
     axum::Extension(ctx): axum::Extension<mpc_wallet_core::rbac::AuthContext>,
