@@ -3586,6 +3586,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "starknet-crypto",
+ "starknet-curve",
+ "starknet-types-core",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
