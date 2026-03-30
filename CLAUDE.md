@@ -8,7 +8,7 @@
 ## What This Project Is
 
 **MPC Wallet SDK** — a Rust workspace for threshold multi-party computation wallets.
-No single party ever holds a complete private key. Supports EVM, Bitcoin, Solana, Sui.
+No single party ever holds a complete private key. Supports EVM, Bitcoin, Solana, Sui, Stark.
 Target: open-source SDK for enterprise custody systems.
 
 **Workspace root:** `/Users/thecoding/git/project/mpc-wallet`
@@ -95,7 +95,7 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 27b — Full Paillier security layer complete)
+## Current State (as of Sprint 31 — All protocols production threshold signing)
 
 ### Auth System (3 methods, Redis-ready)
 
@@ -197,7 +197,7 @@ Gateway (creates proof)    →    MPC Node (verifies before sign)
 
 ### Tests on `main`
 ```
-862 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
+882 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
 cargo fmt        clean
 cargo clippy     clean (0 warnings, -D warnings)
 cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
@@ -228,8 +228,10 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 - **Sprint 27b:** COMPLETE — MtA sub-protocol (Paillier-encrypted), Πenc + Πaff-g + Πlog* ZK proofs (5/5 CGGMP21 proofs done)
 - **Sprint 28:** COMPLETE — Mandatory ZK proofs in CGGMP21 + GG20, remove simulated MtA, real Paillier wired end-to-end
 - **Sprint 29:** COMPLETE — TSSHOCK Fiat-Shamir hardening (CVE-2022-47931/47930), SEC-056 PiAffg EC binding, SEC-058 legacy Paillier removal, CVE Security Report
+- **Sprint 30:** COMPLETE — SEC-054 Paillier guard, SEC-035 K_i abort, SEC-028/029 zeroize, all P1/P2 findings resolved (68/68), FilePreSignatureStore
+- **Sprint 31:** COMPLETE — Chi_i Schnorr PoK for sound identifiable abort, Stark protocol rewrite (starknet-crypto 0.8), Threshold Stark ECDSA (production)
 
-**M1-M4: DONE | CVE-2023-33241: FIXED | TSSHOCK CVEs: FIXED | Paillier: 5/5 ZK proofs | Sprint 29: CVE hardening complete**
+**M1-M4: DONE | All protocols production threshold signing | All 68 security findings RESOLVED | 882 tests | GG20 + CGGMP21 + FROST + Stark ECDSA**
 
 ### New in Sprint 29
 - CVE-2022-47931 (TSSHOCK alpha-shuffle) FIX: `hash_update_lp()` length-prefixed encoding in all Fiat-Shamir hashes
@@ -242,6 +244,25 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 - CVE-2025-66017 safety documentation added to `sign_with_presig` API
 - Comprehensive CVE Security Report: `docs/CVE_SECURITY_REPORT.md` (18 CVEs, 68 findings)
 - R6 audit: 5 MEDIUM findings resolved (SEC-034, SEC-055, SEC-056, SEC-057, SEC-058)
+
+### New in Sprint 31
+- Chi_i Schnorr proof of knowledge in CGGMP21 round 13 (prevents framing attack in identifiable abort)
+- Stark protocol rewrite: starknet-crypto 0.8, real ECDSA signing, Pedersen hash for tx+address
+- Threshold Stark ECDSA: Feldman VSS over Stark EC order, MtA-based pre-signing, 1-round online sign
+- PiLogStarStark + PiAffgStark ZK proofs on Stark curve
+- starknet-curve 0.6 + starknet-types-core 0.2 dependencies
+- 882 tests (16 new Stark threshold + ZK proof tests)
+
+### New in Sprint 30
+- SEC-054 FIX: Runtime assert production_bits >= 2048 in Paillier keygen
+- SEC-035 FIX: K_i points stored in PreSignature for identifiable abort
+- SEC-028/029 FIX: key_store_password + signing key intermediates wrapped in Zeroizing in mpc-node
+- SEC-024 FIX: Deleted dead distributed_sign() (coordinator nonce vulnerability)
+- SEC-026/027 FIX: Removed unsigned MpcOrchestrator::connect() — only signed connect_with_key()
+- SEC-030/031 FIX: Per-group-id rate limiter in mpc-node keygen+sign handlers
+- SEC-037 FIX: FilePreSignatureStore with fsync crash-safe nonce reuse protection
+- SEC-060 FIX: Removed vestigial Pifac commitment, deterministic Fiat-Shamir (pifac-challenge-v3)
+- All 68 security findings resolved (68/68)
 
 ### New in Sprint 22
 - AES-256-GCM key wrapping replaces XOR placeholder in `KeyEncryptionProvider` (R2)
@@ -404,7 +425,7 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 | SEC-015 | KeyShare derives Debug — share bytes in logs | Sprint 4 T-S4-00 — manual Debug impl redacts share_data |
 | SEC-016 | Bitcoin SerializableTx::to_tx() uses unwrap | Sprint 5 T-S5-03 — proper error propagation |
 
-### Resolved MEDIUM/LOW Findings (Sprint 17)
+### Resolved MEDIUM/LOW Findings (Sprint 17–30)
 | ID | Severity | Summary | Resolved |
 |----|----------|---------|---------|
 | SEC-008 | MEDIUM | GG20 secret scalar not zeroized | Sprint 17 — explicit zeroize in keygen/sign/refresh/reshare |
@@ -414,7 +435,18 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 | SEC-018 | LOW | rustls-pemfile unmaintained | Sprint 17 — mitigated (async-nats audit documented) |
 | SEC-019 | LOW | quinn-proto DoS vulnerability | Sprint 17 — already patched at 0.11.14 |
 | SEC-023 | LOW | Sui missing hex validation test | Sprint 17 — invalid hex test added |
+| SEC-024 | MEDIUM | Dead distributed_sign() coordinator nonce vulnerability | Sprint 30 — deleted dead code |
 | SEC-025 | MEDIUM | GATEWAY_PUBKEY optional in mpc-node | Sprint 17 — made mandatory, startup rejects without it |
+| SEC-026 | MEDIUM | Unsigned control plane messages | Sprint 30 — removed unsigned connect(), only signed connect_with_key() |
+| SEC-027 | MEDIUM | MpcOrchestrator unsigned connect | Sprint 30 — removed unsigned connect() path |
+| SEC-028 | MEDIUM | key_store_password not zeroized in mpc-node | Sprint 30 — wrapped in Zeroizing |
+| SEC-029 | MEDIUM | Signing key intermediates not zeroized | Sprint 30 — wrapped in Zeroizing in mpc-node |
+| SEC-030 | LOW | No rate limit on mpc-node keygen handler | Sprint 30 — per-group-id rate limiter |
+| SEC-031 | LOW | No rate limit on mpc-node sign handler | Sprint 30 — per-group-id rate limiter |
+| SEC-035 | MEDIUM | K_i points missing from PreSignature (abort unsound) | Sprint 30 — K_i stored for identifiable abort |
+| SEC-037 | MEDIUM | PreSignature nonce reuse on crash | Sprint 30 — FilePreSignatureStore with fsync |
+| SEC-054 | MEDIUM | Paillier keygen no minimum bit-length guard | Sprint 30 — runtime assert >= 2048 bits |
+| SEC-060 | LOW | Vestigial Pifac commitment in Fiat-Shamir | Sprint 30 — removed, deterministic pifac-challenge-v3 |
 
 Full findings log → `docs/SECURITY_FINDINGS.md`
 

@@ -791,3 +791,11 @@ Sprint 29 deep audit confirmed: SEC-055 has ped_lhs != ped_rhs check at line 897
 **Root Cause:** SEC-024 was filed against the legacy `distributed_sign` function where Party 1 alone generated k and broadcast k_inv. After Sprint 28b switched the dispatch to `distributed_sign_mta`, the finding became stale but wasn't re-verified.
 
 **Lesson:** When a finding names a specific function, always check if that function is still in the call path. A finding against dead code is not a finding against the active system.
+
+### LESSON-024 — Threshold ECDSA is curve-agnostic at the Paillier/MtA layer (Sprint 31b)
+
+**Finding:** Implementing threshold Stark ECDSA required zero changes to the Paillier module (keygen, encrypt, decrypt, MtA), Pimod, Pifac, or Pienc proofs. These operate on BigUint in the Paillier plaintext space and are completely independent of the elliptic curve. Only PiLogStar and PiAffg (which bind Paillier ciphertexts to EC points) needed curve-specific variants.
+
+**Root Cause:** The CGGMP21 architecture cleanly separates Paillier-domain operations (MtA, range proofs) from curve-domain operations (point commitments, Schnorr proofs). This separation made it possible to add a new curve in ~1900 lines without touching the ~2000 lines of Paillier infrastructure.
+
+**Lesson:** When adding new curves to a threshold ECDSA implementation, focus effort on the EC-binding proofs (PiLogStar, PiAffg, Schnorr) and Shamir/Lagrange over the new field. The Paillier layer is reusable as-is.
