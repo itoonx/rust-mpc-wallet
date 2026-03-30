@@ -102,10 +102,12 @@ cargo audit: 0 actionable advisories (6 suppressed transitive-dep advisories)
 |----------|-------|----------|------|-----------------|
 | CRITICAL | 3 | 3 | 0 | — |
 | HIGH | 4 | 4 | 0 | — |
-| MEDIUM | 18 | 7 | 11 | — |
+| MEDIUM | 18 | 12 | 6 | — |
 | LOW | 16 | 8 | 8 | — |
 | INFO | 18 | — | — | 18 (positive findings) |
-| **Total** | **59** | **22** | **19** | **18** |
+| **Total** | **59** | **27** | **14** | **18** |
+
+> **Sprint 29 update:** SEC-034, SEC-055, SEC-056, SEC-057, SEC-058 resolved (5 MEDIUM).
 
 ### 3.2 Open MEDIUM Findings
 
@@ -114,15 +116,17 @@ cargo audit: 0 actionable advisories (6 suppressed transitive-dep advisories)
 | SEC-024 | GG20 Party 1 fully controls nonce `k`, broadcasts `k_inv` | Coordinator trust assumption | Migrate to MtA-based distributed nonce (CGGMP21 path) |
 | SEC-026 | Control plane messages unauthenticated plain JSON | MITM on NATS channels | Ed25519 signed control messages (Sprint 18 partial) |
 | SEC-027 | Orchestrator ephemeral peer keys don't match node signing keys | Identity mismatch | Bind orchestrator keys to node registry |
-| SEC-034 | CGGMP21 MtA simulation broadcasts raw nonce shares | Plaintext k_i, gamma_i | Wire real Paillier MtA (SEC-058 dependency) |
 | SEC-035 | Identifiable abort can't verify per-party sigma_i | K_i not stored | Store K_i in presignature struct |
 | SEC-044 | `derive_dek` uses ad-hoc SHA-256 concat | Non-standard KDF | Replace with HKDF-SHA256 |
 | SEC-045 | `DekCache::get` returns raw `[u8; 32]` | Key material not zeroized | Return `Zeroizing<[u8; 32]>` |
 | SEC-054 | `generate_paillier_keypair()` no min 2048-bit enforcement | Weak keys possible | Add `assert!(bits >= 2048)` guard |
-| SEC-055 | Pienc Pedersen verification discards computed LHS | Incomplete verification | Complete the Pedersen equation check |
-| SEC-056 | Piaffg prover samples tau/sigma after challenge | Not bound to commitments | Move sampling before challenge |
-| SEC-057 | Pilogstar EC verification is hash stand-in | Not real discrete-log check | Implement `z1*G == Y + e*X` |
-| SEC-058 | CGGMP21 uses simulated 32-byte Paillier keys | Real Paillier not wired in | Wire real Paillier module into CGGMP21 |
+
+> **Resolved in Sprint 29 (removed from open list):**
+> - SEC-034: CGGMP21 MtA simulation removed in Sprint 28; Sprint 29 confirmed real Paillier MtA end-to-end
+> - SEC-055: Pienc Pedersen verification confirmed enforced (finding was mis-reported)
+> - SEC-056: Piaffg commitment_bx changed to real EC point, piaffg-v3, verifier checks z1*G == Bx + e*X
+> - SEC-057: Pilogstar z1*G == Y + e*X check confirmed using real k256 EC arithmetic (finding was mis-reported)
+> - SEC-058: Simulated Paillier functions/structs deleted, real Paillier keys mandatory
 
 ### 3.3 Open LOW Findings
 
@@ -176,11 +180,11 @@ cargo audit: 0 actionable advisories (6 suppressed transitive-dep advisories)
 | Feldman VSS + Schnorr PoK in keygen | IMPLEMENTED (S19) |
 | Pre-signing + 1-round online signing | IMPLEMENTED (S20) |
 | Identifiable abort | IMPLEMENTED (S20), incomplete (SEC-035) |
-| Real Paillier + Pedersen aux info | PRIMITIVES READY (S27b), NOT WIRED (SEC-058) |
+| Real Paillier + Pedersen aux info | FULLY WIRED (SEC-058 RESOLVED S29) |
 | 5/5 ZK proofs implemented | YES: Pimod, Pifac, Pienc, PiAffg, PiLogstar |
 | Fiat-Shamir hardened (TSSHOCK) | YES: length-prefix + session binding (S29) |
 | CVE-2025-66017 presig safety | GUARDED: no HD derivation, no raw hash signing |
-| **Remaining risk** | SEC-058: simulated Paillier keys (32-byte) in protocol layer |
+| **Remaining risk** | SEC-035: identifiable abort incomplete (K_i not stored) |
 
 ### 4.3 FROST Threshold Schnorr (Ed25519 + Secp256k1)
 
@@ -281,11 +285,11 @@ cargo audit: 0 actionable advisories (6 suppressed transitive-dep advisories)
 
 | Priority | Finding | Impact | Effort |
 |----------|---------|--------|--------|
-| P0 | SEC-058: Wire real Paillier into CGGMP21 | CGGMP21 uses 32-byte simulated keys | Large |
-| P0 | SEC-055/056/057: Complete Pienc/PiAffg/PiLogstar verification | Proofs may not be sound | Medium |
+| ~~P0~~ | ~~SEC-058: Wire real Paillier into CGGMP21~~ | **RESOLVED Sprint 29** | — |
+| ~~P0~~ | ~~SEC-055/056/057: Complete Pienc/PiAffg/PiLogstar verification~~ | **RESOLVED Sprint 29** | — |
 | P1 | SEC-054: Enforce min 2048-bit Paillier keys | Weak keys bypass Pifac | Small |
 | P1 | SEC-024: GG20 coordinator nonce trust | Party 1 can bias nonces | Medium (use CGGMP21 path) |
-| P1 | SEC-034: CGGMP21 MtA simulation broadcasts raw shares | Plaintext nonce shares | Medium (needs SEC-058) |
+| ~~P1~~ | ~~SEC-034: CGGMP21 MtA simulation broadcasts raw shares~~ | **RESOLVED Sprint 29** | — |
 
 ### Should Fix Before Production
 

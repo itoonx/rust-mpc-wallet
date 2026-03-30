@@ -197,7 +197,7 @@ Gateway (creates proof)    →    MPC Node (verifies before sign)
 
 ### Tests on `main`
 ```
-793 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
+862 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
 cargo fmt        clean
 cargo clippy     clean (0 warnings, -D warnings)
 cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
@@ -226,8 +226,22 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 - **Sprint 26:** COMPLETE — Address Whitelist + Velocity Limits + Webhook System (24h cool-down, multi-window velocity, HMAC-SHA256 webhooks)
 - **Sprint 27a:** COMPLETE — Real Paillier cryptosystem (CVE-2023-33241 fix): safe prime keygen, Paillier encrypt/decrypt, homomorphic ops, Πmod + Πfac ZK proofs
 - **Sprint 27b:** COMPLETE — MtA sub-protocol (Paillier-encrypted), Πenc + Πaff-g + Πlog* ZK proofs (5/5 CGGMP21 proofs done)
+- **Sprint 28:** COMPLETE — Mandatory ZK proofs in CGGMP21 + GG20, remove simulated MtA, real Paillier wired end-to-end
+- **Sprint 29:** COMPLETE — TSSHOCK Fiat-Shamir hardening (CVE-2022-47931/47930), SEC-056 PiAffg EC binding, SEC-058 legacy Paillier removal, CVE Security Report
 
-**M1-M4: DONE | CVE-2023-33241: FIXED | Paillier: 5/5 ZK proofs | Next: Sprint 28 (wire into CGGMP21/GG20 + R6 audit)**
+**M1-M4: DONE | CVE-2023-33241: FIXED | TSSHOCK CVEs: FIXED | Paillier: 5/5 ZK proofs | Sprint 29: CVE hardening complete**
+
+### New in Sprint 29
+- CVE-2022-47931 (TSSHOCK alpha-shuffle) FIX: `hash_update_lp()` length-prefixed encoding in all Fiat-Shamir hashes
+- CVE-2022-47930 (TSSHOCK replay) FIX: `session_id` + `prover_index` bound into ZK proof challenges (Pienc, PiAffg, PiLogstar)
+- Domain separators bumped to v2/v3: pienc-v2, piaffg-v3, pilogstar-v2, pifac-commit-v2, pifac-challenge-v2
+- SEC-056 FIX: PiAffg `commitment_bx` is now real EC point `alpha*G` (was raw scalar), included in Fiat-Shamir hash, verifier checks `z1*G == Bx + e*X`
+- SEC-058 FIX: Deleted simulated Paillier (`generate_paillier_keypair`/`PaillierKeyPair`), legacy share fields set to empty, real Paillier keys mandatory
+- SEC-034 verified RESOLVED: MtA uses real Paillier encryption end-to-end (since Sprint 28)
+- SEC-055/057 verified RESOLVED: Pienc Pedersen and PiLogstar EC verification equations are correct
+- CVE-2025-66017 safety documentation added to `sign_with_presig` API
+- Comprehensive CVE Security Report: `docs/CVE_SECURITY_REPORT.md` (18 CVEs, 68 findings)
+- R6 audit: 5 MEDIUM findings resolved (SEC-034, SEC-055, SEC-056, SEC-057, SEC-058)
 
 ### New in Sprint 22
 - AES-256-GCM key wrapping replaces XOR placeholder in `KeyEncryptionProvider` (R2)

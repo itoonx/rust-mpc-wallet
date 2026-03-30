@@ -117,7 +117,7 @@ pub struct Cggmp21ShareData {
 
 impl Cggmp21ShareData {
     /// Returns true if this share lacks real Paillier keys and needs a key refresh
-    /// to upgrade from legacy (simulated) Paillier keys.
+    /// to upgrade from legacy (pre-Sprint 28) Paillier keys.
     ///
     /// Shares created before Sprint 28 have `real_paillier_pk = None` and cannot
     /// participate in secure MtA-based pre-signing. In production, pre-signing
@@ -517,9 +517,10 @@ impl Cggmp21Protocol {
     ///
     /// 1. **Round 1:** Each party generates random k_i, gamma_i. Broadcasts
     ///    K_i = k_i * G, Gamma_i = gamma_i * G, plus Schnorr proof of k_i.
-    /// 2. **Round 2:** Multiplicative-to-additive (MtA) conversion:
-    ///    delta_i = k_i * sum(gamma_j for all j). In production this uses
-    ///    Paillier encryption; for simulation we compute directly.
+    /// 2. **Round 2:** Multiplicative-to-additive (MtA) conversion using real
+    ///    Paillier homomorphic encryption: each party encrypts k_i under its own
+    ///    Paillier key, then MtA produces additive shares of k_i * gamma_j.
+    ///    ZK proofs (Pienc, PiAffg, PiLogstar) are mandatory.
     /// 3. **Finalize:** Compute R = (1/delta) * G where delta = sum(delta_i),
     ///    and chi_i = k_i * x_i * lambda_i (share of k * x).
     pub async fn pre_sign(
@@ -1029,11 +1030,12 @@ async fn cggmp21_keygen(
 ///
 /// Round 1: Each party generates k_i, gamma_i, broadcasts K_i = k_i * G,
 ///          Gamma_i = gamma_i * G, plus Schnorr proof of k_i.
-/// Round 2: Multiplicative-to-additive (MtA) conversion. In production this
-///          uses Paillier encryption. For simulation, parties share their
-///          k_i and gamma_i scalars so the combined delta = k * gamma can be
-///          computed. This is insecure in production but correctly demonstrates
-///          the protocol structure and produces valid signatures.
+/// Round 2: Multiplicative-to-additive (MtA) conversion using real Paillier
+///          homomorphic encryption. Each party encrypts k_i under its own
+///          Paillier public key and broadcasts Enc(k_i). For each pair (i,j),
+///          MtA produces additive shares of k_i * gamma_j (for delta) and
+///          k_i * x_j * lambda_j (for chi). Raw scalars are never broadcast.
+///          ZK proofs (Pienc, PiAffg, PiLogstar) are mandatory for all MtA steps.
 /// Finalize: R = delta^{-1} * Gamma_sum = (k*gamma)^{-1} * gamma*G = k^{-1}*G.
 ///           chi_i = k_i * x_i * lambda_i (share of k * x).
 async fn cggmp21_pre_sign(
@@ -1160,7 +1162,7 @@ async fn cggmp21_pre_sign(
     // Check if real Paillier keys are available for secure MtA
     // Real Paillier MtA for pre-signing (enabled Sprint 28 Phase C1).
     // Shares created after Sprint 28 always have real Paillier keys from
-    // keypair_for_protocol(). The simulated fallback remains for legacy shares.
+    // keypair_for_protocol(). Legacy shares without real Paillier keys are rejected.
     let has_real_paillier = share_data.real_paillier_pk.is_some()
         && share_data.real_paillier_sk.is_some()
         && share_data.all_paillier_pks.is_some();
@@ -3396,13 +3398,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_cggmp21_sign_with_real_paillier_keygen() {
-        // Test that keygen with real Paillier + signing with simulation MtA works
+        // Test that keygen with real Paillier + signing with real Paillier MtA works
         use crate::transport::local::LocalTransportNetwork;
         use k256::ecdsa::signature::hazmat::PrehashVerifier;
 
         let shares = run_keygen(2, 3).await;
         let signers = vec![PartyId(1), PartyId(2)];
-        let message = b"Sprint 28: real Paillier keygen + simulation sign";
+        let message = b"Sprint 28: real Paillier keygen + real MtA sign";
 
         let net = LocalTransportNetwork::new(2);
         let mut handles = Vec::new();

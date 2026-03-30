@@ -737,3 +737,49 @@ MtA-based distributed nonce as future work using existing Paillier MtA infrastru
 > Before implementing a new cryptographic protocol variant, verify the mathematical
 > correctness on paper first. In threshold ECDSA, any operation involving both k⁻¹
 > and x (like s = k⁻¹(m + rx)) requires MtA — there is no shortcut.
+
+---
+
+### LESSON-021: SEC-034 was mis-reported as open (Sprint 29 audit)
+- **Date:** 2026-03-30
+- **Category:** Workflow
+- **Severity:** Medium
+- **Found by:** R10 during Sprint 29 close-out documentation sync
+- **Related finding:** SEC-034
+
+**What happened:**
+SEC-034 ("CGGMP21 MtA simulation broadcasts raw nonce shares") was listed as OPEN in SECURITY_FINDINGS.md, but deep Sprint 29 audit revealed the simulation was already removed in Sprint 28. The real Paillier MtA (encrypt, homomorphic ops, decrypt) was fully wired in. Only stale doc comments remained.
+
+**Root cause:**
+R6 filed the finding based on Sprint 19 code when simulation existed, but it wasn't re-verified after Sprint 28 replaced the simulation with real Paillier.
+
+**Fix / Resolution:**
+Sprint 29 deep audit confirmed real Paillier MtA end-to-end. SEC-034 marked RESOLVED.
+
+**Takeaway:**
+> Always re-audit open findings against the current codebase before planning sprint work.
+> A finding that was valid 10 sprints ago may already be resolved. Stale findings waste
+> planning cycles and create false urgency.
+
+---
+
+### LESSON-022: SEC-055/057 verification equations were correct (Sprint 29 audit)
+- **Date:** 2026-03-30
+- **Category:** Workflow
+- **Severity:** Medium
+- **Found by:** R10 during Sprint 29 close-out documentation sync
+- **Related finding:** SEC-055, SEC-057
+
+**What happened:**
+SEC-055 ("Pienc Pedersen verification discards computed LHS") and SEC-057 ("Pilogstar EC verification is a hash stand-in") were listed as OPEN MEDIUM findings. Sprint 29 deep code audit confirmed both verification equations are correctly implemented and enforced.
+
+**Root cause:**
+Finding descriptions were based on early-stage code review notes that weren't updated after the implementations were completed.
+
+**Fix / Resolution:**
+Sprint 29 deep audit confirmed: SEC-055 has ped_lhs != ped_rhs check at line 897 of zk_proofs.rs. SEC-057 has z1*G == Y + e*X check using real k256 EC arithmetic at lines 1418-1425. Both marked RESOLVED.
+
+**Takeaway:**
+> R6 finding descriptions can be misleading. Always read the actual verification code before
+> treating a finding as actionable. A "discarded" result may have been wired in since the
+> finding was filed.
