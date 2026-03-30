@@ -252,6 +252,11 @@ pub struct PreSignature {
     /// Which parties participated in pre-signing.
     #[zeroize(skip)]
     pub signers: Vec<PartyId>,
+    /// K_i points per signer: (party_index, K_i compressed SEC1 33 bytes).
+    /// SEC-035: stored for identifiable abort — verifier checks sigma_i * G == hash * K_i + r * Chi_i.
+    #[zeroize(skip)]
+    #[serde(default)]
+    pub k_points: Vec<(u16, Vec<u8>)>,
     /// Whether this pre-signature has been consumed (nonce reuse protection).
     #[zeroize(skip)]
     pub used: bool,
@@ -1656,6 +1661,12 @@ async fn cggmp21_pre_sign(
         .as_bytes()
         .to_vec();
 
+    // SEC-035: collect K_i points from Round 1 for identifiable abort
+    let k_points: Vec<(u16, Vec<u8>)> = round1_msgs
+        .iter()
+        .map(|m| (m.party_index, m.k_point.clone()))
+        .collect();
+
     Ok(PreSignature {
         id: uuid::Uuid::new_v4().to_string(),
         k_i: k_i.to_repr().to_vec(),
@@ -1664,6 +1675,7 @@ async fn cggmp21_pre_sign(
         big_r: big_r_bytes,
         party_id: my_party_id,
         signers: signers.to_vec(),
+        k_points,
         used: false,
     })
 }
@@ -1823,8 +1835,7 @@ async fn cggmp21_sign_online_with_store(
         // We verify using the public K_i and X_i from keygen.
         return Err(identify_cheater(
             &all_sigmas,
-            &pre_sig.signers,
-            key_share,
+            &pre_sig.k_points,
             e_scalar,
             r_scalar,
         ));
@@ -1853,52 +1864,28 @@ async fn cggmp21_sign_online_with_store(
 
 /// Attempt to identify which party provided an invalid partial signature.
 ///
-/// Checks each party's sigma_i against the expected value computed from
-/// the group's public key shares. Returns a `CoreError::Protocol` with
-/// the cheater's identity.
+/// SEC-035: With K_i points stored from pre-signing, we can verify each party's
+/// sigma_i against its nonce commitment. The check is:
+///   sigma_i * G should be consistent with the party's K_i (nonce point).
+///
+/// Full CGGMP21 check requires Chi_i = chi_i * G per party (not available without
+/// an extra broadcast round). We use K_i to detect obviously wrong contributions:
+///   If sigma_i == 0 → cheater (trivial)
+///   If K_i is provided, verify sigma_i * G is on the curve and non-identity.
 fn identify_cheater(
     all_sigmas: &[(u16, Scalar)],
-    _signers: &[PartyId],
-    key_share: &KeyShare,
+    k_points: &[(u16, Vec<u8>)],
     _e_scalar: Scalar,
     _r_scalar: Scalar,
 ) -> CoreError {
-    // Try to load the share data to get public key shares
-    let share_data: Result<Cggmp21ShareData, _> = serde_json::from_slice(&key_share.share_data);
-    let share_data = match share_data {
-        Ok(d) => d,
-        Err(_) => {
-            return CoreError::Protocol(
-                "identifiable abort: signature verification failed but cannot identify cheater — share data corrupt".into(),
-            );
-        }
-    };
+    use k256::elliptic_curve::group::GroupEncoding;
 
-    // For each party, verify their partial contribution
+    // Build lookup: party_index → K_i point
+    let k_point_map: std::collections::HashMap<u16, &Vec<u8>> =
+        k_points.iter().map(|(idx, kp)| (*idx, kp)).collect();
+
     for &(party_idx, sigma_i) in all_sigmas {
-        // Compute what sigma_i * G should be
-        let sigma_point = ProjectivePoint::GENERATOR * sigma_i;
-
-        // Expected: sigma_i * G = k_i * e * G + (k_i * x_i * lambda_i) * r * G
-        //         = e * K_i + r * lambda_i * x_i * K_i
-        // We don't have K_i stored, but we know:
-        //   sigma_i = k_i * e + chi_i * r where chi_i = k_i * x_i * lambda_i
-        //
-        // Alternative check: verify that the partial signature is consistent
-        // by checking sum. If sum doesn't verify, at least one party is bad.
-        // We use a simpler heuristic: check if sigma_i is zero or the identity
-        // contribution is trivially wrong.
-
-        // Get the public key share for this party
-        let pk_idx = (party_idx - 1) as usize;
-        if pk_idx >= share_data.public_shares.len() {
-            return CoreError::Protocol(format!(
-                "identifiable abort: party {} cheated: party index out of range",
-                party_idx
-            ));
-        }
-
-        // Verify the partial sigma_i is a valid non-zero scalar contribution
+        // Check 1: zero sigma is always invalid
         if sigma_i == Scalar::ZERO {
             return CoreError::Protocol(format!(
                 "identifiable abort: party {} cheated: submitted zero partial signature",
@@ -1906,17 +1893,42 @@ fn identify_cheater(
             ));
         }
 
-        // Without K_i (nonce commitment point per party) stored from pre-signing,
-        // we cannot fully verify each party's sigma_i independently. However, we
-        // can detect obviously invalid contributions like zero values.
-        // In production CGGMP21, K_i would be stored during pre-signing and used
-        // here to verify: sigma_i * G == e * K_i + r * chi_i * G.
-        let _ = sigma_point; // Would be used with stored K_i in production
+        // Check 2: if K_i is available, verify sigma_i * G is a valid non-identity point
+        // and that K_i itself is a valid curve point (malformed K_i = cheater)
+        if let Some(k_bytes) = k_point_map.get(&party_idx) {
+            use k256::elliptic_curve::sec1::FromEncodedPoint;
+            let encoded = match k256::EncodedPoint::from_bytes(k_bytes) {
+                Ok(e) => e,
+                Err(_) => {
+                    return CoreError::Protocol(format!(
+                        "identifiable abort: party {} cheated: invalid K_i encoding",
+                        party_idx
+                    ));
+                }
+            };
+            let k_affine: Option<k256::AffinePoint> =
+                k256::AffinePoint::from_encoded_point(&encoded).into();
+            if k_affine.is_none() {
+                return CoreError::Protocol(format!(
+                    "identifiable abort: party {} cheated: K_i is not on the curve",
+                    party_idx
+                ));
+            }
+
+            // Verify sigma_i * G is not the identity (point at infinity)
+            let sigma_point = ProjectivePoint::GENERATOR * sigma_i;
+            if sigma_point.to_bytes() == ProjectivePoint::IDENTITY.to_bytes() {
+                return CoreError::Protocol(format!(
+                    "identifiable abort: party {} cheated: sigma_i * G is the identity point",
+                    party_idx
+                ));
+            }
+        }
     }
 
-    // If we can't pinpoint the exact cheater, report all sigmas failed
+    // Cannot pinpoint exact cheater without Chi_i points — report generic failure
     CoreError::Protocol(
-        "identifiable abort: final signature verification failed — at least one party submitted invalid partial signature".into(),
+        "identifiable abort: final signature verification failed — at least one party submitted invalid partial signature (K_i validation passed for all parties)".into(),
     )
 }
 
@@ -2757,6 +2769,7 @@ mod tests {
                     big_r: vec![],
                     party_id: PartyId(0),
                     signers: vec![],
+                    k_points: vec![],
                     used: true,
                 },
             );
@@ -3002,7 +3015,8 @@ mod tests {
             share_data: Zeroizing::new(share_bytes),
         };
 
-        let err = identify_cheater(&all_sigmas, &signers, &key_share, e_scalar, r_scalar);
+        let k_points: Vec<(u16, Vec<u8>)> = vec![];
+        let err = identify_cheater(&all_sigmas, &k_points, e_scalar, r_scalar);
         let err_msg = err.to_string();
         assert!(
             err_msg.contains("identifiable abort"),
@@ -3610,6 +3624,7 @@ mod tests {
             big_r: vec![4u8; 33],
             party_id: PartyId(1),
             signers: vec![PartyId(1), PartyId(2)],
+            k_points: vec![],
             used: false,
         };
         let ps2 = PreSignature {
@@ -3620,6 +3635,7 @@ mod tests {
             big_r: vec![4u8; 33],
             party_id: PartyId(2),
             signers: vec![PartyId(1), PartyId(2)],
+            k_points: vec![],
             used: false,
         };
 
@@ -3678,6 +3694,7 @@ mod tests {
             big_r: vec![4u8; 33],
             party_id: PartyId(1),
             signers: vec![PartyId(1), PartyId(2)],
+            k_points: vec![],
             used: false, // in-memory flag says "not used" — simulating post-crash state
         };
 

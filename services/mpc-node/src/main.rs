@@ -23,6 +23,7 @@ use std::sync::Arc;
 use ed25519_dalek::SigningKey;
 use tokio::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use zeroize::Zeroizing;
 
 use mpc_wallet_core::key_store::encrypted::EncryptedFileStore;
 use mpc_wallet_core::key_store::types::{KeyGroupId, KeyMetadata};
@@ -67,7 +68,7 @@ struct NodeConfig {
     party_id: PartyId,
     nats_url: String,
     key_store_dir: PathBuf,
-    key_store_password: String,
+    key_store_password: Zeroizing<String>, // SEC-028: zeroize password on drop
     signing_key: SigningKey,
     gateway_pubkey: ed25519_dalek::VerifyingKey,
     auth_cache_max_entries: usize,
@@ -84,14 +85,20 @@ impl NodeConfig {
 
         let key_store_dir = std::env::var("KEY_STORE_DIR").unwrap_or_else(|_| "/data/keys".into());
 
-        let key_store_password =
-            std::env::var("KEY_STORE_PASSWORD").expect("KEY_STORE_PASSWORD must be set");
+        // SEC-028: wrap password in Zeroizing to clear on drop
+        let key_store_password = Zeroizing::new(
+            std::env::var("KEY_STORE_PASSWORD").expect("KEY_STORE_PASSWORD must be set"),
+        );
 
-        let signing_key_hex =
-            std::env::var("NODE_SIGNING_KEY").expect("NODE_SIGNING_KEY must be set");
-        let key_bytes = hex::decode(&signing_key_hex).expect("NODE_SIGNING_KEY must be valid hex");
+        // SEC-029: wrap all signing key intermediates in Zeroizing
+        let signing_key_hex = Zeroizing::new(
+            std::env::var("NODE_SIGNING_KEY").expect("NODE_SIGNING_KEY must be set"),
+        );
+        let key_bytes = Zeroizing::new(
+            hex::decode(&*signing_key_hex).expect("NODE_SIGNING_KEY must be valid hex"),
+        );
         assert_eq!(key_bytes.len(), 32, "NODE_SIGNING_KEY must be 32 bytes");
-        let mut arr = [0u8; 32];
+        let mut arr = Zeroizing::new([0u8; 32]);
         arr.copy_from_slice(&key_bytes);
         let signing_key = SigningKey::from_bytes(&arr);
 
