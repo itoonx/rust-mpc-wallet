@@ -27,6 +27,15 @@ use std::sync::LazyLock;
 /// Cached small primes up to 2^20, computed once via sieve of Eratosthenes.
 static SMALL_PRIMES: LazyLock<Vec<u32>> = LazyLock::new(|| generate_small_primes(1 << 20));
 
+/// Length-prefixed hash update: prevents TSSHOCK alpha-shuffle hash collisions
+/// (CVE-2022-47931) by prepending the byte length as a fixed-width u32 before
+/// each variable-length input. Without this, H(A || B) can collide with
+/// H(A' || B') when A||B == A'||B' under different splits.
+fn hash_update_lp(hasher: &mut Sha256, data: &[u8]) {
+    hasher.update((data.len() as u32).to_be_bytes());
+    hasher.update(data);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SignedBigUint — signed wrapper for CGGMP21 ZK proofs (SEC-PIAFFG)
 //
@@ -530,12 +539,13 @@ pub fn prove_pifac(n: &BigUint, p: &BigUint, q: &BigUint) -> PifacProof {
     let mut nonce = vec![0u8; 32];
     OsRng.fill_bytes(&mut nonce);
 
-    // Commitment = H(N || p || q || nonce)
+    // Commitment = H(N || p || q || nonce) with length-prefixed encoding (CVE-2022-47931)
     let mut hasher = Sha256::new();
-    hasher.update(n.to_bytes_be());
-    hasher.update(p.to_bytes_be());
-    hasher.update(q.to_bytes_be());
-    hasher.update(&nonce);
+    hasher.update(b"pifac-commit-v2");
+    hash_update_lp(&mut hasher, &n.to_bytes_be());
+    hash_update_lp(&mut hasher, &p.to_bytes_be());
+    hash_update_lp(&mut hasher, &q.to_bytes_be());
+    hash_update_lp(&mut hasher, &nonce);
     let commitment = hasher.finalize().to_vec();
 
     let p_bits = p.bits();
@@ -558,7 +568,7 @@ pub fn prove_pifac(n: &BigUint, p: &BigUint, q: &BigUint) -> PifacProof {
         let mut hasher = Sha256::new();
         hasher.update(&commitment);
         hasher.update((i as u64).to_le_bytes());
-        hasher.update(b"pifac-challenge");
+        hasher.update(b"pifac-challenge-v2");
         let hash = hasher.finalize();
 
         let x = BigUint::from_bytes_be(&hash) % n;
@@ -631,7 +641,7 @@ pub fn verify_pifac(n: &BigUint, proof: &PifacProof) -> bool {
         let mut hasher = Sha256::new();
         hasher.update(&proof.commitment);
         hasher.update((i as u64).to_le_bytes());
-        hasher.update(b"pifac-challenge");
+        hasher.update(b"pifac-challenge-v2");
         let hash = hasher.finalize();
 
         let expected_x = BigUint::from_bytes_be(&hash) % n;
@@ -758,6 +768,10 @@ pub struct PiEncPublicInput {
     pub s: Vec<u8>,
     /// Pedersen base t.
     pub t: Vec<u8>,
+    /// Session ID for Fiat-Shamir binding (prevents cross-session replay, CVE-2022-47930).
+    pub session_id: Vec<u8>,
+    /// Prover party index for Fiat-Shamir binding.
+    pub prover_index: u16,
 }
 
 /// Prove that ciphertext C encrypts m with |m| < 2^ell.
@@ -791,7 +805,7 @@ pub fn prove_pienc(m: &BigUint, r: &BigUint, public: &PiEncPublicInput) -> PiEnc
     // Pedersen commitment to the witness: S = s^m * t^rho mod N_hat
     let pedersen_s = (s.modpow(m, &n_hat) * t.modpow(&rho, &n_hat)) % &n_hat;
 
-    // Fiat-Shamir challenge (includes pedersen_s for binding)
+    // Fiat-Shamir challenge (includes pedersen_s for binding + session context)
     let e = pienc_challenge(
         &public.pk_n,
         &public.ciphertext,
@@ -799,6 +813,8 @@ pub fn prove_pienc(m: &BigUint, r: &BigUint, public: &PiEncPublicInput) -> PiEnc
         &commitment_b,
         &pedersen_s,
         &n_hat,
+        &public.session_id,
+        public.prover_index,
     );
 
     // Responses
@@ -837,7 +853,7 @@ pub fn verify_pienc(proof: &PiEncProof, public: &PiEncPublicInput) -> bool {
     let z2 = BigUint::from_bytes_be(&proof.z2);
     let z3 = BigUint::from_bytes_be(&proof.z3);
 
-    // Recompute challenge (includes pedersen_s for binding)
+    // Recompute challenge (includes pedersen_s for binding + session context)
     let e = pienc_challenge(
         &public.pk_n,
         &public.ciphertext,
@@ -845,6 +861,8 @@ pub fn verify_pienc(proof: &PiEncProof, public: &PiEncPublicInput) -> bool {
         &commitment_b,
         &pedersen_s,
         &n_hat,
+        &public.session_id,
+        public.prover_index,
     );
 
     // Range check: z1 < 2^(ell + epsilon)
@@ -884,6 +902,10 @@ pub fn verify_pienc(proof: &PiEncProof, public: &PiEncPublicInput) -> bool {
 }
 
 /// Fiat-Shamir challenge for Πenc.
+///
+/// Uses length-prefixed encoding (CVE-2022-47931 mitigation) and session binding
+/// (CVE-2022-47930 mitigation) to prevent hash collision and cross-session replay.
+#[allow(clippy::too_many_arguments)]
 fn pienc_challenge(
     pk_n: &[u8],
     ciphertext: &[u8],
@@ -891,15 +913,19 @@ fn pienc_challenge(
     commitment_b: &BigUint,
     pedersen_s: &BigUint,
     n_hat: &BigUint,
+    session_id: &[u8],
+    prover_index: u16,
 ) -> BigUint {
     let mut hasher = Sha256::new();
-    hasher.update(b"pienc-v1");
-    hasher.update(pk_n);
-    hasher.update(ciphertext);
-    hasher.update(commitment_a.to_bytes_be());
-    hasher.update(commitment_b.to_bytes_be());
-    hasher.update(pedersen_s.to_bytes_be());
-    hasher.update(n_hat.to_bytes_be());
+    hasher.update(b"pienc-v2");
+    hash_update_lp(&mut hasher, session_id);
+    hasher.update(prover_index.to_be_bytes());
+    hash_update_lp(&mut hasher, pk_n);
+    hash_update_lp(&mut hasher, ciphertext);
+    hash_update_lp(&mut hasher, &commitment_a.to_bytes_be());
+    hash_update_lp(&mut hasher, &commitment_b.to_bytes_be());
+    hash_update_lp(&mut hasher, &pedersen_s.to_bytes_be());
+    hash_update_lp(&mut hasher, &n_hat.to_bytes_be());
     let hash = hasher.finalize();
     // Use 128-bit challenge for soundness
     BigUint::from_bytes_be(&hash[..16])
@@ -956,6 +982,10 @@ pub struct PiAffgPublicInput {
     pub s: Vec<u8>,
     /// Pedersen base t.
     pub t: Vec<u8>,
+    /// Session ID for Fiat-Shamir binding (prevents cross-session replay, CVE-2022-47930).
+    pub session_id: Vec<u8>,
+    /// Prover party index for Fiat-Shamir binding.
+    pub prover_index: u16,
 }
 
 /// Prove affine operation D = C^x * Enc(y, rho_y) where |x| < 2^ell, |y| < 2^ell'.
@@ -1025,6 +1055,8 @@ pub fn prove_piaffg(
         &pedersen_sx,
         &pedersen_sy,
         &n_hat,
+        &public.session_id,
+        public.prover_index,
     );
 
     // Responses (always non-negative: unsigned masking + unsigned e*witness)
@@ -1094,6 +1126,8 @@ pub fn verify_piaffg(proof: &PiAffgProof, public: &PiAffgPublicInput) -> bool {
         &pedersen_sx,
         &pedersen_sy,
         &n_hat,
+        &public.session_id,
+        public.prover_index,
     );
 
     // Absolute-value range checks (CGGMP21: |z| < 2^(ell+epsilon))
@@ -1149,6 +1183,9 @@ pub fn verify_piaffg(proof: &PiAffgProof, public: &PiAffgPublicInput) -> bool {
 }
 
 /// Fiat-Shamir challenge for Πaff-g.
+///
+/// Uses length-prefixed encoding (CVE-2022-47931 mitigation) and session binding
+/// (CVE-2022-47930 mitigation) to prevent hash collision and cross-session replay.
 #[allow(clippy::too_many_arguments)]
 fn piaffg_challenge(
     pk_n0: &[u8],
@@ -1160,18 +1197,22 @@ fn piaffg_challenge(
     pedersen_sx: &BigUint,
     pedersen_sy: &BigUint,
     n_hat: &BigUint,
+    session_id: &[u8],
+    prover_index: u16,
 ) -> BigUint {
     let mut hasher = Sha256::new();
-    hasher.update(b"piaffg-v1");
-    hasher.update(pk_n0);
-    hasher.update(c);
-    hasher.update(d);
-    hasher.update(commitment_a.to_bytes_be());
-    hasher.update(commitment_e.to_bytes_be());
-    hasher.update(commitment_f.to_bytes_be());
-    hasher.update(pedersen_sx.to_bytes_be());
-    hasher.update(pedersen_sy.to_bytes_be());
-    hasher.update(n_hat.to_bytes_be());
+    hasher.update(b"piaffg-v2");
+    hash_update_lp(&mut hasher, session_id);
+    hasher.update(prover_index.to_be_bytes());
+    hash_update_lp(&mut hasher, pk_n0);
+    hash_update_lp(&mut hasher, c);
+    hash_update_lp(&mut hasher, d);
+    hash_update_lp(&mut hasher, &commitment_a.to_bytes_be());
+    hash_update_lp(&mut hasher, &commitment_e.to_bytes_be());
+    hash_update_lp(&mut hasher, &commitment_f.to_bytes_be());
+    hash_update_lp(&mut hasher, &pedersen_sx.to_bytes_be());
+    hash_update_lp(&mut hasher, &pedersen_sy.to_bytes_be());
+    hash_update_lp(&mut hasher, &n_hat.to_bytes_be());
     let hash = hasher.finalize();
     BigUint::from_bytes_be(&hash[..16])
 }
@@ -1221,6 +1262,10 @@ pub struct PiLogStarPublicInput {
     pub s: Vec<u8>,
     /// Pedersen base t.
     pub t: Vec<u8>,
+    /// Session ID for Fiat-Shamir binding (prevents cross-session replay, CVE-2022-47930).
+    pub session_id: Vec<u8>,
+    /// Prover party index for Fiat-Shamir binding.
+    pub prover_index: u16,
 }
 
 /// Compute the EC point commitment for Πlog*: x * G on secp256k1.
@@ -1283,6 +1328,8 @@ pub fn prove_pilogstar(x: &BigUint, r: &BigUint, public: &PiLogStarPublicInput) 
         &commitment_y,
         &commitment_d,
         &n_hat,
+        &public.session_id,
+        public.prover_index,
     );
 
     // Responses
@@ -1328,6 +1375,8 @@ pub fn verify_pilogstar(proof: &PiLogStarProof, public: &PiLogStarPublicInput) -
         &proof.commitment_y,
         &commitment_d,
         &n_hat,
+        &public.session_id,
+        public.prover_index,
     );
 
     // Range check
@@ -1387,6 +1436,10 @@ fn decode_sec1_point(bytes: &[u8]) -> Option<k256::ProjectivePoint> {
 }
 
 /// Fiat-Shamir challenge for Πlog*.
+///
+/// Uses length-prefixed encoding (CVE-2022-47931 mitigation) and session binding
+/// (CVE-2022-47930 mitigation) to prevent hash collision and cross-session replay.
+#[allow(clippy::too_many_arguments)]
 fn pilogstar_challenge(
     pk_n: &[u8],
     ciphertext: &[u8],
@@ -1395,16 +1448,20 @@ fn pilogstar_challenge(
     commitment_y: &[u8],
     commitment_d: &BigUint,
     n_hat: &BigUint,
+    session_id: &[u8],
+    prover_index: u16,
 ) -> BigUint {
     let mut hasher = Sha256::new();
-    hasher.update(b"pilogstar-v1");
-    hasher.update(pk_n);
-    hasher.update(ciphertext);
-    hasher.update(x_commitment);
-    hasher.update(commitment_a.to_bytes_be());
-    hasher.update(commitment_y);
-    hasher.update(commitment_d.to_bytes_be());
-    hasher.update(n_hat.to_bytes_be());
+    hasher.update(b"pilogstar-v2");
+    hash_update_lp(&mut hasher, session_id);
+    hasher.update(prover_index.to_be_bytes());
+    hash_update_lp(&mut hasher, pk_n);
+    hash_update_lp(&mut hasher, ciphertext);
+    hash_update_lp(&mut hasher, x_commitment);
+    hash_update_lp(&mut hasher, &commitment_a.to_bytes_be());
+    hash_update_lp(&mut hasher, commitment_y);
+    hash_update_lp(&mut hasher, &commitment_d.to_bytes_be());
+    hash_update_lp(&mut hasher, &n_hat.to_bytes_be());
     let hash = hasher.finalize();
     BigUint::from_bytes_be(&hash[..16])
 }
@@ -1887,6 +1944,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let proof = prove_pienc(&m, &r, &public);
@@ -1911,6 +1970,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_pienc(&m, &r, &public);
@@ -1956,6 +2017,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let proof = prove_piaffg(&x, &y, &rho_y, &public);
@@ -1989,6 +2052,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_piaffg(&x, &y, &rho_y, &public);
@@ -2024,6 +2089,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let proof = prove_pilogstar(&x, &r, &public);
@@ -2053,6 +2120,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         // Generate proof with the correct commitment, then verify against
@@ -2067,6 +2136,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
         let proof = prove_pilogstar(&x, &r, &correct_public);
 
@@ -2103,6 +2174,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
         let pienc_proof = prove_pienc(&a, &r_a, &pienc_public);
 
@@ -2132,6 +2205,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
         let piaffg_proof = prove_piaffg(&b, &beta_prime, &rho_y, &piaffg_public);
 
@@ -2175,6 +2250,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_pienc(&m, &r, &public);
@@ -2206,6 +2283,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_pienc(&m, &r, &public);
@@ -2256,6 +2335,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_piaffg(&x, &y, &rho_y, &public);
@@ -2295,6 +2376,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_piaffg(&x, &y, &rho_y, &public);
@@ -2335,6 +2418,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_piaffg(&x, &y, &rho_y, &public);
@@ -2374,6 +2459,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_piaffg(&x, &y, &rho_y, &public);
@@ -2454,6 +2541,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let proof = prove_pilogstar(&x, &r, &correct_public);
@@ -2468,6 +2557,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         assert!(
@@ -2495,6 +2586,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_pilogstar(&x, &r, &public);
@@ -2526,6 +2619,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let proof = prove_pilogstar(&x, &r, &correct_public);
@@ -2539,6 +2634,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         assert!(

@@ -908,6 +908,8 @@ async fn distributed_sign_mta(
         n_hat: ped_n_hat.clone(),
         s: ped_s.clone(),
         t: ped_t.clone(),
+        session_id: key_share.group_public_key.as_bytes().to_vec(),
+        prover_index: my_index,
     };
     let m_big = BigUint::from_bytes_be(&mta_witness.plaintext_m);
     let r_big = BigUint::from_bytes_be(&mta_witness.randomness_r);
@@ -921,6 +923,8 @@ async fn distributed_sign_mta(
         n_hat: ped_n_hat.clone(),
         s: ped_s.clone(),
         t: ped_t.clone(),
+        session_id: key_share.group_public_key.as_bytes().to_vec(),
+        prover_index: my_index,
     };
     let pi_logstar =
         crate::paillier::zk_proofs::prove_pilogstar(&m_big, &r_big, &pi_logstar_public);
@@ -982,6 +986,8 @@ async fn distributed_sign_mta(
             n_hat: ped_n_hat.clone(),
             s: ped_s.clone(),
             t: ped_t.clone(),
+            session_id: key_share.group_public_key.as_bytes().to_vec(),
+            prover_index: peer_idx,
         };
         if !crate::paillier::zk_proofs::verify_pienc(&pi_enc_peer, &pub_input) {
             return Err(CoreError::Protocol(format!(
@@ -1014,6 +1020,8 @@ async fn distributed_sign_mta(
             n_hat: ped_n_hat.clone(),
             s: ped_s.clone(),
             t: ped_t.clone(),
+            session_id: key_share.group_public_key.as_bytes().to_vec(),
+            prover_index: peer_idx,
         };
         if !crate::paillier::zk_proofs::verify_pilogstar(&pi_ls, &pub_input2) {
             return Err(CoreError::Protocol(format!(
@@ -1074,6 +1082,8 @@ async fn distributed_sign_mta(
                 n_hat: ped_n_hat.clone(),
                 s: ped_s.clone(),
                 t: ped_t.clone(),
+                session_id: key_share.group_public_key.as_bytes().to_vec(),
+                prover_index: my_index,
             },
         );
 
@@ -1091,6 +1101,8 @@ async fn distributed_sign_mta(
                 n_hat: ped_n_hat.clone(),
                 s: ped_s.clone(),
                 t: ped_t.clone(),
+                session_id: key_share.group_public_key.as_bytes().to_vec(),
+                prover_index: my_index,
             },
         );
 
@@ -1161,6 +1173,9 @@ async fn distributed_sign_mta(
             serde_json::from_value(r3["chi_ct"].clone())
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
+        // Extract peer party index for ZK proof verification
+        let peer_idx = r3["from_party"].as_u64().unwrap_or(0) as u16;
+
         // Verify Πaff-g proofs (MANDATORY since Sprint 28b)
         let pi_d_val = r3
             .get("pi_affg_delta")
@@ -1181,6 +1196,8 @@ async fn distributed_sign_mta(
             n_hat: ped_n_hat.clone(),
             s: ped_s.clone(),
             t: ped_t.clone(),
+            session_id: key_share.group_public_key.as_bytes().to_vec(),
+            prover_index: peer_idx,
         };
         if !crate::paillier::zk_proofs::verify_piaffg(&pi_d, &verify_pub_d) {
             return Err(CoreError::Protocol(
@@ -1207,6 +1224,8 @@ async fn distributed_sign_mta(
             n_hat: ped_n_hat.clone(),
             s: ped_s.clone(),
             t: ped_t.clone(),
+            session_id: key_share.group_public_key.as_bytes().to_vec(),
+            prover_index: peer_idx,
         };
         if !crate::paillier::zk_proofs::verify_piaffg(&pi_c, &verify_pub_c) {
             return Err(CoreError::Protocol(

@@ -621,6 +621,16 @@ impl Cggmp21Protocol {
     ///
     /// If the final signature fails verification, the protocol identifies
     /// which party submitted an invalid partial signature.
+    ///
+    /// # Security: CVE-2025-66017 constraints
+    ///
+    /// **DO NOT** combine presignatures with:
+    /// - **HD wallet derivation (BIP-32)**: security degrades from 128-bit to 85-bit.
+    /// - **Raw pre-hashed signing**: callers must pass the original message, not a
+    ///   pre-computed hash. This function applies SHA-256 internally.
+    ///
+    /// Presignatures are message-independent "blank cheques" — each MUST be used
+    /// exactly once. The `used` flag and optional `PreSignatureStore` enforce this.
     pub async fn sign_with_presig(
         &self,
         pre_sig: &mut PreSignature,
@@ -1283,6 +1293,8 @@ async fn cggmp21_pre_sign(
             n_hat: ped_n_hat.clone(),
             s: ped_s.clone(),
             t: ped_t.clone(),
+            session_id: key_share.group_public_key.as_bytes().to_vec(),
+            prover_index: my_index,
         };
         let m_big = BigUint::from_bytes_be(&mta_witness.plaintext_m);
         let r_big = BigUint::from_bytes_be(&mta_witness.randomness_r);
@@ -1297,6 +1309,8 @@ async fn cggmp21_pre_sign(
             n_hat: ped_n_hat.clone(),
             s: ped_s.clone(),
             t: ped_t.clone(),
+            session_id: key_share.group_public_key.as_bytes().to_vec(),
+            prover_index: my_index,
         };
         let pi_logstar_proof =
             crate::paillier::zk_proofs::prove_pilogstar(&m_big, &r_big, &pi_logstar_public);
@@ -1381,6 +1395,8 @@ async fn cggmp21_pre_sign(
                 n_hat: own_ped.0.clone(),
                 s: own_ped.1.clone(),
                 t: own_ped.2.clone(),
+                session_id: key_share.group_public_key.as_bytes().to_vec(),
+                prover_index: peer_msg.party_index,
             };
             if !crate::paillier::zk_proofs::verify_pienc(pi_enc, &pi_enc_public) {
                 return Err(CoreError::Protocol(format!(
@@ -1409,6 +1425,8 @@ async fn cggmp21_pre_sign(
                 n_hat: own_ped.0.clone(),
                 s: own_ped.1.clone(),
                 t: own_ped.2.clone(),
+                session_id: key_share.group_public_key.as_bytes().to_vec(),
+                prover_index: peer_msg.party_index,
             };
             if !crate::paillier::zk_proofs::verify_pilogstar(pi_logstar, &pi_logstar_public) {
                 return Err(CoreError::Protocol(format!(
@@ -1448,6 +1466,8 @@ async fn cggmp21_pre_sign(
                     n_hat: own_ped.0.clone(),
                     s: own_ped.1.clone(),
                     t: own_ped.2.clone(),
+                    session_id: key_share.group_public_key.as_bytes().to_vec(),
+                    prover_index: my_index,
                 },
             );
 
@@ -1465,6 +1485,8 @@ async fn cggmp21_pre_sign(
                     n_hat: own_ped.0.clone(),
                     s: own_ped.1.clone(),
                     t: own_ped.2.clone(),
+                    session_id: key_share.group_public_key.as_bytes().to_vec(),
+                    prover_index: my_index,
                 },
             );
 
@@ -1571,6 +1593,8 @@ async fn cggmp21_pre_sign(
                 n_hat: own_ped.0.clone(),
                 s: own_ped.1.clone(),
                 t: own_ped.2.clone(),
+                session_id: key_share.group_public_key.as_bytes().to_vec(),
+                prover_index: _from_party,
             };
             if !crate::paillier::zk_proofs::verify_piaffg(&pi_affg_d, &verify_pub_d) {
                 return Err(CoreError::Protocol(format!(
@@ -1599,6 +1623,8 @@ async fn cggmp21_pre_sign(
                 n_hat: own_ped.0.clone(),
                 s: own_ped.1.clone(),
                 t: own_ped.2.clone(),
+                session_id: key_share.group_public_key.as_bytes().to_vec(),
+                prover_index: _from_party,
             };
             if !crate::paillier::zk_proofs::verify_piaffg(&pi_affg_c, &verify_pub_c) {
                 return Err(CoreError::Protocol(format!(
