@@ -70,12 +70,15 @@ pub struct Cggmp21ShareData {
     /// The combined group public key (compressed SEC1, 33 bytes).
     #[zeroize(skip)]
     pub group_public_key: Vec<u8>,
-    /// Paillier secret key: serialized (p, q) primes (legacy simulated format).
+    /// Paillier secret key (legacy field, kept empty for serde backward compat).
+    #[serde(default)]
     pub paillier_sk: Vec<u8>,
-    /// Paillier public key: serialized N = p * q (legacy simulated format).
+    /// Paillier public key (legacy field, kept empty for serde backward compat).
+    #[serde(default)]
     #[zeroize(skip)]
     pub paillier_pk: Vec<u8>,
-    /// Pedersen commitment parameters: serialized (s, t, N_hat).
+    /// Pedersen commitment parameters (legacy field, kept empty for serde backward compat).
+    #[serde(default)]
     #[zeroize(skip)]
     pub pedersen_params: Vec<u8>,
     /// Real Paillier secret key (Sprint 28 — replaces simulated).
@@ -168,28 +171,6 @@ struct Round3FeldmanShare {
     share_value: Vec<u8>,
     /// Feldman commitments: C_k = a_k * G for k = 0..t-1.
     commitments: Vec<Vec<u8>>,
-}
-
-/// Simulated Paillier key pair (legacy, used when real Paillier keys are absent).
-#[derive(Serialize, Deserialize)]
-struct PaillierKeyPair {
-    /// First prime p (32 bytes for simulation).
-    p: Vec<u8>,
-    /// Second prime q (32 bytes for simulation).
-    q: Vec<u8>,
-    /// Modulus N = p * q (conceptually; stored as the hash for simulation).
-    n: Vec<u8>,
-}
-
-/// Simulated Pedersen parameters.
-#[derive(Serialize, Deserialize)]
-struct PedersenParams {
-    /// Parameter s.
-    s: Vec<u8>,
-    /// Parameter t.
-    t: Vec<u8>,
-    /// Modulus N_hat.
-    n_hat: Vec<u8>,
 }
 
 /// Default Paillier key size for production (secure, ~10s per keygen with glass_pumpkin).
@@ -509,62 +490,6 @@ fn schnorr_verify(
 // ─────────────────────────────────────────────────────────────────────────────
 // Auxiliary info generation
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Generate simulated Paillier key pair deterministically from party secret.
-///
-/// In production, these would be large (2048-bit) primes. For simulation
-/// purposes, we derive 32-byte values from the party's secret using SHA-256.
-fn generate_paillier_keypair(secret: &Scalar, party_index: u16) -> PaillierKeyPair {
-    let secret_bytes = secret.to_repr();
-
-    // Derive p from H("paillier-p" || secret || party_index)
-    let mut hasher = Sha256::new();
-    hasher.update(b"paillier-p");
-    hasher.update(secret_bytes.as_slice());
-    hasher.update(party_index.to_le_bytes());
-    let p = hasher.finalize().to_vec();
-
-    // Derive q from H("paillier-q" || secret || party_index)
-    let mut hasher = Sha256::new();
-    hasher.update(b"paillier-q");
-    hasher.update(secret_bytes.as_slice());
-    hasher.update(party_index.to_le_bytes());
-    let q = hasher.finalize().to_vec();
-
-    // N = H("paillier-n" || p || q) (simulated modulus)
-    let mut hasher = Sha256::new();
-    hasher.update(b"paillier-n");
-    hasher.update(&p);
-    hasher.update(&q);
-    let n = hasher.finalize().to_vec();
-
-    PaillierKeyPair { p, q, n }
-}
-
-/// Generate simulated Pedersen parameters from party secret.
-fn generate_pedersen_params(secret: &Scalar, party_index: u16) -> PedersenParams {
-    let secret_bytes = secret.to_repr();
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"pedersen-s");
-    hasher.update(secret_bytes.as_slice());
-    hasher.update(party_index.to_le_bytes());
-    let s = hasher.finalize().to_vec();
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"pedersen-t");
-    hasher.update(secret_bytes.as_slice());
-    hasher.update(party_index.to_le_bytes());
-    let t = hasher.finalize().to_vec();
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"pedersen-n-hat");
-    hasher.update(secret_bytes.as_slice());
-    hasher.update(party_index.to_le_bytes());
-    let n_hat = hasher.finalize().to_vec();
-
-    PedersenParams { s, t, n_hat }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Protocol struct
@@ -977,17 +902,6 @@ async fn cggmp21_keygen(
     // ── Per-round sync barrier (L-012 fix): ensure all Feldman VSS complete
     transport.wait_ready().await?;
 
-    // ── Generate auxiliary info (Paillier + Pedersen) ────────────────────
-    // Legacy simulated Paillier (kept for backward compat serialization)
-    let sim_paillier = generate_paillier_keypair(&x_i, my_index);
-    let sim_pedersen = generate_pedersen_params(&x_i, my_index);
-
-    let paillier_sk_bytes = serde_json::to_vec(&(sim_paillier.p.clone(), sim_paillier.q.clone()))
-        .map_err(|e| CoreError::Serialization(e.to_string()))?;
-    let paillier_pk_bytes = sim_paillier.n.clone();
-    let pedersen_bytes =
-        serde_json::to_vec(&sim_pedersen).map_err(|e| CoreError::Serialization(e.to_string()))?;
-
     // ── Real Paillier keygen + ZK proofs (Sprint 28) ────────────────────
     let (real_pk, real_sk) = crate::paillier::keygen::keypair_for_protocol(DEFAULT_PAILLIER_BITS)?;
 
@@ -1081,9 +995,9 @@ async fn cggmp21_keygen(
         secret_share: final_share.to_repr().to_vec(),
         public_shares,
         group_public_key: group_pubkey_bytes.clone(),
-        paillier_sk: paillier_sk_bytes,
-        paillier_pk: paillier_pk_bytes,
-        pedersen_params: pedersen_bytes,
+        paillier_sk: vec![],
+        paillier_pk: vec![],
+        pedersen_params: vec![],
         real_paillier_sk: Some(real_sk),
         real_paillier_pk: Some(real_pk),
         all_paillier_pks: Some(all_paillier_pks),
@@ -1454,8 +1368,9 @@ async fn cggmp21_pre_sign(
             // Πaff-g witness: x = gamma_i (or x_i*lambda_i), y = beta' (both small).
             let beta_d = BigUint::from_bytes_be(&mta_w_delta.result.beta);
             let rho_d = BigUint::from_bytes_be(&mta_w_delta.rho_y);
+            let gamma_big = BigUint::from_bytes_be(&gamma_i_bytes);
             let pi_affg_delta = crate::paillier::zk_proofs::prove_piaffg(
-                &BigUint::from_bytes_be(&gamma_i_bytes),
+                &gamma_big,
                 &beta_d,
                 &rho_d,
                 &crate::paillier::zk_proofs::PiAffgPublicInput {
@@ -1466,6 +1381,9 @@ async fn cggmp21_pre_sign(
                     n_hat: own_ped.0.clone(),
                     s: own_ped.1.clone(),
                     t: own_ped.2.clone(),
+                    x_commitment: crate::paillier::zk_proofs::pilogstar_point_commitment(
+                        &gamma_big,
+                    ),
                     session_id: key_share.group_public_key.as_bytes().to_vec(),
                     prover_index: my_index,
                 },
@@ -1473,8 +1391,9 @@ async fn cggmp21_pre_sign(
 
             let beta_c = BigUint::from_bytes_be(&mta_w_chi.result.beta);
             let rho_c = BigUint::from_bytes_be(&mta_w_chi.rho_y);
+            let x_i_lambda_big = BigUint::from_bytes_be(&x_i_lambda_i_bytes);
             let pi_affg_chi = crate::paillier::zk_proofs::prove_piaffg(
-                &BigUint::from_bytes_be(&x_i_lambda_i_bytes),
+                &x_i_lambda_big,
                 &beta_c,
                 &rho_c,
                 &crate::paillier::zk_proofs::PiAffgPublicInput {
@@ -1485,6 +1404,9 @@ async fn cggmp21_pre_sign(
                     n_hat: own_ped.0.clone(),
                     s: own_ped.1.clone(),
                     t: own_ped.2.clone(),
+                    x_commitment: crate::paillier::zk_proofs::pilogstar_point_commitment(
+                        &x_i_lambda_big,
+                    ),
                     session_id: key_share.group_public_key.as_bytes().to_vec(),
                     prover_index: my_index,
                 },
@@ -1504,6 +1426,11 @@ async fn cggmp21_pre_sign(
                         peer_msg.party_index
                     ))
                 })?;
+            // Include EC point commitments for verifier-side PiAffg check (SEC-056)
+            let gamma_x_commitment =
+                crate::paillier::zk_proofs::pilogstar_point_commitment(&gamma_big);
+            let chi_x_commitment =
+                crate::paillier::zk_proofs::pilogstar_point_commitment(&x_i_lambda_big);
             let combined_response = serde_json::json!({
                 "from_party": my_index,
                 "to_party": peer_msg.party_index,
@@ -1511,6 +1438,8 @@ async fn cggmp21_pre_sign(
                 "chi_ct": serde_json::to_value(&mta_w_chi.result.ciphertext).unwrap(),
                 "pi_affg_delta": serde_json::to_value(&pi_affg_delta).unwrap(),
                 "pi_affg_chi": serde_json::to_value(&pi_affg_chi).unwrap(),
+                "gamma_x_commitment": gamma_x_commitment,
+                "chi_x_commitment": chi_x_commitment,
             });
             let payload = serde_json::to_vec(&combined_response)
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
@@ -1585,6 +1514,19 @@ async fn cggmp21_pre_sign(
             let pi_affg_d: crate::paillier::zk_proofs::PiAffgProof =
                 serde_json::from_value(pi_affg_d_val.clone())
                     .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            // EC point commitments from prover (SEC-056: sent alongside proofs)
+            let gamma_x_commit: Vec<u8> = serde_json::from_value(
+                r3.get("gamma_x_commitment")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .unwrap_or_default();
+            let chi_x_commit: Vec<u8> = serde_json::from_value(
+                r3.get("chi_x_commitment")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .unwrap_or_default();
             let verify_pub_d = crate::paillier::zk_proofs::PiAffgPublicInput {
                 pk_n0: my_pk.n.clone(),
                 pk_n0_squared: my_pk.n_squared.clone(),
@@ -1593,6 +1535,7 @@ async fn cggmp21_pre_sign(
                 n_hat: own_ped.0.clone(),
                 s: own_ped.1.clone(),
                 t: own_ped.2.clone(),
+                x_commitment: gamma_x_commit,
                 session_id: key_share.group_public_key.as_bytes().to_vec(),
                 prover_index: _from_party,
             };
@@ -1623,6 +1566,7 @@ async fn cggmp21_pre_sign(
                 n_hat: own_ped.0.clone(),
                 s: own_ped.1.clone(),
                 t: own_ped.2.clone(),
+                x_commitment: chi_x_commit,
                 session_id: key_share.group_public_key.as_bytes().to_vec(),
                 prover_index: _from_party,
             };
@@ -2287,17 +2231,7 @@ async fn cggmp21_refresh(
         }
     }
 
-    // ── Generate fresh auxiliary info (Paillier + Pedersen) ───────────────
-    let sim_paillier = generate_paillier_keypair(&new_share, my_index);
-    let sim_pedersen = generate_pedersen_params(&new_share, my_index);
-
-    let paillier_sk_bytes = serde_json::to_vec(&(sim_paillier.p.clone(), sim_paillier.q.clone()))
-        .map_err(|e| CoreError::Serialization(e.to_string()))?;
-    let paillier_pk_bytes = sim_paillier.n.clone();
-    let pedersen_bytes =
-        serde_json::to_vec(&sim_pedersen).map_err(|e| CoreError::Serialization(e.to_string()))?;
-
-    // Generate fresh real Paillier keys + ZK proofs
+    // ── Generate fresh real Paillier keys + ZK proofs ─────────────────
     let (fresh_pk, fresh_sk) =
         crate::paillier::keygen::keypair_for_protocol(DEFAULT_PAILLIER_BITS)?;
 
@@ -2377,9 +2311,9 @@ async fn cggmp21_refresh(
         secret_share: new_share.to_repr().to_vec(),
         public_shares: all_public_shares,
         group_public_key: share_data.group_public_key.clone(),
-        paillier_sk: paillier_sk_bytes,
-        paillier_pk: paillier_pk_bytes,
-        pedersen_params: pedersen_bytes,
+        paillier_sk: vec![],
+        paillier_pk: vec![],
+        pedersen_params: vec![],
         real_paillier_sk: Some(fresh_sk),
         real_paillier_pk: Some(fresh_pk),
         all_paillier_pks: Some(fresh_all_pks),
@@ -2508,30 +2442,6 @@ mod tests {
         assert_eq!(lambda, Scalar::from(2u64));
     }
 
-    // ── Paillier + Pedersen aux info tests ──────────────────────────────
-
-    #[test]
-    fn test_paillier_keypair_generated() {
-        let secret = Scalar::from(42u64);
-        let kp = generate_paillier_keypair(&secret, 1);
-        assert_eq!(kp.p.len(), 32);
-        assert_eq!(kp.q.len(), 32);
-        assert_eq!(kp.n.len(), 32);
-        // Different parties get different keys
-        let kp2 = generate_paillier_keypair(&secret, 2);
-        assert_ne!(kp.p, kp2.p);
-        assert_ne!(kp.q, kp2.q);
-    }
-
-    #[test]
-    fn test_pedersen_params_generated() {
-        let secret = Scalar::from(42u64);
-        let pp = generate_pedersen_params(&secret, 1);
-        assert_eq!(pp.s.len(), 32);
-        assert_eq!(pp.t.len(), 32);
-        assert_eq!(pp.n_hat.len(), 32);
-    }
-
     // ── Share data serialization test ───────────────────────────────────
 
     #[test]
@@ -2560,9 +2470,10 @@ mod tests {
         assert_eq!(restored.secret_share, vec![1u8; 32]);
         assert_eq!(restored.public_shares.len(), 2);
         assert_eq!(restored.group_public_key, vec![4u8; 33]);
-        assert!(!restored.paillier_sk.is_empty());
-        assert!(!restored.paillier_pk.is_empty());
-        assert!(!restored.pedersen_params.is_empty());
+        // Legacy fields preserved through serde roundtrip
+        assert_eq!(restored.paillier_sk, vec![5u8; 64]);
+        assert_eq!(restored.paillier_pk, vec![6u8; 32]);
+        assert_eq!(restored.pedersen_params, vec![7u8; 96]);
         // Optional fields should be None for old shares
         assert!(restored.real_paillier_sk.is_none());
         assert!(restored.real_paillier_pk.is_none());
@@ -2675,26 +2586,33 @@ mod tests {
                 assert_eq!(ps.len(), 33, "compressed SEC1 point is 33 bytes");
             }
 
-            // Paillier keys must be non-empty
-            assert!(!data.paillier_sk.is_empty(), "Paillier SK must exist");
-            assert!(!data.paillier_pk.is_empty(), "Paillier PK must exist");
-
-            // Pedersen params must be non-empty
+            // Legacy fields are now empty (simulated Paillier removed)
             assert!(
-                !data.pedersen_params.is_empty(),
-                "Pedersen params must exist"
+                data.paillier_sk.is_empty(),
+                "Legacy paillier_sk should be empty"
+            );
+            assert!(
+                data.paillier_pk.is_empty(),
+                "Legacy paillier_pk should be empty"
+            );
+            assert!(
+                data.pedersen_params.is_empty(),
+                "Legacy pedersen_params should be empty"
             );
 
-            // Verify Paillier SK can be deserialized
-            let (p, q): (Vec<u8>, Vec<u8>) = serde_json::from_slice(&data.paillier_sk).unwrap();
-            assert_eq!(p.len(), 32);
-            assert_eq!(q.len(), 32);
-
-            // Verify Pedersen params can be deserialized
-            let pp: PedersenParams = serde_json::from_slice(&data.pedersen_params).unwrap();
-            assert_eq!(pp.s.len(), 32);
-            assert_eq!(pp.t.len(), 32);
-            assert_eq!(pp.n_hat.len(), 32);
+            // Real Paillier keys must be present
+            assert!(
+                data.real_paillier_sk.is_some(),
+                "Real Paillier SK must exist"
+            );
+            assert!(
+                data.real_paillier_pk.is_some(),
+                "Real Paillier PK must exist"
+            );
+            assert!(
+                data.all_paillier_pks.is_some(),
+                "All Paillier PKs must exist"
+            );
         }
     }
 
@@ -3189,14 +3107,14 @@ mod tests {
             "secret shares must change after refresh"
         );
 
-        // Paillier and Pedersen aux info must have changed
-        assert_ne!(
-            old_data.paillier_sk, new_data.paillier_sk,
-            "Paillier SK must be refreshed"
+        // Real Paillier and Pedersen aux info must have been refreshed
+        assert!(
+            new_data.real_paillier_sk.is_some(),
+            "Refreshed share must have real Paillier SK"
         );
-        assert_ne!(
-            old_data.pedersen_params, new_data.pedersen_params,
-            "Pedersen params must be refreshed"
+        assert!(
+            new_data.real_pedersen_n_hat.is_some(),
+            "Refreshed share must have real Pedersen params"
         );
     }
 

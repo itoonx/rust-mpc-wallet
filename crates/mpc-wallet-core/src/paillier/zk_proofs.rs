@@ -982,6 +982,9 @@ pub struct PiAffgPublicInput {
     pub s: Vec<u8>,
     /// Pedersen base t.
     pub t: Vec<u8>,
+    /// EC public point X = x * G (compressed SEC1, 33 bytes).
+    /// Required for the B_x EC binding check (SEC-056 fix).
+    pub x_commitment: Vec<u8>,
     /// Session ID for Fiat-Shamir binding (prevents cross-session replay, CVE-2022-47930).
     pub session_id: Vec<u8>,
     /// Prover party index for Fiat-Shamir binding.
@@ -1029,8 +1032,14 @@ pub fn prove_piaffg(
     let enc_beta_full = (&enc_beta * &mu_n) % &n0_sq;
     let commitment_a = (&c_alpha * &enc_beta_full) % &n0_sq;
 
-    // Commitment B_x = alpha (we store the value; in EC version this would be alpha*G)
-    let commitment_bx = alpha.to_bytes_be();
+    // Commitment B_x = alpha * G on secp256k1 (SEC-056 fix: real EC point, not raw scalar)
+    let commitment_bx = {
+        use k256::elliptic_curve::group::GroupEncoding;
+        let alpha_scalar = biguint_to_k256_scalar(&alpha);
+        (k256::ProjectivePoint::GENERATOR * alpha_scalar)
+            .to_bytes()
+            .to_vec()
+    };
 
     // Commitment E = s^alpha * t^gamma mod N_hat
     let commitment_e = (s_base.modpow(&alpha, &n_hat) * t_base.modpow(&gamma, &n_hat)) % &n_hat;
@@ -1050,6 +1059,8 @@ pub fn prove_piaffg(
         &public.c,
         &public.d,
         &commitment_a,
+        &commitment_bx,
+        &public.x_commitment,
         &commitment_e,
         &commitment_f,
         &pedersen_sx,
@@ -1115,12 +1126,14 @@ pub fn verify_piaffg(proof: &PiAffgProof, public: &PiAffgPublicInput) -> bool {
     let z4 = SignedBigUint::from_bytes(&proof.z4);
     let w = BigUint::from_bytes_be(&proof.w);
 
-    // Recompute challenge (includes witness commitments for binding)
+    // Recompute challenge (includes witness commitments + EC binding for SEC-056)
     let e = piaffg_challenge(
         &public.pk_n0,
         &public.c,
         &public.d,
         &commitment_a,
+        &proof.commitment_bx,
+        &public.x_commitment,
         &commitment_e,
         &commitment_f,
         &pedersen_sx,
@@ -1179,6 +1192,27 @@ pub fn verify_piaffg(proof: &PiAffgProof, public: &PiAffgPublicInput) -> bool {
         return false;
     }
 
+    // Check 4 (SEC-056 fix): z1 * G == B_x + e * X on secp256k1
+    // This binds the Paillier plaintext x to the EC public point X = x * G.
+    {
+        use k256::elliptic_curve::group::GroupEncoding;
+        let z1_scalar = biguint_to_k256_scalar(z1_val);
+        let e_scalar = biguint_to_k256_scalar(&e);
+        let bx_point = match decode_sec1_point(&proof.commitment_bx) {
+            Some(p) => p,
+            None => return false,
+        };
+        let x_point = match decode_sec1_point(&public.x_commitment) {
+            Some(p) => p,
+            None => return false,
+        };
+        let lhs_ec = k256::ProjectivePoint::GENERATOR * z1_scalar;
+        let rhs_ec = bx_point + x_point * e_scalar;
+        if lhs_ec.to_bytes() != rhs_ec.to_bytes() {
+            return false;
+        }
+    }
+
     true
 }
 
@@ -1192,6 +1226,8 @@ fn piaffg_challenge(
     c: &[u8],
     d: &[u8],
     commitment_a: &BigUint,
+    commitment_bx: &[u8],
+    x_commitment: &[u8],
     commitment_e: &BigUint,
     commitment_f: &BigUint,
     pedersen_sx: &BigUint,
@@ -1201,13 +1237,15 @@ fn piaffg_challenge(
     prover_index: u16,
 ) -> BigUint {
     let mut hasher = Sha256::new();
-    hasher.update(b"piaffg-v2");
+    hasher.update(b"piaffg-v3");
     hash_update_lp(&mut hasher, session_id);
     hasher.update(prover_index.to_be_bytes());
     hash_update_lp(&mut hasher, pk_n0);
     hash_update_lp(&mut hasher, c);
     hash_update_lp(&mut hasher, d);
     hash_update_lp(&mut hasher, &commitment_a.to_bytes_be());
+    hash_update_lp(&mut hasher, commitment_bx);
+    hash_update_lp(&mut hasher, x_commitment);
     hash_update_lp(&mut hasher, &commitment_e.to_bytes_be());
     hash_update_lp(&mut hasher, &commitment_f.to_bytes_be());
     hash_update_lp(&mut hasher, &pedersen_sx.to_bytes_be());
@@ -2017,6 +2055,7 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            x_commitment: pilogstar_point_commitment(&x),
             session_id: b"test-session-id".to_vec(),
             prover_index: 1,
         };
@@ -2052,6 +2091,7 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            x_commitment: pilogstar_point_commitment(&x),
             session_id: b"test-session-id".to_vec(),
             prover_index: 1,
         };
@@ -2205,6 +2245,7 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            x_commitment: pilogstar_point_commitment(&b),
             session_id: b"test-session-id".to_vec(),
             prover_index: 1,
         };
@@ -2335,6 +2376,7 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            x_commitment: pilogstar_point_commitment(&x),
             session_id: b"test-session-id".to_vec(),
             prover_index: 1,
         };
@@ -2376,6 +2418,7 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            x_commitment: pilogstar_point_commitment(&x),
             session_id: b"test-session-id".to_vec(),
             prover_index: 1,
         };
@@ -2418,6 +2461,7 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            x_commitment: pilogstar_point_commitment(&x),
             session_id: b"test-session-id".to_vec(),
             prover_index: 1,
         };
@@ -2459,6 +2503,7 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            x_commitment: pilogstar_point_commitment(&x),
             session_id: b"test-session-id".to_vec(),
             prover_index: 1,
         };

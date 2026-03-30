@@ -1082,6 +1082,7 @@ async fn distributed_sign_mta(
                 n_hat: ped_n_hat.clone(),
                 s: ped_s.clone(),
                 t: ped_t.clone(),
+                x_commitment: gamma_point_bytes.clone(),
                 session_id: key_share.group_public_key.as_bytes().to_vec(),
                 prover_index: my_index,
             },
@@ -1089,6 +1090,9 @@ async fn distributed_sign_mta(
 
         let beta_c = BigUint::from_bytes_be(&mta_w_chi.result.beta);
         let rho_c = BigUint::from_bytes_be(&mta_w_chi.rho_y);
+        let x_i_add_point = crate::paillier::zk_proofs::pilogstar_point_commitment(
+            &BigUint::from_bytes_be(&x_i_add_bytes),
+        );
         let pi_affg_c = crate::paillier::zk_proofs::prove_piaffg(
             &BigUint::from_bytes_be(&x_i_add_bytes),
             &beta_c,
@@ -1101,6 +1105,7 @@ async fn distributed_sign_mta(
                 n_hat: ped_n_hat.clone(),
                 s: ped_s.clone(),
                 t: ped_t.clone(),
+                x_commitment: x_i_add_point.clone(),
                 session_id: key_share.group_public_key.as_bytes().to_vec(),
                 prover_index: my_index,
             },
@@ -1119,6 +1124,8 @@ async fn distributed_sign_mta(
             "chi_ct": serde_json::to_value(&mta_w_chi.result.ciphertext).unwrap(),
             "pi_affg_delta": serde_json::to_value(&pi_affg_d).unwrap(),
             "pi_affg_chi": serde_json::to_value(&pi_affg_c).unwrap(),
+            "gamma_point": gamma_point_bytes,
+            "x_i_add_point": x_i_add_point,
         });
         let payload =
             serde_json::to_vec(&response).map_err(|e| CoreError::Serialization(e.to_string()))?;
@@ -1188,6 +1195,14 @@ async fn distributed_sign_mta(
         let pi_d: crate::paillier::zk_proofs::PiAffgProof =
             serde_json::from_value(pi_d_val.clone())
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        // Extract peer's Gamma_j point (gamma_j * G) from round 3 message
+        let peer_gamma_point: Vec<u8> =
+            serde_json::from_value(r3["gamma_point"].clone()).map_err(|e| {
+                CoreError::Protocol(format!(
+                    "missing gamma_point from party {} for Πaff-g delta verification: {}",
+                    peer_idx, e
+                ))
+            })?;
         let verify_pub_d = PiAffgPublicInput {
             pk_n0: my_pk.n.clone(),
             pk_n0_squared: my_pk.n_squared.clone(),
@@ -1196,6 +1211,7 @@ async fn distributed_sign_mta(
             n_hat: ped_n_hat.clone(),
             s: ped_s.clone(),
             t: ped_t.clone(),
+            x_commitment: peer_gamma_point,
             session_id: key_share.group_public_key.as_bytes().to_vec(),
             prover_index: peer_idx,
         };
@@ -1216,6 +1232,14 @@ async fn distributed_sign_mta(
         let pi_c: crate::paillier::zk_proofs::PiAffgProof =
             serde_json::from_value(pi_c_val.clone())
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
+        // Extract peer's X_j point (x_j_add * G) from round 3 message
+        let peer_x_i_add_point: Vec<u8> = serde_json::from_value(r3["x_i_add_point"].clone())
+            .map_err(|e| {
+                CoreError::Protocol(format!(
+                    "missing x_i_add_point from party {} for Πaff-g chi verification: {}",
+                    peer_idx, e
+                ))
+            })?;
         let verify_pub_c = PiAffgPublicInput {
             pk_n0: my_pk.n.clone(),
             pk_n0_squared: my_pk.n_squared.clone(),
@@ -1224,6 +1248,7 @@ async fn distributed_sign_mta(
             n_hat: ped_n_hat.clone(),
             s: ped_s.clone(),
             t: ped_t.clone(),
+            x_commitment: peer_x_i_add_point,
             session_id: key_share.group_public_key.as_bytes().to_vec(),
             prover_index: peer_idx,
         };
