@@ -15,7 +15,11 @@
 
 use ed25519_dalek::SigningKey;
 use rand::RngCore;
-use std::{fs, path::{Path, PathBuf}, process};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process,
+};
 
 fn generate_keypair(dir: &Path, seed_name: &str, pub_name: &str) -> (String, String) {
     let seed_path = dir.join(seed_name);
