@@ -499,17 +499,13 @@ pub fn jacobi_symbol(a: &BigUint, n: &BigUint) -> i32 {
 
 /// Pifac proof: proves N has no prime factor smaller than 2^256.
 ///
-/// Uses a hash-based commitment + trial division verification approach:
-/// 1. Prover commits to the factorization using SHA-256 hash
-/// 2. Prover provides the bit lengths of both factors
-/// 3. Prover provides Nth root computations that demonstrate
+/// Uses deterministic Fiat-Shamir challenges + trial division verification:
+/// 1. Prover provides the bit lengths of both factors
+/// 2. Prover provides Nth root computations that demonstrate
 ///    knowledge of factorization with large factors
+/// 3. Challenges are derived deterministically from N and round index
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PifacProof {
-    /// Commitment: H(N || p || q || nonce)
-    pub commitment: Vec<u8>,
-    /// Nonce used in commitment.
-    pub nonce: Vec<u8>,
     /// Bit length of factor p.
     pub p_bits: u64,
     /// Bit length of factor q.
@@ -535,19 +531,6 @@ const PIFAC_ROUNDS: usize = 40;
 /// 1. Knowledge of factorization via Nth root computations
 /// 2. Both factors are at least 256 bits
 pub fn prove_pifac(n: &BigUint, p: &BigUint, q: &BigUint) -> PifacProof {
-    // Generate commitment nonce
-    let mut nonce = vec![0u8; 32];
-    OsRng.fill_bytes(&mut nonce);
-
-    // Commitment = H(N || p || q || nonce) with length-prefixed encoding (CVE-2022-47931)
-    let mut hasher = Sha256::new();
-    hasher.update(b"pifac-commit-v2");
-    hash_update_lp(&mut hasher, &n.to_bytes_be());
-    hash_update_lp(&mut hasher, &p.to_bytes_be());
-    hash_update_lp(&mut hasher, &q.to_bytes_be());
-    hash_update_lp(&mut hasher, &nonce);
-    let commitment = hasher.finalize().to_vec();
-
     let p_bits = p.bits();
     let q_bits = q.bits();
 
@@ -564,11 +547,11 @@ pub fn prove_pifac(n: &BigUint, p: &BigUint, q: &BigUint) -> PifacProof {
     let mut nth_root_proofs = Vec::with_capacity(PIFAC_ROUNDS);
 
     for i in 0..PIFAC_ROUNDS {
-        // Derive challenge x_i from commitment and round index
+        // Derive challenge x_i deterministically from N and round index
         let mut hasher = Sha256::new();
-        hasher.update(&commitment);
+        hasher.update(b"pifac-challenge-v3");
+        hash_update_lp(&mut hasher, &n.to_bytes_be());
         hasher.update((i as u64).to_le_bytes());
-        hasher.update(b"pifac-challenge-v2");
         let hash = hasher.finalize();
 
         let x = BigUint::from_bytes_be(&hash) % n;
@@ -597,8 +580,6 @@ pub fn prove_pifac(n: &BigUint, p: &BigUint, q: &BigUint) -> PifacProof {
     }
 
     PifacProof {
-        commitment,
-        nonce,
         p_bits,
         q_bits,
         nth_root_proofs,
@@ -643,12 +624,12 @@ pub fn verify_pifac(n: &BigUint, proof: &PifacProof) -> bool {
         return false;
     }
 
-    // Recompute challenge values from commitment
+    // Recompute challenge values deterministically from N and round index
     for (i, round) in proof.nth_root_proofs.iter().enumerate() {
         let mut hasher = Sha256::new();
-        hasher.update(&proof.commitment);
+        hasher.update(b"pifac-challenge-v3");
+        hash_update_lp(&mut hasher, &n.to_bytes_be());
         hasher.update((i as u64).to_le_bytes());
-        hasher.update(b"pifac-challenge-v2");
         let hash = hasher.finalize();
 
         let expected_x = BigUint::from_bytes_be(&hash) % n;
@@ -1755,8 +1736,6 @@ mod tests {
         // The verifier must reject this N regardless of what proof is presented
         // because trial division will find the small factors
         let fake_proof = PifacProof {
-            commitment: vec![0u8; 32],
-            nonce: vec![0u8; 32],
             p_bits: 300,
             q_bits: 300,
             // Wrong number of rounds will also fail, but the small factor check is the key defense
@@ -1858,14 +1837,22 @@ mod tests {
         let p = BigUint::from_bytes_be(&sk.p);
         let q = BigUint::from_bytes_be(&sk.q);
 
+        // Tamper with an Nth root proof round (corrupt the a value)
         let mut proof = prove_pifac(&n, &p, &q);
-
-        // Corrupt the commitment field — this will invalidate all challenge values
-        proof.commitment = vec![0xFFu8; 32];
+        proof.nth_root_proofs[0].a = vec![0xFFu8; 32];
 
         assert!(
             !verify_pifac(&n, &proof),
-            "Pifac proof with tampered commitment must be rejected"
+            "Pifac proof with tampered Nth root must be rejected"
+        );
+
+        // Tamper with N itself (verify against a different modulus)
+        let proof = prove_pifac(&n, &p, &q);
+        let wrong_n = &n + BigUint::from(2u64);
+
+        assert!(
+            !verify_pifac(&wrong_n, &proof),
+            "Pifac proof verified against wrong N must be rejected"
         );
     }
 

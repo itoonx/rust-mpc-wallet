@@ -337,6 +337,70 @@ impl PreSignatureStore for InMemoryPreSignatureStore {
     }
 }
 
+/// SEC-037: File-backed pre-signature store for crash-safe nonce reuse protection.
+///
+/// Each used presig ID is appended to a log file with fsync. On startup, the
+/// file is loaded to reconstruct the used set. This ensures that even if the
+/// process crashes after `mark_used` but before signing completes, the presig
+/// cannot be replayed on restart.
+pub struct FilePreSignatureStore {
+    used_ids: Mutex<HashSet<String>>,
+    file_path: std::path::PathBuf,
+}
+
+impl FilePreSignatureStore {
+    /// Create or open a file-backed store at `dir/used_presigs.log`.
+    pub fn new(dir: &std::path::Path) -> Result<Self, CoreError> {
+        let file_path = dir.join("used_presigs.log");
+        let mut used_ids = HashSet::new();
+        if file_path.exists() {
+            let content = std::fs::read_to_string(&file_path)
+                .map_err(|e| CoreError::KeyStore(format!("read presig log: {e}")))?;
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    used_ids.insert(trimmed.to_string());
+                }
+            }
+        }
+        Ok(Self {
+            used_ids: Mutex::new(used_ids),
+            file_path,
+        })
+    }
+}
+
+impl PreSignatureStore for FilePreSignatureStore {
+    fn mark_used(&self, pre_sig_id: &str) -> Result<(), CoreError> {
+        let mut set = self.used_ids.lock().unwrap();
+        if set.contains(pre_sig_id) {
+            return Err(CoreError::Protocol(
+                "pre-signature already used — nonce reuse would leak private key (SEC-037)".into(),
+            ));
+        }
+        // Write to file FIRST with fsync — crash-safe before updating in-memory
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.file_path)
+            .map_err(|e| CoreError::KeyStore(format!("open presig log: {e}")))?;
+        writeln!(file, "{}", pre_sig_id)
+            .map_err(|e| CoreError::KeyStore(format!("write presig log: {e}")))?;
+        file.sync_all()
+            .map_err(|e| CoreError::KeyStore(format!("fsync presig log: {e}")))?;
+        set.insert(pre_sig_id.to_string());
+        Ok(())
+    }
+
+    fn is_used(&self, pre_sig_id: &str) -> bool {
+        self.used_ids
+            .lock()
+            .map(|s| s.contains(pre_sig_id))
+            .unwrap_or(true) // safe default on poisoned mutex
+    }
+}
+
 /// Round 1 message for pre-signing: broadcast K_i and Gamma_i with Schnorr proofs.
 #[derive(Serialize, Deserialize)]
 struct PreSignRound1 {
@@ -3602,8 +3666,6 @@ mod tests {
 
         // Create a Pifac proof with wrong bit sizes (simulating a bad key with small factors)
         let bad_proof = PifacProof {
-            commitment: vec![0u8; 32],
-            nonce: vec![0u8; 32],
             p_bits: 64, // Too small! Must be >= 256 bits
             q_bits: 64,
             nth_root_proofs: vec![NthRootProofRound {
@@ -3924,5 +3986,33 @@ mod tests {
         assert!(validate_paillier_bits(512).is_ok());
         assert!(validate_paillier_bits(1024).is_ok());
         assert!(validate_paillier_bits(2048).is_ok());
+    }
+
+    // ── SEC-037: FilePreSignatureStore crash-safe nonce reuse protection ──
+
+    #[test]
+    fn test_file_presignature_store_crash_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilePreSignatureStore::new(dir.path()).unwrap();
+
+        // Mark a presig as used
+        store.mark_used("presig-001").unwrap();
+        assert!(store.is_used("presig-001"));
+        assert!(!store.is_used("presig-002"));
+
+        // Duplicate should fail
+        assert!(store.mark_used("presig-001").is_err());
+
+        // "Crash" — drop the store, reload from file
+        drop(store);
+        let store2 = FilePreSignatureStore::new(dir.path()).unwrap();
+
+        // Must still be marked as used after reload
+        assert!(store2.is_used("presig-001"), "presig must survive restart");
+        assert!(!store2.is_used("presig-002"));
+
+        // Can mark new ones
+        store2.mark_used("presig-002").unwrap();
+        assert!(store2.is_used("presig-002"));
     }
 }
