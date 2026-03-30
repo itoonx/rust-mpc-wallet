@@ -17,8 +17,10 @@
 
 mod rpc;
 
+use std::collections::HashMap as StdHashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ed25519_dalek::SigningKey;
 use tokio::sync::Mutex;
@@ -37,6 +39,9 @@ use rpc::*;
 
 /// Default max entries for authorization replay cache.
 const DEFAULT_AUTH_CACHE_MAX_ENTRIES: usize = 10_000;
+
+/// Minimum interval between requests for the same group_id (SEC-030/031).
+const MIN_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Initialize structured logging with optional JSON format.
 ///
@@ -237,6 +242,9 @@ async fn handle_keygen_requests(
 ) {
     use futures::StreamExt;
 
+    // SEC-030: per-group-id rate limiter to prevent request flooding
+    let mut last_request: StdHashMap<String, Instant> = StdHashMap::new();
+
     while let Some(msg) = sub.next().await {
         // SEC-026: Verify signed control message before processing
         let inner_payload = match unwrap_signed_message(&msg.payload, &config.gateway_pubkey) {
@@ -254,6 +262,18 @@ async fn handle_keygen_requests(
                 continue;
             }
         };
+
+        // SEC-030: Rate limit per group_id
+        if let Some(last) = last_request.get(&req.group_id) {
+            if last.elapsed() < MIN_REQUEST_INTERVAL {
+                tracing::warn!(
+                    group_id = %req.group_id,
+                    "rate limited: keygen request too soon (SEC-030)"
+                );
+                continue;
+            }
+        }
+        last_request.insert(req.group_id.clone(), Instant::now());
 
         tracing::info!(
             group_id = %req.group_id,
@@ -431,6 +451,9 @@ async fn handle_sign_requests(
 ) {
     use futures::StreamExt;
 
+    // SEC-031: per-group-id rate limiter to prevent request flooding
+    let mut last_request: StdHashMap<String, Instant> = StdHashMap::new();
+
     while let Some(msg) = sub.next().await {
         // SEC-026: Verify signed control message before processing
         let inner_payload = match unwrap_signed_message(&msg.payload, &config.gateway_pubkey) {
@@ -453,6 +476,18 @@ async fn handle_sign_requests(
         if !req.signer_ids.contains(&config.party_id.0) {
             continue;
         }
+
+        // SEC-031: Rate limit per group_id
+        if let Some(last) = last_request.get(&req.group_id) {
+            if last.elapsed() < MIN_REQUEST_INTERVAL {
+                tracing::warn!(
+                    group_id = %req.group_id,
+                    "rate limited: sign request too soon (SEC-031)"
+                );
+                continue;
+            }
+        }
+        last_request.insert(req.group_id.clone(), Instant::now());
 
         tracing::info!(
             group_id = %req.group_id,

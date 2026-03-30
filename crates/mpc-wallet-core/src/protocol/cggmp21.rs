@@ -257,6 +257,11 @@ pub struct PreSignature {
     #[zeroize(skip)]
     #[serde(default)]
     pub k_points: Vec<(u16, Vec<u8>)>,
+    /// Chi_i points per signer: (party_index, Chi_i = chi_i * G compressed SEC1 33 bytes).
+    /// Used in full CGGMP21 identifiable abort check: sigma_i * G == e * K_i + r * Chi_i.
+    #[zeroize(skip)]
+    #[serde(default)]
+    pub chi_points: Vec<(u16, Vec<u8>)>,
     /// Whether this pre-signature has been consumed (nonce reuse protection).
     #[zeroize(skip)]
     pub used: bool,
@@ -1172,7 +1177,12 @@ async fn cggmp21_pre_sign(
         && share_data.real_paillier_sk.is_some()
         && share_data.all_paillier_pks.is_some();
 
-    let (delta, chi_i_scalar): (Scalar, Zeroizing<Scalar>) = if has_real_paillier {
+    #[allow(clippy::type_complexity)]
+    let (delta, chi_i_scalar, chi_broadcast_collected): (
+        Scalar,
+        Zeroizing<Scalar>,
+        Vec<(u16, Vec<u8>)>,
+    ) = if has_real_paillier {
         // ── Real Paillier MtA (Sprint 28) ──────────────────────────────
         // Each party i: encrypt k_i under their own Paillier key, broadcast
         // Enc(k_i). Then for each pair (i,j), run MtA to compute additive
@@ -1605,10 +1615,22 @@ async fn cggmp21_pre_sign(
         // ── Per-round sync barrier (L-012 fix): ensure all MtA round 2 complete
         transport.wait_ready().await?;
 
-        // Broadcast delta_i for aggregation (as Scalar bytes, 32 bytes)
+        // Compute Chi_i = chi_i * G for identifiable abort broadcast
+        let chi_i_point = {
+            let chi_proj = ProjectivePoint::GENERATOR * chi_scalar;
+            let chi_affine = chi_proj.to_affine();
+            k256::PublicKey::from_affine(chi_affine)
+                .map_err(|e| CoreError::Crypto(format!("invalid Chi_i point: {e}")))?
+                .to_encoded_point(true)
+                .as_bytes()
+                .to_vec()
+        };
+
+        // Broadcast delta_i + Chi_i for aggregation (round 13)
         let delta_broadcast = serde_json::json!({
             "party_index": my_index,
             "delta_i": delta_scalar.to_repr().as_slice(),
+            "chi_i_point": chi_i_point,
         });
         let delta_payload = serde_json::to_vec(&delta_broadcast)
             .map_err(|e| CoreError::Serialization(e.to_string()))?;
@@ -1621,8 +1643,9 @@ async fn cggmp21_pre_sign(
             })
             .await?;
 
-        // Collect all delta_i and sum as Scalars
+        // Collect all delta_i (+ Chi_i points) and sum deltas as Scalars
         let mut delta_sum = delta_scalar;
+        let mut chi_broadcast_collected: Vec<(u16, Vec<u8>)> = vec![(my_index, chi_i_point)];
         for _ in 1..n_signers {
             let msg = transport.recv().await?;
             let dv: serde_json::Value = serde_json::from_slice(&msg.payload)
@@ -1633,9 +1656,24 @@ async fn cggmp21_pre_sign(
                 .into_option()
                 .ok_or_else(|| CoreError::Crypto("invalid delta_i scalar".into()))?;
             delta_sum += d_scalar;
-        }
 
-        (delta_sum, Zeroizing::new(chi_scalar))
+            // Collect Chi_i point from peer (backward-compatible: default to empty if absent)
+            let peer_idx = dv["party_index"].as_u64().unwrap_or(0) as u16;
+            if let Some(chi_val) = dv.get("chi_i_point") {
+                if let Ok(chi_bytes) = serde_json::from_value::<Vec<u8>>(chi_val.clone()) {
+                    if !chi_bytes.is_empty() {
+                        chi_broadcast_collected.push((peer_idx, chi_bytes));
+                    }
+                }
+            }
+        }
+        chi_broadcast_collected.sort_by_key(|(idx, _)| *idx);
+
+        (
+            delta_sum,
+            Zeroizing::new(chi_scalar),
+            chi_broadcast_collected,
+        )
     } else {
         // Sprint 28: Legacy shares without real Paillier keys are unconditionally rejected.
         // No simulated MtA fallback — even in test builds. All keygen paths now generate
@@ -1676,6 +1714,7 @@ async fn cggmp21_pre_sign(
         party_id: my_party_id,
         signers: signers.to_vec(),
         k_points,
+        chi_points: chi_broadcast_collected,
         used: false,
     })
 }
@@ -1836,6 +1875,7 @@ async fn cggmp21_sign_online_with_store(
         return Err(identify_cheater(
             &all_sigmas,
             &pre_sig.k_points,
+            &pre_sig.chi_points,
             e_scalar,
             r_scalar,
         ));
@@ -1864,25 +1904,29 @@ async fn cggmp21_sign_online_with_store(
 
 /// Attempt to identify which party provided an invalid partial signature.
 ///
-/// SEC-035: With K_i points stored from pre-signing, we can verify each party's
-/// sigma_i against its nonce commitment. The check is:
-///   sigma_i * G should be consistent with the party's K_i (nonce point).
+/// SEC-035: Full CGGMP21 identifiable abort check using K_i and Chi_i points.
+/// For each party, verifies: `sigma_i * G == e * K_i + r * Chi_i`
+/// where e = H(message) and r = x-coordinate of R.
 ///
-/// Full CGGMP21 check requires Chi_i = chi_i * G per party (not available without
-/// an extra broadcast round). We use K_i to detect obviously wrong contributions:
-///   If sigma_i == 0 → cheater (trivial)
-///   If K_i is provided, verify sigma_i * G is on the curve and non-identity.
+/// If Chi_i points are not available (backward compat with old pre-signatures),
+/// falls back to basic checks (zero sigma, malformed K_i).
 fn identify_cheater(
     all_sigmas: &[(u16, Scalar)],
     k_points: &[(u16, Vec<u8>)],
-    _e_scalar: Scalar,
-    _r_scalar: Scalar,
+    chi_points: &[(u16, Vec<u8>)],
+    e_scalar: Scalar,
+    r_scalar: Scalar,
 ) -> CoreError {
     use k256::elliptic_curve::group::GroupEncoding;
+    use k256::elliptic_curve::sec1::FromEncodedPoint;
 
-    // Build lookup: party_index → K_i point
+    // Build lookups: party_index -> point bytes
     let k_point_map: std::collections::HashMap<u16, &Vec<u8>> =
         k_points.iter().map(|(idx, kp)| (*idx, kp)).collect();
+    let chi_point_map: std::collections::HashMap<u16, &Vec<u8>> =
+        chi_points.iter().map(|(idx, cp)| (*idx, cp)).collect();
+
+    let have_chi_points = !chi_points.is_empty();
 
     for &(party_idx, sigma_i) in all_sigmas {
         // Check 1: zero sigma is always invalid
@@ -1893,11 +1937,9 @@ fn identify_cheater(
             ));
         }
 
-        // Check 2: if K_i is available, verify sigma_i * G is a valid non-identity point
-        // and that K_i itself is a valid curve point (malformed K_i = cheater)
+        // Check 2: validate K_i is a valid curve point
         if let Some(k_bytes) = k_point_map.get(&party_idx) {
-            use k256::elliptic_curve::sec1::FromEncodedPoint;
-            let encoded = match k256::EncodedPoint::from_bytes(k_bytes) {
+            let k_encoded = match k256::EncodedPoint::from_bytes(k_bytes) {
                 Ok(e) => e,
                 Err(_) => {
                     return CoreError::Protocol(format!(
@@ -1907,13 +1949,14 @@ fn identify_cheater(
                 }
             };
             let k_affine: Option<k256::AffinePoint> =
-                k256::AffinePoint::from_encoded_point(&encoded).into();
+                k256::AffinePoint::from_encoded_point(&k_encoded).into();
             if k_affine.is_none() {
                 return CoreError::Protocol(format!(
                     "identifiable abort: party {} cheated: K_i is not on the curve",
                     party_idx
                 ));
             }
+            let k_proj: ProjectivePoint = k_affine.unwrap().into();
 
             // Verify sigma_i * G is not the identity (point at infinity)
             let sigma_point = ProjectivePoint::GENERATOR * sigma_i;
@@ -1923,13 +1966,53 @@ fn identify_cheater(
                     party_idx
                 ));
             }
+
+            // Check 3: Full CGGMP21 abort check if Chi_i is available
+            // Verify: sigma_i * G == e * K_i + r * Chi_i
+            if let Some(chi_bytes) = chi_point_map.get(&party_idx) {
+                let chi_encoded = match k256::EncodedPoint::from_bytes(chi_bytes) {
+                    Ok(e) => e,
+                    Err(_) => {
+                        return CoreError::Protocol(format!(
+                            "identifiable abort: party {} cheated: invalid Chi_i encoding",
+                            party_idx
+                        ));
+                    }
+                };
+                let chi_affine: Option<k256::AffinePoint> =
+                    k256::AffinePoint::from_encoded_point(&chi_encoded).into();
+                if chi_affine.is_none() {
+                    return CoreError::Protocol(format!(
+                        "identifiable abort: party {} cheated: Chi_i is not on the curve",
+                        party_idx
+                    ));
+                }
+                let chi_proj: ProjectivePoint = chi_affine.unwrap().into();
+
+                // sigma_i * G == e * K_i + r * Chi_i
+                let expected: ProjectivePoint = k_proj * e_scalar + chi_proj * r_scalar;
+                if sigma_point != expected {
+                    return CoreError::Protocol(format!(
+                        "identifiable abort: party {} cheated: sigma_i * G != e * K_i + r * Chi_i",
+                        party_idx
+                    ));
+                }
+            }
         }
     }
 
-    // Cannot pinpoint exact cheater without Chi_i points — report generic failure
-    CoreError::Protocol(
-        "identifiable abort: final signature verification failed — at least one party submitted invalid partial signature (K_i validation passed for all parties)".into(),
-    )
+    // If we have Chi_i points but couldn't pinpoint, all individual checks passed
+    // but the aggregate still failed -- possible Chi_i broadcast mismatch.
+    if have_chi_points {
+        CoreError::Protocol(
+            "identifiable abort: final signature verification failed — all individual sigma_i * G == e * K_i + r * Chi_i checks passed but aggregate is invalid".into(),
+        )
+    } else {
+        // Fallback without Chi_i points -- cannot pinpoint exact cheater
+        CoreError::Protocol(
+            "identifiable abort: final signature verification failed — at least one party submitted invalid partial signature (Chi_i points unavailable for full check)".into(),
+        )
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2770,6 +2853,7 @@ mod tests {
                     party_id: PartyId(0),
                     signers: vec![],
                     k_points: vec![],
+                    chi_points: vec![],
                     used: true,
                 },
             );
@@ -3016,7 +3100,8 @@ mod tests {
         };
 
         let k_points: Vec<(u16, Vec<u8>)> = vec![];
-        let err = identify_cheater(&all_sigmas, &k_points, e_scalar, r_scalar);
+        let chi_points: Vec<(u16, Vec<u8>)> = vec![];
+        let err = identify_cheater(&all_sigmas, &k_points, &chi_points, e_scalar, r_scalar);
         let err_msg = err.to_string();
         assert!(
             err_msg.contains("identifiable abort"),
@@ -3625,6 +3710,7 @@ mod tests {
             party_id: PartyId(1),
             signers: vec![PartyId(1), PartyId(2)],
             k_points: vec![],
+            chi_points: vec![],
             used: false,
         };
         let ps2 = PreSignature {
@@ -3636,6 +3722,7 @@ mod tests {
             party_id: PartyId(2),
             signers: vec![PartyId(1), PartyId(2)],
             k_points: vec![],
+            chi_points: vec![],
             used: false,
         };
 
@@ -3695,6 +3782,7 @@ mod tests {
             party_id: PartyId(1),
             signers: vec![PartyId(1), PartyId(2)],
             k_points: vec![],
+            chi_points: vec![],
             used: false, // in-memory flag says "not used" — simulating post-crash state
         };
 

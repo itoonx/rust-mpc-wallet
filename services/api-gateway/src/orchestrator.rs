@@ -81,23 +81,6 @@ impl MpcOrchestrator {
         self.nats.is_some()
     }
 
-    /// Create an orchestrator connected to NATS (production).
-    pub async fn connect(nats_url: &str) -> Result<Self, mpc_wallet_core::error::CoreError> {
-        let nats = async_nats::connect(nats_url).await.map_err(|e| {
-            mpc_wallet_core::error::CoreError::Transport(format!("NATS connect: {e}"))
-        })?;
-
-        tracing::info!(url = %nats_url, "MPC orchestrator connected to NATS");
-
-        Ok(Self {
-            nats: Some(Arc::new(nats)),
-            wallets: Arc::new(RwLock::new(HashMap::new())),
-            ceremony_timeout: Duration::from_secs(60),
-            signing_key: None,
-            node_verifying_keys: Vec::new(),
-        })
-    }
-
     /// Create an orchestrator connected to NATS with an Ed25519 signing key (SEC-026).
     ///
     /// All control plane messages (keygen/sign/freeze) will be signed with this key.

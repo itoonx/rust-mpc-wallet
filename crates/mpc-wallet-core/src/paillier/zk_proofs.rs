@@ -625,6 +625,13 @@ pub fn verify_pifac(n: &BigUint, proof: &PifacProof) -> bool {
         return false;
     }
 
+    // SEC-059: Cross-check declared factor sizes against N
+    // p_bits + q_bits should be approximately N.bits() (within 2 bits tolerance)
+    let n_bits = n.bits();
+    if proof.p_bits + proof.q_bits < n_bits.saturating_sub(2) {
+        return false;
+    }
+
     // Trial division: reject N with any small prime factor
     // This catches the CVE-2023-33241 attack where attacker uses small primes
     if has_small_factor(n) {
@@ -1511,7 +1518,8 @@ fn pilogstar_challenge(
 /// Sample a random value in [1, bound).
 fn sample_below(bound: &BigUint) -> BigUint {
     let byte_len = (bound.bits() as usize).div_ceil(8) + 1;
-    let mut buf = vec![0u8; byte_len];
+    // SEC-061: Wrap random buffer in Zeroizing to clear from memory on drop.
+    let mut buf = zeroize::Zeroizing::new(vec![0u8; byte_len]);
     loop {
         OsRng.fill_bytes(&mut buf);
         let r = BigUint::from_bytes_be(&buf) % bound;

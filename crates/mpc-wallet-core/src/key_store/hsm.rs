@@ -192,7 +192,7 @@ impl DekCache {
         let mut entries = self.entries.lock().unwrap();
         if let Some(entry) = entries.get(group_id) {
             if entry.inserted_at.elapsed() < self.ttl {
-                return Some(Zeroizing::new(*entry.dek));
+                return Some(entry.dek.clone());
             }
             // Expired — remove it
             entries.remove(group_id);
@@ -259,11 +259,22 @@ impl Default for DekCache {
 #[cfg(feature = "aws-kms")]
 pub struct KmsKeyEncryption {
     /// KMS key ARN or alias (e.g., `arn:aws:kms:us-east-1:123456:key/...`).
-    pub key_arn: String,
+    /// Private to prevent accidental logging of sensitive ARN.
+    key_arn: String,
     /// AWS region (e.g., `us-east-1`).
     pub region: String,
     /// Local DEK cache to reduce KMS API calls.
     pub cache: DekCache,
+}
+
+#[cfg(feature = "aws-kms")]
+impl std::fmt::Debug for KmsKeyEncryption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KmsKeyEncryption")
+            .field("key_arn", &"[REDACTED]")
+            .field("region", &self.region)
+            .finish()
+    }
 }
 
 #[cfg(feature = "aws-kms")]
