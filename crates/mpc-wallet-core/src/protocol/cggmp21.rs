@@ -1690,11 +1690,16 @@ async fn cggmp21_pre_sign(
                 .to_vec()
         };
 
-        // Broadcast delta_i + Chi_i for aggregation (round 13)
+        // Schnorr proof of knowledge for Chi_i (prevents framing in identifiable abort)
+        let (chi_schnorr_r, chi_schnorr_s) = schnorr_prove(&chi_scalar, &chi_i_point, my_index);
+
+        // Broadcast delta_i + Chi_i + Schnorr PoK for aggregation (round 13)
         let delta_broadcast = serde_json::json!({
             "party_index": my_index,
             "delta_i": delta_scalar.to_repr().as_slice(),
             "chi_i_point": chi_i_point,
+            "chi_schnorr_r": chi_schnorr_r,
+            "chi_schnorr_s": chi_schnorr_s,
         });
         let delta_payload = serde_json::to_vec(&delta_broadcast)
             .map_err(|e| CoreError::Serialization(e.to_string()))?;
@@ -1721,11 +1726,33 @@ async fn cggmp21_pre_sign(
                 .ok_or_else(|| CoreError::Crypto("invalid delta_i scalar".into()))?;
             delta_sum += d_scalar;
 
-            // Collect Chi_i point from peer (backward-compatible: default to empty if absent)
+            // Collect Chi_i point from peer and verify Schnorr PoK
             let peer_idx = dv["party_index"].as_u64().unwrap_or(0) as u16;
             if let Some(chi_val) = dv.get("chi_i_point") {
                 if let Ok(chi_bytes) = serde_json::from_value::<Vec<u8>>(chi_val.clone()) {
                     if !chi_bytes.is_empty() {
+                        // Extract and verify mandatory Schnorr proof for Chi_i
+                        let chi_r: Vec<u8> = serde_json::from_value(
+                            dv.get("chi_schnorr_r").cloned().unwrap_or_default(),
+                        )
+                        .unwrap_or_default();
+                        let chi_s: Vec<u8> = serde_json::from_value(
+                            dv.get("chi_schnorr_s").cloned().unwrap_or_default(),
+                        )
+                        .unwrap_or_default();
+                        if chi_r.is_empty() || chi_s.is_empty() {
+                            return Err(CoreError::Protocol(format!(
+                                "identifiable abort: party {} missing Chi_i Schnorr proof",
+                                peer_idx
+                            )));
+                        }
+                        if !schnorr_verify(&chi_bytes, &chi_r, &chi_s, peer_idx)? {
+                            return Err(CoreError::Protocol(format!(
+                                "identifiable abort: party {} failed Chi_i Schnorr proof \
+                                 — cannot trust chi_i_point",
+                                peer_idx
+                            )));
+                        }
                         chi_broadcast_collected.push((peer_idx, chi_bytes));
                     }
                 }

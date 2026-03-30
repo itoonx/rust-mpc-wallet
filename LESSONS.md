@@ -783,3 +783,11 @@ Sprint 29 deep audit confirmed: SEC-055 has ped_lhs != ped_rhs check at line 897
 > R6 finding descriptions can be misleading. Always read the actual verification code before
 > treating a finding as actionable. A "discarded" result may have been wired in since the
 > finding was filed.
+
+### LESSON-023 — GG20 distributed_sign_mta has NO coordinator trust issue (Sprint 30 analysis)
+
+**Finding:** GG20's `distributed_sign_mta` was listed as having a "coordinator nonce trust" risk (SEC-024). Sprint 30 deep analysis confirmed this was actually about the OLD `distributed_sign` function (deleted in Sprint 30b). The current MtA path generates k_i per-party from independent OsRng, computes R fully distributed (every party aggregates locally), and requires mandatory Pienc + PiLogstar + PiAffg proofs. No single-party trust assumption exists.
+
+**Root Cause:** SEC-024 was filed against the legacy `distributed_sign` function where Party 1 alone generated k and broadcast k_inv. After Sprint 28b switched the dispatch to `distributed_sign_mta`, the finding became stale but wasn't re-verified.
+
+**Lesson:** When a finding names a specific function, always check if that function is still in the call path. A finding against dead code is not a finding against the active system.

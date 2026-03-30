@@ -83,6 +83,7 @@ num-bigint = "0.4"
 num-traits = "0.2"
 num-integer = "0.1"
 num-modular = "0.6"
+starknet-crypto = "0.8"
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 thiserror = "2"
