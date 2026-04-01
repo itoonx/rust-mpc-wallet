@@ -1,7 +1,8 @@
 //! Vaultex Performance Benchmarks
 //!
 //! Measures latency for all critical MPC operations:
-//! - Protocol: keygen, sign, refresh (GG20, FROST Ed25519, FROST Secp256k1)
+//! - Protocol: keygen, sign, refresh (GG20, FROST Ed25519, FROST Secp256k1,
+//!   CGGMP21, BLS12-381, Sr25519, Stark ECDSA)
 //! - Transport: ECDH key exchange, ChaCha20-Poly1305 encrypt/decrypt
 //! - Key store: Argon2id derivation, AES-256-GCM encrypt/decrypt
 //! - Chain: transaction building and finalization
@@ -27,6 +28,22 @@ fn frost_ed25519_factory() -> Box<dyn MpcProtocol> {
 
 fn frost_secp256k1_factory() -> Box<dyn MpcProtocol> {
     Box::new(mpc_wallet_core::protocol::frost_secp256k1::FrostSecp256k1TrProtocol::new())
+}
+
+fn cggmp21_factory() -> Box<dyn MpcProtocol> {
+    Box::new(mpc_wallet_core::protocol::cggmp21::Cggmp21Protocol::new())
+}
+
+fn bls12_381_factory() -> Box<dyn MpcProtocol> {
+    Box::new(mpc_wallet_core::protocol::bls12_381::Bls12_381Protocol::new())
+}
+
+fn sr25519_factory() -> Box<dyn MpcProtocol> {
+    Box::new(mpc_wallet_core::protocol::sr25519::Sr25519Protocol::new())
+}
+
+fn stark_factory() -> Box<dyn MpcProtocol> {
+    Box::new(mpc_wallet_core::protocol::stark::StarkProtocol::new())
 }
 
 fn rt() -> tokio::runtime::Runtime {
@@ -111,7 +128,7 @@ async fn do_refresh(factory: fn() -> Box<dyn MpcProtocol>, shares: &[KeyShare]) 
 fn bench_keygen(c: &mut Criterion) {
     let runtime = rt();
     let mut group = c.benchmark_group("keygen");
-    group.measurement_time(Duration::from_secs(20));
+    group.measurement_time(Duration::from_secs(30));
     group.sample_size(10);
 
     // GG20 ECDSA
@@ -131,19 +148,46 @@ fn bench_keygen(c: &mut Criterion) {
             .iter(|| do_keygen(frost_secp256k1_factory, 2, 3));
     });
 
+    // CGGMP21 ECDSA (slow — Paillier safe-prime keygen)
+    group.bench_function(BenchmarkId::new("cggmp21_ecdsa", "2-of-3"), |b| {
+        b.to_async(&runtime)
+            .iter(|| do_keygen(cggmp21_factory, 2, 3));
+    });
+
+    // BLS12-381
+    group.bench_function(BenchmarkId::new("bls12_381", "2-of-3"), |b| {
+        b.to_async(&runtime)
+            .iter(|| do_keygen(bls12_381_factory, 2, 3));
+    });
+
+    // Sr25519 (Schnorrkel)
+    group.bench_function(BenchmarkId::new("sr25519", "2-of-3"), |b| {
+        b.to_async(&runtime)
+            .iter(|| do_keygen(sr25519_factory, 2, 3));
+    });
+
+    // Stark ECDSA
+    group.bench_function(BenchmarkId::new("stark_ecdsa", "2-of-3"), |b| {
+        b.to_async(&runtime).iter(|| do_keygen(stark_factory, 2, 3));
+    });
+
     group.finish();
 }
 
 fn bench_sign(c: &mut Criterion) {
     let runtime = rt();
     let mut group = c.benchmark_group("sign");
-    group.measurement_time(Duration::from_secs(20));
+    group.measurement_time(Duration::from_secs(30));
     group.sample_size(10);
 
-    // Pre-generate keys
+    // Pre-generate keys for all 7 protocols
     let gg20_shares = runtime.block_on(do_keygen(gg20_factory, 2, 3));
     let frost_ed_shares = runtime.block_on(do_keygen(frost_ed25519_factory, 2, 3));
     let frost_secp_shares = runtime.block_on(do_keygen(frost_secp256k1_factory, 2, 3));
+    let cggmp21_shares = runtime.block_on(do_keygen(cggmp21_factory, 2, 3));
+    let bls_shares = runtime.block_on(do_keygen(bls12_381_factory, 2, 3));
+    let sr25519_shares = runtime.block_on(do_keygen(sr25519_factory, 2, 3));
+    let stark_shares = runtime.block_on(do_keygen(stark_factory, 2, 3));
     let message = b"benchmark signing message";
 
     group.bench_function(BenchmarkId::new("gg20_ecdsa", "2-of-3"), |b| {
@@ -165,6 +209,26 @@ fn bench_sign(c: &mut Criterion) {
                 message,
             )
         });
+    });
+
+    group.bench_function(BenchmarkId::new("cggmp21_ecdsa", "2-of-3"), |b| {
+        b.to_async(&runtime)
+            .iter(|| do_sign(cggmp21_factory, &cggmp21_shares, &[0, 1], message));
+    });
+
+    group.bench_function(BenchmarkId::new("bls12_381", "2-of-3"), |b| {
+        b.to_async(&runtime)
+            .iter(|| do_sign(bls12_381_factory, &bls_shares, &[0, 1], message));
+    });
+
+    group.bench_function(BenchmarkId::new("sr25519", "2-of-3"), |b| {
+        b.to_async(&runtime)
+            .iter(|| do_sign(sr25519_factory, &sr25519_shares, &[0, 1], message));
+    });
+
+    group.bench_function(BenchmarkId::new("stark_ecdsa", "2-of-3"), |b| {
+        b.to_async(&runtime)
+            .iter(|| do_sign(stark_factory, &stark_shares, &[0, 1], message));
     });
 
     group.finish();
