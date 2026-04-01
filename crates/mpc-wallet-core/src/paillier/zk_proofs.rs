@@ -27,6 +27,15 @@ use std::sync::LazyLock;
 /// Cached small primes up to 2^20, computed once via sieve of Eratosthenes.
 static SMALL_PRIMES: LazyLock<Vec<u32>> = LazyLock::new(|| generate_small_primes(1 << 20));
 
+/// Length-prefixed hash update: prevents TSSHOCK alpha-shuffle hash collisions
+/// (CVE-2022-47931) by prepending the byte length as a fixed-width u32 before
+/// each variable-length input. Without this, H(A || B) can collide with
+/// H(A' || B') when A||B == A'||B' under different splits.
+fn hash_update_lp(hasher: &mut Sha256, data: &[u8]) {
+    hasher.update((data.len() as u32).to_be_bytes());
+    hasher.update(data);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SignedBigUint — signed wrapper for CGGMP21 ZK proofs (SEC-PIAFFG)
 //
@@ -183,6 +192,56 @@ static SECP256K1_ORDER: LazyLock<BigUint> = LazyLock::new(|| {
         0x41, 0x41,
     ])
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stark curve constants and helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Stark curve EC order (252 bits).
+static STARK_EC_ORDER: LazyLock<BigUint> = LazyLock::new(|| {
+    BigUint::from_bytes_be(
+        &hex::decode("0800000000000010ffffffffffffffffb781126dcae7b2321e66a241adc64d2f").unwrap(),
+    )
+});
+
+/// Convert a BigUint to a Stark curve Felt (reduced mod STARK_EC_ORDER).
+pub fn biguint_to_stark_felt(x: &BigUint) -> starknet_types_core::felt::Felt {
+    let reduced = x % &*STARK_EC_ORDER;
+    let mut bytes = [0u8; 32];
+    let be = reduced.to_bytes_be();
+    let start = 32usize.saturating_sub(be.len());
+    bytes[start..].copy_from_slice(&be[..core::cmp::min(be.len(), 32)]);
+    starknet_types_core::felt::Felt::from_bytes_be(&bytes)
+}
+
+/// Compute x * G on the Stark curve. Returns (x_coord || y_coord) as 64 bytes.
+pub fn stark_point_commitment(x: &BigUint) -> Vec<u8> {
+    use starknet_types_core::curve::ProjectivePoint;
+
+    let scalar = biguint_to_stark_felt(x);
+    let generator = ProjectivePoint::from_affine(
+        starknet_curve::curve_params::GENERATOR.x(),
+        starknet_curve::curve_params::GENERATOR.y(),
+    )
+    .expect("GENERATOR is a valid curve point");
+    let point = &generator * scalar;
+    let affine = point.to_affine().expect("non-identity point");
+    // Encode as 64 bytes: x(32) || y(32)
+    let mut out = Vec::with_capacity(64);
+    out.extend_from_slice(&affine.x().to_bytes_be());
+    out.extend_from_slice(&affine.y().to_bytes_be());
+    out
+}
+
+/// Decode a 64-byte Stark affine point (x || y) into a ProjectivePoint.
+fn decode_stark_point(bytes: &[u8]) -> Option<starknet_types_core::curve::ProjectivePoint> {
+    if bytes.len() != 64 {
+        return None;
+    }
+    let x = starknet_types_core::felt::Felt::from_bytes_be_slice(&bytes[..32]);
+    let y = starknet_types_core::felt::Felt::from_bytes_be_slice(&bytes[32..]);
+    starknet_types_core::curve::ProjectivePoint::from_affine(x, y).ok()
+}
 
 /// Security parameter: number of rounds for Pimod proof.
 const PIMOD_SECURITY_PARAM: usize = 80;
@@ -490,17 +549,13 @@ pub fn jacobi_symbol(a: &BigUint, n: &BigUint) -> i32 {
 
 /// Pifac proof: proves N has no prime factor smaller than 2^256.
 ///
-/// Uses a hash-based commitment + trial division verification approach:
-/// 1. Prover commits to the factorization using SHA-256 hash
-/// 2. Prover provides the bit lengths of both factors
-/// 3. Prover provides Nth root computations that demonstrate
+/// Uses deterministic Fiat-Shamir challenges + trial division verification:
+/// 1. Prover provides the bit lengths of both factors
+/// 2. Prover provides Nth root computations that demonstrate
 ///    knowledge of factorization with large factors
+/// 3. Challenges are derived deterministically from N and round index
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PifacProof {
-    /// Commitment: H(N || p || q || nonce)
-    pub commitment: Vec<u8>,
-    /// Nonce used in commitment.
-    pub nonce: Vec<u8>,
     /// Bit length of factor p.
     pub p_bits: u64,
     /// Bit length of factor q.
@@ -526,18 +581,6 @@ const PIFAC_ROUNDS: usize = 40;
 /// 1. Knowledge of factorization via Nth root computations
 /// 2. Both factors are at least 256 bits
 pub fn prove_pifac(n: &BigUint, p: &BigUint, q: &BigUint) -> PifacProof {
-    // Generate commitment nonce
-    let mut nonce = vec![0u8; 32];
-    OsRng.fill_bytes(&mut nonce);
-
-    // Commitment = H(N || p || q || nonce)
-    let mut hasher = Sha256::new();
-    hasher.update(n.to_bytes_be());
-    hasher.update(p.to_bytes_be());
-    hasher.update(q.to_bytes_be());
-    hasher.update(&nonce);
-    let commitment = hasher.finalize().to_vec();
-
     let p_bits = p.bits();
     let q_bits = q.bits();
 
@@ -554,11 +597,11 @@ pub fn prove_pifac(n: &BigUint, p: &BigUint, q: &BigUint) -> PifacProof {
     let mut nth_root_proofs = Vec::with_capacity(PIFAC_ROUNDS);
 
     for i in 0..PIFAC_ROUNDS {
-        // Derive challenge x_i from commitment and round index
+        // Derive challenge x_i deterministically from N and round index
         let mut hasher = Sha256::new();
-        hasher.update(&commitment);
+        hasher.update(b"pifac-challenge-v3");
+        hash_update_lp(&mut hasher, &n.to_bytes_be());
         hasher.update((i as u64).to_le_bytes());
-        hasher.update(b"pifac-challenge");
         let hash = hasher.finalize();
 
         let x = BigUint::from_bytes_be(&hash) % n;
@@ -587,8 +630,6 @@ pub fn prove_pifac(n: &BigUint, p: &BigUint, q: &BigUint) -> PifacProof {
     }
 
     PifacProof {
-        commitment,
-        nonce,
         p_bits,
         q_bits,
         nth_root_proofs,
@@ -615,6 +656,13 @@ pub fn verify_pifac(n: &BigUint, proof: &PifacProof) -> bool {
         return false;
     }
 
+    // SEC-059: Cross-check declared factor sizes against N
+    // p_bits + q_bits should be approximately N.bits() (within 2 bits tolerance)
+    let n_bits = n.bits();
+    if proof.p_bits + proof.q_bits < n_bits.saturating_sub(2) {
+        return false;
+    }
+
     // Trial division: reject N with any small prime factor
     // This catches the CVE-2023-33241 attack where attacker uses small primes
     if has_small_factor(n) {
@@ -626,12 +674,12 @@ pub fn verify_pifac(n: &BigUint, proof: &PifacProof) -> bool {
         return false;
     }
 
-    // Recompute challenge values from commitment
+    // Recompute challenge values deterministically from N and round index
     for (i, round) in proof.nth_root_proofs.iter().enumerate() {
         let mut hasher = Sha256::new();
-        hasher.update(&proof.commitment);
+        hasher.update(b"pifac-challenge-v3");
+        hash_update_lp(&mut hasher, &n.to_bytes_be());
         hasher.update((i as u64).to_le_bytes());
-        hasher.update(b"pifac-challenge");
         let hash = hasher.finalize();
 
         let expected_x = BigUint::from_bytes_be(&hash) % n;
@@ -758,6 +806,10 @@ pub struct PiEncPublicInput {
     pub s: Vec<u8>,
     /// Pedersen base t.
     pub t: Vec<u8>,
+    /// Session ID for Fiat-Shamir binding (prevents cross-session replay, CVE-2022-47930).
+    pub session_id: Vec<u8>,
+    /// Prover party index for Fiat-Shamir binding.
+    pub prover_index: u16,
 }
 
 /// Prove that ciphertext C encrypts m with |m| < 2^ell.
@@ -791,7 +843,7 @@ pub fn prove_pienc(m: &BigUint, r: &BigUint, public: &PiEncPublicInput) -> PiEnc
     // Pedersen commitment to the witness: S = s^m * t^rho mod N_hat
     let pedersen_s = (s.modpow(m, &n_hat) * t.modpow(&rho, &n_hat)) % &n_hat;
 
-    // Fiat-Shamir challenge (includes pedersen_s for binding)
+    // Fiat-Shamir challenge (includes pedersen_s for binding + session context)
     let e = pienc_challenge(
         &public.pk_n,
         &public.ciphertext,
@@ -799,6 +851,8 @@ pub fn prove_pienc(m: &BigUint, r: &BigUint, public: &PiEncPublicInput) -> PiEnc
         &commitment_b,
         &pedersen_s,
         &n_hat,
+        &public.session_id,
+        public.prover_index,
     );
 
     // Responses
@@ -837,7 +891,7 @@ pub fn verify_pienc(proof: &PiEncProof, public: &PiEncPublicInput) -> bool {
     let z2 = BigUint::from_bytes_be(&proof.z2);
     let z3 = BigUint::from_bytes_be(&proof.z3);
 
-    // Recompute challenge (includes pedersen_s for binding)
+    // Recompute challenge (includes pedersen_s for binding + session context)
     let e = pienc_challenge(
         &public.pk_n,
         &public.ciphertext,
@@ -845,6 +899,8 @@ pub fn verify_pienc(proof: &PiEncProof, public: &PiEncPublicInput) -> bool {
         &commitment_b,
         &pedersen_s,
         &n_hat,
+        &public.session_id,
+        public.prover_index,
     );
 
     // Range check: z1 < 2^(ell + epsilon)
@@ -884,6 +940,10 @@ pub fn verify_pienc(proof: &PiEncProof, public: &PiEncPublicInput) -> bool {
 }
 
 /// Fiat-Shamir challenge for Πenc.
+///
+/// Uses length-prefixed encoding (CVE-2022-47931 mitigation) and session binding
+/// (CVE-2022-47930 mitigation) to prevent hash collision and cross-session replay.
+#[allow(clippy::too_many_arguments)]
 fn pienc_challenge(
     pk_n: &[u8],
     ciphertext: &[u8],
@@ -891,15 +951,19 @@ fn pienc_challenge(
     commitment_b: &BigUint,
     pedersen_s: &BigUint,
     n_hat: &BigUint,
+    session_id: &[u8],
+    prover_index: u16,
 ) -> BigUint {
     let mut hasher = Sha256::new();
-    hasher.update(b"pienc-v1");
-    hasher.update(pk_n);
-    hasher.update(ciphertext);
-    hasher.update(commitment_a.to_bytes_be());
-    hasher.update(commitment_b.to_bytes_be());
-    hasher.update(pedersen_s.to_bytes_be());
-    hasher.update(n_hat.to_bytes_be());
+    hasher.update(b"pienc-v2");
+    hash_update_lp(&mut hasher, session_id);
+    hasher.update(prover_index.to_be_bytes());
+    hash_update_lp(&mut hasher, pk_n);
+    hash_update_lp(&mut hasher, ciphertext);
+    hash_update_lp(&mut hasher, &commitment_a.to_bytes_be());
+    hash_update_lp(&mut hasher, &commitment_b.to_bytes_be());
+    hash_update_lp(&mut hasher, &pedersen_s.to_bytes_be());
+    hash_update_lp(&mut hasher, &n_hat.to_bytes_be());
     let hash = hasher.finalize();
     // Use 128-bit challenge for soundness
     BigUint::from_bytes_be(&hash[..16])
@@ -956,6 +1020,13 @@ pub struct PiAffgPublicInput {
     pub s: Vec<u8>,
     /// Pedersen base t.
     pub t: Vec<u8>,
+    /// EC public point X = x * G (compressed SEC1, 33 bytes).
+    /// Required for the B_x EC binding check (SEC-056 fix).
+    pub x_commitment: Vec<u8>,
+    /// Session ID for Fiat-Shamir binding (prevents cross-session replay, CVE-2022-47930).
+    pub session_id: Vec<u8>,
+    /// Prover party index for Fiat-Shamir binding.
+    pub prover_index: u16,
 }
 
 /// Prove affine operation D = C^x * Enc(y, rho_y) where |x| < 2^ell, |y| < 2^ell'.
@@ -999,8 +1070,14 @@ pub fn prove_piaffg(
     let enc_beta_full = (&enc_beta * &mu_n) % &n0_sq;
     let commitment_a = (&c_alpha * &enc_beta_full) % &n0_sq;
 
-    // Commitment B_x = alpha (we store the value; in EC version this would be alpha*G)
-    let commitment_bx = alpha.to_bytes_be();
+    // Commitment B_x = alpha * G on secp256k1 (SEC-056 fix: real EC point, not raw scalar)
+    let commitment_bx = {
+        use k256::elliptic_curve::group::GroupEncoding;
+        let alpha_scalar = biguint_to_k256_scalar(&alpha);
+        (k256::ProjectivePoint::GENERATOR * alpha_scalar)
+            .to_bytes()
+            .to_vec()
+    };
 
     // Commitment E = s^alpha * t^gamma mod N_hat
     let commitment_e = (s_base.modpow(&alpha, &n_hat) * t_base.modpow(&gamma, &n_hat)) % &n_hat;
@@ -1020,11 +1097,15 @@ pub fn prove_piaffg(
         &public.c,
         &public.d,
         &commitment_a,
+        &commitment_bx,
+        &public.x_commitment,
         &commitment_e,
         &commitment_f,
         &pedersen_sx,
         &pedersen_sy,
         &n_hat,
+        &public.session_id,
+        public.prover_index,
     );
 
     // Responses (always non-negative: unsigned masking + unsigned e*witness)
@@ -1083,17 +1164,21 @@ pub fn verify_piaffg(proof: &PiAffgProof, public: &PiAffgPublicInput) -> bool {
     let z4 = SignedBigUint::from_bytes(&proof.z4);
     let w = BigUint::from_bytes_be(&proof.w);
 
-    // Recompute challenge (includes witness commitments for binding)
+    // Recompute challenge (includes witness commitments + EC binding for SEC-056)
     let e = piaffg_challenge(
         &public.pk_n0,
         &public.c,
         &public.d,
         &commitment_a,
+        &proof.commitment_bx,
+        &public.x_commitment,
         &commitment_e,
         &commitment_f,
         &pedersen_sx,
         &pedersen_sy,
         &n_hat,
+        &public.session_id,
+        public.prover_index,
     );
 
     // Absolute-value range checks (CGGMP21: |z| < 2^(ell+epsilon))
@@ -1145,33 +1230,65 @@ pub fn verify_piaffg(proof: &PiAffgProof, public: &PiAffgPublicInput) -> bool {
         return false;
     }
 
+    // Check 4 (SEC-056 fix): z1 * G == B_x + e * X on secp256k1
+    // This binds the Paillier plaintext x to the EC public point X = x * G.
+    {
+        use k256::elliptic_curve::group::GroupEncoding;
+        let z1_scalar = biguint_to_k256_scalar(z1_val);
+        let e_scalar = biguint_to_k256_scalar(&e);
+        let bx_point = match decode_sec1_point(&proof.commitment_bx) {
+            Some(p) => p,
+            None => return false,
+        };
+        let x_point = match decode_sec1_point(&public.x_commitment) {
+            Some(p) => p,
+            None => return false,
+        };
+        let lhs_ec = k256::ProjectivePoint::GENERATOR * z1_scalar;
+        let rhs_ec = bx_point + x_point * e_scalar;
+        if lhs_ec.to_bytes() != rhs_ec.to_bytes() {
+            return false;
+        }
+    }
+
     true
 }
 
 /// Fiat-Shamir challenge for Πaff-g.
+///
+/// Uses length-prefixed encoding (CVE-2022-47931 mitigation) and session binding
+/// (CVE-2022-47930 mitigation) to prevent hash collision and cross-session replay.
 #[allow(clippy::too_many_arguments)]
 fn piaffg_challenge(
     pk_n0: &[u8],
     c: &[u8],
     d: &[u8],
     commitment_a: &BigUint,
+    commitment_bx: &[u8],
+    x_commitment: &[u8],
     commitment_e: &BigUint,
     commitment_f: &BigUint,
     pedersen_sx: &BigUint,
     pedersen_sy: &BigUint,
     n_hat: &BigUint,
+    session_id: &[u8],
+    prover_index: u16,
 ) -> BigUint {
     let mut hasher = Sha256::new();
-    hasher.update(b"piaffg-v1");
-    hasher.update(pk_n0);
-    hasher.update(c);
-    hasher.update(d);
-    hasher.update(commitment_a.to_bytes_be());
-    hasher.update(commitment_e.to_bytes_be());
-    hasher.update(commitment_f.to_bytes_be());
-    hasher.update(pedersen_sx.to_bytes_be());
-    hasher.update(pedersen_sy.to_bytes_be());
-    hasher.update(n_hat.to_bytes_be());
+    hasher.update(b"piaffg-v3");
+    hash_update_lp(&mut hasher, session_id);
+    hasher.update(prover_index.to_be_bytes());
+    hash_update_lp(&mut hasher, pk_n0);
+    hash_update_lp(&mut hasher, c);
+    hash_update_lp(&mut hasher, d);
+    hash_update_lp(&mut hasher, &commitment_a.to_bytes_be());
+    hash_update_lp(&mut hasher, commitment_bx);
+    hash_update_lp(&mut hasher, x_commitment);
+    hash_update_lp(&mut hasher, &commitment_e.to_bytes_be());
+    hash_update_lp(&mut hasher, &commitment_f.to_bytes_be());
+    hash_update_lp(&mut hasher, &pedersen_sx.to_bytes_be());
+    hash_update_lp(&mut hasher, &pedersen_sy.to_bytes_be());
+    hash_update_lp(&mut hasher, &n_hat.to_bytes_be());
     let hash = hasher.finalize();
     BigUint::from_bytes_be(&hash[..16])
 }
@@ -1221,6 +1338,10 @@ pub struct PiLogStarPublicInput {
     pub s: Vec<u8>,
     /// Pedersen base t.
     pub t: Vec<u8>,
+    /// Session ID for Fiat-Shamir binding (prevents cross-session replay, CVE-2022-47930).
+    pub session_id: Vec<u8>,
+    /// Prover party index for Fiat-Shamir binding.
+    pub prover_index: u16,
 }
 
 /// Compute the EC point commitment for Πlog*: x * G on secp256k1.
@@ -1283,6 +1404,8 @@ pub fn prove_pilogstar(x: &BigUint, r: &BigUint, public: &PiLogStarPublicInput) 
         &commitment_y,
         &commitment_d,
         &n_hat,
+        &public.session_id,
+        public.prover_index,
     );
 
     // Responses
@@ -1328,6 +1451,8 @@ pub fn verify_pilogstar(proof: &PiLogStarProof, public: &PiLogStarPublicInput) -
         &proof.commitment_y,
         &commitment_d,
         &n_hat,
+        &public.session_id,
+        public.prover_index,
     );
 
     // Range check
@@ -1387,6 +1512,10 @@ fn decode_sec1_point(bytes: &[u8]) -> Option<k256::ProjectivePoint> {
 }
 
 /// Fiat-Shamir challenge for Πlog*.
+///
+/// Uses length-prefixed encoding (CVE-2022-47931 mitigation) and session binding
+/// (CVE-2022-47930 mitigation) to prevent hash collision and cross-session replay.
+#[allow(clippy::too_many_arguments)]
 fn pilogstar_challenge(
     pk_n: &[u8],
     ciphertext: &[u8],
@@ -1395,16 +1524,546 @@ fn pilogstar_challenge(
     commitment_y: &[u8],
     commitment_d: &BigUint,
     n_hat: &BigUint,
+    session_id: &[u8],
+    prover_index: u16,
 ) -> BigUint {
     let mut hasher = Sha256::new();
-    hasher.update(b"pilogstar-v1");
-    hasher.update(pk_n);
-    hasher.update(ciphertext);
-    hasher.update(x_commitment);
-    hasher.update(commitment_a.to_bytes_be());
-    hasher.update(commitment_y);
-    hasher.update(commitment_d.to_bytes_be());
-    hasher.update(n_hat.to_bytes_be());
+    hasher.update(b"pilogstar-v2");
+    hash_update_lp(&mut hasher, session_id);
+    hasher.update(prover_index.to_be_bytes());
+    hash_update_lp(&mut hasher, pk_n);
+    hash_update_lp(&mut hasher, ciphertext);
+    hash_update_lp(&mut hasher, x_commitment);
+    hash_update_lp(&mut hasher, &commitment_a.to_bytes_be());
+    hash_update_lp(&mut hasher, commitment_y);
+    hash_update_lp(&mut hasher, &commitment_d.to_bytes_be());
+    hash_update_lp(&mut hasher, &n_hat.to_bytes_be());
+    let hash = hasher.finalize();
+    BigUint::from_bytes_be(&hash[..16])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Πlog* Stark variant — Group Element vs Paillier Encryption (Stark curve)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Πlog* proof for Stark curve: proves C = Enc(x) AND X = x*G on the Stark curve.
+///
+/// Same structure as `PiLogStarProof` but the EC binding uses the Stark curve
+/// (252-bit order) instead of secp256k1. The `commitment_y` field contains a
+/// 64-byte Stark affine point (x || y) rather than a 33-byte SEC1 compressed point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PiLogStarStarkProof {
+    /// Commitment A = Enc(alpha, mu).
+    pub commitment_a: Vec<u8>,
+    /// Commitment Y = alpha * G_stark (64 bytes: x_coord || y_coord).
+    pub commitment_y: Vec<u8>,
+    /// Commitment D = s^alpha * t^gamma mod N_hat.
+    pub commitment_d: Vec<u8>,
+    /// Response z1 = alpha + e*x.
+    pub z1: Vec<u8>,
+    /// Response z2 = mu * r^e mod N^2.
+    pub z2: Vec<u8>,
+    /// Response z3 = gamma + e*rho.
+    pub z3: Vec<u8>,
+}
+
+/// Public input for Πlog* Stark variant verification.
+#[derive(Debug, Clone)]
+pub struct PiLogStarStarkPublicInput {
+    /// Paillier public key N.
+    pub pk_n: Vec<u8>,
+    /// N^2.
+    pub pk_n_squared: Vec<u8>,
+    /// Ciphertext C = Enc(x, r).
+    pub ciphertext: Vec<u8>,
+    /// Public Stark curve point X = x * G_stark (64 bytes: x_coord || y_coord).
+    pub x_commitment: Vec<u8>,
+    /// Pedersen modulus N_hat.
+    pub n_hat: Vec<u8>,
+    /// Pedersen base s.
+    pub s: Vec<u8>,
+    /// Pedersen base t.
+    pub t: Vec<u8>,
+    /// Session ID for Fiat-Shamir binding (prevents cross-session replay, CVE-2022-47930).
+    pub session_id: Vec<u8>,
+    /// Prover party index for Fiat-Shamir binding.
+    pub prover_index: u16,
+}
+
+/// Prove C = Enc(x, r) AND X = x * G on the Stark curve.
+pub fn prove_pilogstar_stark(
+    x: &BigUint,
+    r: &BigUint,
+    public: &PiLogStarStarkPublicInput,
+) -> PiLogStarStarkProof {
+    let n = BigUint::from_bytes_be(&public.pk_n);
+    let n_sq = BigUint::from_bytes_be(&public.pk_n_squared);
+    let n_hat = BigUint::from_bytes_be(&public.n_hat);
+    let s = BigUint::from_bytes_be(&public.s);
+    let t = BigUint::from_bytes_be(&public.t);
+
+    let ell_bound = BigUint::one() << (PIENC_ELL + PIENC_EPSILON) as usize;
+
+    // Sample masking values
+    let alpha = sample_below(&ell_bound);
+    let mu = sample_coprime(&n);
+    let gamma = sample_below(&(&n_hat * &ell_bound));
+    let rho = sample_below(&(&n_hat * (BigUint::one() << PIENC_ELL as usize)));
+
+    // Commitment A = Enc(alpha, mu)
+    let g_alpha = (BigUint::one() + &alpha * &n) % &n_sq;
+    let mu_n = mu.modpow(&n, &n_sq);
+    let commitment_a = (&g_alpha * &mu_n) % &n_sq;
+
+    // Commitment Y = alpha * G_stark (64-byte affine point)
+    let commitment_y = stark_point_commitment(&alpha);
+
+    // Commitment D = s^alpha * t^gamma mod N_hat
+    let commitment_d = (s.modpow(&alpha, &n_hat) * t.modpow(&gamma, &n_hat)) % &n_hat;
+
+    // Fiat-Shamir challenge
+    let e = pilogstar_stark_challenge(
+        &public.pk_n,
+        &public.ciphertext,
+        &public.x_commitment,
+        &commitment_a,
+        &commitment_y,
+        &commitment_d,
+        &n_hat,
+        &public.session_id,
+        public.prover_index,
+    );
+
+    // Responses
+    let z1 = &alpha + &e * x;
+    let z2 = (&mu * r.modpow(&e, &n_sq)) % &n_sq;
+    let z3 = &gamma + &e * &rho;
+
+    PiLogStarStarkProof {
+        commitment_a: commitment_a.to_bytes_be(),
+        commitment_y,
+        commitment_d: commitment_d.to_bytes_be(),
+        z1: z1.to_bytes_be(),
+        z2: z2.to_bytes_be(),
+        z3: z3.to_bytes_be(),
+    }
+}
+
+/// Verify a Πlog* Stark proof.
+///
+/// Checks:
+/// 1. z1 in range
+/// 2. Enc(z1, z2) = A * C^e mod N^2
+/// 3. z1 * G_stark == Y + e * X on the Stark curve
+pub fn verify_pilogstar_stark(
+    proof: &PiLogStarStarkProof,
+    public: &PiLogStarStarkPublicInput,
+) -> bool {
+    let n = BigUint::from_bytes_be(&public.pk_n);
+    let n_sq = BigUint::from_bytes_be(&public.pk_n_squared);
+    let n_hat = BigUint::from_bytes_be(&public.n_hat);
+    let c = BigUint::from_bytes_be(&public.ciphertext);
+
+    let commitment_a = BigUint::from_bytes_be(&proof.commitment_a);
+    let commitment_d = BigUint::from_bytes_be(&proof.commitment_d);
+    let z1 = BigUint::from_bytes_be(&proof.z1);
+    let z2 = BigUint::from_bytes_be(&proof.z2);
+
+    // Recompute challenge
+    let e = pilogstar_stark_challenge(
+        &public.pk_n,
+        &public.ciphertext,
+        &public.x_commitment,
+        &commitment_a,
+        &proof.commitment_y,
+        &commitment_d,
+        &n_hat,
+        &public.session_id,
+        public.prover_index,
+    );
+
+    // Range check
+    let z1_bound = BigUint::one() << (PIENC_ELL + PIENC_EPSILON) as usize;
+    if z1 >= z1_bound {
+        return false;
+    }
+
+    // Check 1: Enc(z1, z2) = A * C^e mod N^2
+    let g_z1 = (BigUint::one() + &z1 * &n) % &n_sq;
+    let z2_n = z2.modpow(&n, &n_sq);
+    let lhs = (&g_z1 * &z2_n) % &n_sq;
+
+    let c_e = c.modpow(&e, &n_sq);
+    let rhs = (&commitment_a * &c_e) % &n_sq;
+
+    if lhs != rhs {
+        return false;
+    }
+
+    // Check 2: z1 * G_stark == Y + e * X on the Stark curve
+    let z1_felt = biguint_to_stark_felt(&z1);
+    let e_felt = biguint_to_stark_felt(&e);
+
+    let generator = match starknet_types_core::curve::ProjectivePoint::from_affine(
+        starknet_curve::curve_params::GENERATOR.x(),
+        starknet_curve::curve_params::GENERATOR.y(),
+    ) {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+
+    // Decode Y (commitment_y) from 64-byte Stark point
+    let y_point = match decode_stark_point(&proof.commitment_y) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    // Decode X (x_commitment) from 64-byte Stark point
+    let x_point = match decode_stark_point(&public.x_commitment) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    // z1 * G_stark
+    let lhs_ec = &generator * z1_felt;
+    // Y + e * X
+    let rhs_ec = &y_point + &(&x_point * e_felt);
+
+    if lhs_ec != rhs_ec {
+        return false;
+    }
+
+    true
+}
+
+/// Fiat-Shamir challenge for Πlog* Stark variant.
+#[allow(clippy::too_many_arguments)]
+fn pilogstar_stark_challenge(
+    pk_n: &[u8],
+    ciphertext: &[u8],
+    x_commitment: &[u8],
+    commitment_a: &BigUint,
+    commitment_y: &[u8],
+    commitment_d: &BigUint,
+    n_hat: &BigUint,
+    session_id: &[u8],
+    prover_index: u16,
+) -> BigUint {
+    let mut hasher = Sha256::new();
+    hasher.update(b"pilogstar-stark-v1");
+    hash_update_lp(&mut hasher, session_id);
+    hasher.update(prover_index.to_be_bytes());
+    hash_update_lp(&mut hasher, pk_n);
+    hash_update_lp(&mut hasher, ciphertext);
+    hash_update_lp(&mut hasher, x_commitment);
+    hash_update_lp(&mut hasher, &commitment_a.to_bytes_be());
+    hash_update_lp(&mut hasher, commitment_y);
+    hash_update_lp(&mut hasher, &commitment_d.to_bytes_be());
+    hash_update_lp(&mut hasher, &n_hat.to_bytes_be());
+    let hash = hasher.finalize();
+    BigUint::from_bytes_be(&hash[..16])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Πaff-g Stark variant — Affine Homomorphic Operation (Stark curve)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Πaff-g proof for Stark curve: proves D = C^x * Enc(y) with EC binding on Stark curve.
+///
+/// Same structure as `PiAffgProof` but the `commitment_bx` field is a 64-byte
+/// Stark affine point (x || y) instead of a 33-byte SEC1 compressed secp256k1 point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PiAffgStarkProof {
+    /// Commitment A = Enc_0(alpha, mu).
+    pub commitment_a: Vec<u8>,
+    /// Commitment B_x = alpha * G_stark (64 bytes: x_coord || y_coord).
+    pub commitment_bx: Vec<u8>,
+    /// Commitment E = s^alpha * t^gamma mod N_hat.
+    pub commitment_e: Vec<u8>,
+    /// Commitment F = s^beta * t^delta mod N_hat.
+    pub commitment_f: Vec<u8>,
+    /// Pedersen commitment S_x = s^x * t^tau mod N_hat.
+    pub pedersen_sx: Vec<u8>,
+    /// Pedersen commitment S_y = s^y * t^sigma mod N_hat.
+    pub pedersen_sy: Vec<u8>,
+    /// Response z1 = alpha + e*x.
+    pub z1: Vec<u8>,
+    /// Response z2 = beta + e*y.
+    pub z2: Vec<u8>,
+    /// Response w = mu * rho_y^e mod N_0^2.
+    pub w: Vec<u8>,
+    /// Response z3 = gamma + e*tau.
+    pub z3: Vec<u8>,
+    /// Response z4 = delta + e*sigma.
+    pub z4: Vec<u8>,
+}
+
+/// Public input for Πaff-g Stark variant.
+#[derive(Debug, Clone)]
+pub struct PiAffgStarkPublicInput {
+    /// Paillier public key N_0.
+    pub pk_n0: Vec<u8>,
+    /// N_0^2.
+    pub pk_n0_squared: Vec<u8>,
+    /// Input ciphertext C = Enc_0(a).
+    pub c: Vec<u8>,
+    /// Result ciphertext D = C^x * Enc_0(y).
+    pub d: Vec<u8>,
+    /// Pedersen modulus N_hat.
+    pub n_hat: Vec<u8>,
+    /// Pedersen base s.
+    pub s: Vec<u8>,
+    /// Pedersen base t.
+    pub t: Vec<u8>,
+    /// EC public point X = x * G_stark (64 bytes: x_coord || y_coord).
+    pub x_commitment: Vec<u8>,
+    /// Session ID for Fiat-Shamir binding.
+    pub session_id: Vec<u8>,
+    /// Prover party index for Fiat-Shamir binding.
+    pub prover_index: u16,
+}
+
+/// Prove affine operation D = C^x * Enc(y, rho_y) with Stark curve EC binding.
+pub fn prove_piaffg_stark(
+    x: &BigUint,
+    y: &BigUint,
+    rho_y: &BigUint,
+    public: &PiAffgStarkPublicInput,
+) -> PiAffgStarkProof {
+    let n0 = BigUint::from_bytes_be(&public.pk_n0);
+    let n0_sq = BigUint::from_bytes_be(&public.pk_n0_squared);
+    let c = BigUint::from_bytes_be(&public.c);
+    let n_hat = BigUint::from_bytes_be(&public.n_hat);
+    let s_base = BigUint::from_bytes_be(&public.s);
+    let t_base = BigUint::from_bytes_be(&public.t);
+
+    let ell_bound = BigUint::one() << (PIENC_ELL + PIENC_EPSILON) as usize;
+    let ell_prime_bound = BigUint::one() << (PIENC_ELL + PIENC_EPSILON) as usize;
+
+    // Sample masking values
+    let alpha = sample_below(&ell_bound);
+    let beta = sample_below(&ell_prime_bound);
+    let mu = sample_coprime(&n0);
+    let gamma = sample_below(&(&n_hat * &ell_bound));
+    let delta = sample_below(&(&n_hat * &ell_prime_bound));
+    let tau = sample_below(&(&n_hat * (BigUint::one() << PIENC_ELL as usize)));
+    let sigma = sample_below(&(&n_hat * (BigUint::one() << PIENC_ELL as usize)));
+
+    // Commitment A = C^alpha * Enc_0(beta, mu)
+    let c_alpha = c.modpow(&alpha, &n0_sq);
+    let enc_beta = (BigUint::one() + &beta * &n0) % &n0_sq;
+    let mu_n = mu.modpow(&n0, &n0_sq);
+    let enc_beta_full = (&enc_beta * &mu_n) % &n0_sq;
+    let commitment_a = (&c_alpha * &enc_beta_full) % &n0_sq;
+
+    // Commitment B_x = alpha * G_stark (64-byte Stark affine point)
+    let commitment_bx = stark_point_commitment(&alpha);
+
+    // Commitment E = s^alpha * t^gamma mod N_hat
+    let commitment_e = (s_base.modpow(&alpha, &n_hat) * t_base.modpow(&gamma, &n_hat)) % &n_hat;
+
+    // Commitment F = s^beta * t^delta mod N_hat
+    let commitment_f = (s_base.modpow(&beta, &n_hat) * t_base.modpow(&delta, &n_hat)) % &n_hat;
+
+    // Pedersen witness commitments
+    let pedersen_sx = (s_base.modpow(x, &n_hat) * t_base.modpow(&tau, &n_hat)) % &n_hat;
+    let pedersen_sy = (s_base.modpow(y, &n_hat) * t_base.modpow(&sigma, &n_hat)) % &n_hat;
+
+    // Fiat-Shamir challenge
+    let e = piaffg_stark_challenge(
+        &public.pk_n0,
+        &public.c,
+        &public.d,
+        &commitment_a,
+        &commitment_bx,
+        &public.x_commitment,
+        &commitment_e,
+        &commitment_f,
+        &pedersen_sx,
+        &pedersen_sy,
+        &n_hat,
+        &public.session_id,
+        public.prover_index,
+    );
+
+    // Responses
+    let z1 = SignedBigUint::positive(&alpha + &e * x);
+    let z2 = SignedBigUint::positive(&beta + &e * y);
+    let rho_y_e = rho_y.modpow(&e, &n0_sq);
+    let w = (&mu * &rho_y_e) % &n0_sq;
+    let z3 = SignedBigUint::positive(&gamma + &e * &tau);
+    let z4 = SignedBigUint::positive(&delta + &e * &sigma);
+
+    PiAffgStarkProof {
+        commitment_a: commitment_a.to_bytes_be(),
+        commitment_bx,
+        commitment_e: commitment_e.to_bytes_be(),
+        commitment_f: commitment_f.to_bytes_be(),
+        pedersen_sx: pedersen_sx.to_bytes_be(),
+        pedersen_sy: pedersen_sy.to_bytes_be(),
+        z1: z1.to_bytes(),
+        z2: z2.to_bytes(),
+        w: w.to_bytes_be(),
+        z3: z3.to_bytes(),
+        z4: z4.to_bytes(),
+    }
+}
+
+/// Verify a Πaff-g Stark proof.
+///
+/// Checks:
+/// 1. z1, z2 in range
+/// 2. C^z1 * Enc(z2, w) = A * D^e mod N_0^2
+/// 3. s^z1 * t^z3 == E * S_x^e mod N_hat
+/// 4. s^z2 * t^z4 == F * S_y^e mod N_hat
+/// 5. z1 * G_stark == B_x + e * X on the Stark curve
+pub fn verify_piaffg_stark(proof: &PiAffgStarkProof, public: &PiAffgStarkPublicInput) -> bool {
+    let n0 = BigUint::from_bytes_be(&public.pk_n0);
+    let n0_sq = BigUint::from_bytes_be(&public.pk_n0_squared);
+    let c = BigUint::from_bytes_be(&public.c);
+    let d = BigUint::from_bytes_be(&public.d);
+    let n_hat = BigUint::from_bytes_be(&public.n_hat);
+    let s_base = BigUint::from_bytes_be(&public.s);
+    let t_base = BigUint::from_bytes_be(&public.t);
+
+    let commitment_a = BigUint::from_bytes_be(&proof.commitment_a);
+    let commitment_e = BigUint::from_bytes_be(&proof.commitment_e);
+    let commitment_f = BigUint::from_bytes_be(&proof.commitment_f);
+    let pedersen_sx = BigUint::from_bytes_be(&proof.pedersen_sx);
+    let pedersen_sy = BigUint::from_bytes_be(&proof.pedersen_sy);
+    let z1 = SignedBigUint::from_bytes(&proof.z1);
+    let z2 = SignedBigUint::from_bytes(&proof.z2);
+    let z3 = SignedBigUint::from_bytes(&proof.z3);
+    let z4 = SignedBigUint::from_bytes(&proof.z4);
+    let w = BigUint::from_bytes_be(&proof.w);
+
+    // Recompute challenge
+    let e = piaffg_stark_challenge(
+        &public.pk_n0,
+        &public.c,
+        &public.d,
+        &commitment_a,
+        &proof.commitment_bx,
+        &public.x_commitment,
+        &commitment_e,
+        &commitment_f,
+        &pedersen_sx,
+        &pedersen_sy,
+        &n_hat,
+        &public.session_id,
+        public.prover_index,
+    );
+
+    // Range checks
+    let z1_bound = BigUint::one() << (PIENC_ELL + PIENC_EPSILON) as usize;
+    if z1.abs() >= &z1_bound {
+        return false;
+    }
+    let z2_bound = BigUint::one() << (PIENC_ELL + PIENC_EPSILON) as usize;
+    if z2.abs() >= &z2_bound {
+        return false;
+    }
+
+    let z1_val = z1.abs();
+    let z2_val = z2.abs();
+    let z3_val = z3.abs();
+    let z4_val = z4.abs();
+
+    // Check 1: C^z1 * Enc(z2, w) = A * D^e mod N_0^2
+    let c_z1 = c.modpow(z1_val, &n0_sq);
+    let enc_z2 = (BigUint::one() + z2_val * &n0) % &n0_sq;
+    let w_n = w.modpow(&n0, &n0_sq);
+    let enc_z2_full = (&enc_z2 * &w_n) % &n0_sq;
+    let lhs = (&c_z1 * &enc_z2_full) % &n0_sq;
+
+    let d_e = d.modpow(&e, &n0_sq);
+    let rhs = (&commitment_a * &d_e) % &n0_sq;
+
+    if lhs != rhs {
+        return false;
+    }
+
+    // Check 2: s^z1 * t^z3 == E * S_x^e mod N_hat
+    let ped_x_lhs = (s_base.modpow(z1_val, &n_hat) * t_base.modpow(z3_val, &n_hat)) % &n_hat;
+    let sx_e = pedersen_sx.modpow(&e, &n_hat);
+    let ped_x_rhs = (&commitment_e * &sx_e) % &n_hat;
+    if ped_x_lhs != ped_x_rhs {
+        return false;
+    }
+
+    // Check 3: s^z2 * t^z4 == F * S_y^e mod N_hat
+    let ped_y_lhs = (s_base.modpow(z2_val, &n_hat) * t_base.modpow(z4_val, &n_hat)) % &n_hat;
+    let sy_e = pedersen_sy.modpow(&e, &n_hat);
+    let ped_y_rhs = (&commitment_f * &sy_e) % &n_hat;
+    if ped_y_lhs != ped_y_rhs {
+        return false;
+    }
+
+    // Check 4: z1 * G_stark == B_x + e * X on the Stark curve
+    {
+        let z1_felt = biguint_to_stark_felt(z1_val);
+        let e_felt = biguint_to_stark_felt(&e);
+
+        let generator = match starknet_types_core::curve::ProjectivePoint::from_affine(
+            starknet_curve::curve_params::GENERATOR.x(),
+            starknet_curve::curve_params::GENERATOR.y(),
+        ) {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+
+        let bx_point = match decode_stark_point(&proof.commitment_bx) {
+            Some(p) => p,
+            None => return false,
+        };
+        let x_point = match decode_stark_point(&public.x_commitment) {
+            Some(p) => p,
+            None => return false,
+        };
+
+        let lhs_ec = &generator * z1_felt;
+        let rhs_ec = &bx_point + &(&x_point * e_felt);
+
+        if lhs_ec != rhs_ec {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Fiat-Shamir challenge for Πaff-g Stark variant.
+#[allow(clippy::too_many_arguments)]
+fn piaffg_stark_challenge(
+    pk_n0: &[u8],
+    c: &[u8],
+    d: &[u8],
+    commitment_a: &BigUint,
+    commitment_bx: &[u8],
+    x_commitment: &[u8],
+    commitment_e: &BigUint,
+    commitment_f: &BigUint,
+    pedersen_sx: &BigUint,
+    pedersen_sy: &BigUint,
+    n_hat: &BigUint,
+    session_id: &[u8],
+    prover_index: u16,
+) -> BigUint {
+    let mut hasher = Sha256::new();
+    hasher.update(b"piaffg-stark-v1");
+    hash_update_lp(&mut hasher, session_id);
+    hasher.update(prover_index.to_be_bytes());
+    hash_update_lp(&mut hasher, pk_n0);
+    hash_update_lp(&mut hasher, c);
+    hash_update_lp(&mut hasher, d);
+    hash_update_lp(&mut hasher, &commitment_a.to_bytes_be());
+    hash_update_lp(&mut hasher, commitment_bx);
+    hash_update_lp(&mut hasher, x_commitment);
+    hash_update_lp(&mut hasher, &commitment_e.to_bytes_be());
+    hash_update_lp(&mut hasher, &commitment_f.to_bytes_be());
+    hash_update_lp(&mut hasher, &pedersen_sx.to_bytes_be());
+    hash_update_lp(&mut hasher, &pedersen_sy.to_bytes_be());
+    hash_update_lp(&mut hasher, &n_hat.to_bytes_be());
     let hash = hasher.finalize();
     BigUint::from_bytes_be(&hash[..16])
 }
@@ -1416,7 +2075,8 @@ fn pilogstar_challenge(
 /// Sample a random value in [1, bound).
 fn sample_below(bound: &BigUint) -> BigUint {
     let byte_len = (bound.bits() as usize).div_ceil(8) + 1;
-    let mut buf = vec![0u8; byte_len];
+    // SEC-061: Wrap random buffer in Zeroizing to clear from memory on drop.
+    let mut buf = zeroize::Zeroizing::new(vec![0u8; byte_len]);
     loop {
         OsRng.fill_bytes(&mut buf);
         let r = BigUint::from_bytes_be(&buf) % bound;
@@ -1652,8 +2312,6 @@ mod tests {
         // The verifier must reject this N regardless of what proof is presented
         // because trial division will find the small factors
         let fake_proof = PifacProof {
-            commitment: vec![0u8; 32],
-            nonce: vec![0u8; 32],
             p_bits: 300,
             q_bits: 300,
             // Wrong number of rounds will also fail, but the small factor check is the key defense
@@ -1755,14 +2413,22 @@ mod tests {
         let p = BigUint::from_bytes_be(&sk.p);
         let q = BigUint::from_bytes_be(&sk.q);
 
+        // Tamper with an Nth root proof round (corrupt the a value)
         let mut proof = prove_pifac(&n, &p, &q);
-
-        // Corrupt the commitment field — this will invalidate all challenge values
-        proof.commitment = vec![0xFFu8; 32];
+        proof.nth_root_proofs[0].a = vec![0xFFu8; 32];
 
         assert!(
             !verify_pifac(&n, &proof),
-            "Pifac proof with tampered commitment must be rejected"
+            "Pifac proof with tampered Nth root must be rejected"
+        );
+
+        // Tamper with N itself (verify against a different modulus)
+        let proof = prove_pifac(&n, &p, &q);
+        let wrong_n = &n + BigUint::from(2u64);
+
+        assert!(
+            !verify_pifac(&wrong_n, &proof),
+            "Pifac proof verified against wrong N must be rejected"
         );
     }
 
@@ -1887,6 +2553,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let proof = prove_pienc(&m, &r, &public);
@@ -1911,6 +2579,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_pienc(&m, &r, &public);
@@ -1956,6 +2626,9 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            x_commitment: pilogstar_point_commitment(&x),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let proof = prove_piaffg(&x, &y, &rho_y, &public);
@@ -1989,6 +2662,9 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            x_commitment: pilogstar_point_commitment(&x),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_piaffg(&x, &y, &rho_y, &public);
@@ -2024,6 +2700,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let proof = prove_pilogstar(&x, &r, &public);
@@ -2053,6 +2731,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         // Generate proof with the correct commitment, then verify against
@@ -2067,6 +2747,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
         let proof = prove_pilogstar(&x, &r, &correct_public);
 
@@ -2103,6 +2785,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
         let pienc_proof = prove_pienc(&a, &r_a, &pienc_public);
 
@@ -2132,6 +2816,9 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            x_commitment: pilogstar_point_commitment(&b),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
         let piaffg_proof = prove_piaffg(&b, &beta_prime, &rho_y, &piaffg_public);
 
@@ -2175,6 +2862,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_pienc(&m, &r, &public);
@@ -2206,6 +2895,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_pienc(&m, &r, &public);
@@ -2256,6 +2947,9 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            x_commitment: pilogstar_point_commitment(&x),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_piaffg(&x, &y, &rho_y, &public);
@@ -2295,6 +2989,9 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            x_commitment: pilogstar_point_commitment(&x),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_piaffg(&x, &y, &rho_y, &public);
@@ -2335,6 +3032,9 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            x_commitment: pilogstar_point_commitment(&x),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_piaffg(&x, &y, &rho_y, &public);
@@ -2374,6 +3074,9 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            x_commitment: pilogstar_point_commitment(&x),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_piaffg(&x, &y, &rho_y, &public);
@@ -2454,6 +3157,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let proof = prove_pilogstar(&x, &r, &correct_public);
@@ -2468,6 +3173,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         assert!(
@@ -2495,6 +3202,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let mut proof = prove_pilogstar(&x, &r, &public);
@@ -2526,6 +3235,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         let proof = prove_pilogstar(&x, &r, &correct_public);
@@ -2539,6 +3250,8 @@ mod tests {
             n_hat: n_hat.clone(),
             s: s.clone(),
             t: t.clone(),
+            session_id: b"test-session-id".to_vec(),
+            prover_index: 1,
         };
 
         assert!(

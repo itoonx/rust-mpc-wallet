@@ -17,12 +17,15 @@
 
 mod rpc;
 
+use std::collections::HashMap as StdHashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ed25519_dalek::SigningKey;
 use tokio::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use zeroize::Zeroizing;
 
 use mpc_wallet_core::key_store::encrypted::EncryptedFileStore;
 use mpc_wallet_core::key_store::types::{KeyGroupId, KeyMetadata};
@@ -36,6 +39,9 @@ use rpc::*;
 
 /// Default max entries for authorization replay cache.
 const DEFAULT_AUTH_CACHE_MAX_ENTRIES: usize = 10_000;
+
+/// Minimum interval between requests for the same group_id (SEC-030/031).
+const MIN_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Initialize structured logging with optional JSON format.
 ///
@@ -67,7 +73,7 @@ struct NodeConfig {
     party_id: PartyId,
     nats_url: String,
     key_store_dir: PathBuf,
-    key_store_password: String,
+    key_store_password: Zeroizing<String>, // SEC-028: zeroize password on drop
     signing_key: SigningKey,
     gateway_pubkey: ed25519_dalek::VerifyingKey,
     auth_cache_max_entries: usize,
@@ -84,14 +90,20 @@ impl NodeConfig {
 
         let key_store_dir = std::env::var("KEY_STORE_DIR").unwrap_or_else(|_| "/data/keys".into());
 
-        let key_store_password =
-            std::env::var("KEY_STORE_PASSWORD").expect("KEY_STORE_PASSWORD must be set");
+        // SEC-028: wrap password in Zeroizing to clear on drop
+        let key_store_password = Zeroizing::new(
+            std::env::var("KEY_STORE_PASSWORD").expect("KEY_STORE_PASSWORD must be set"),
+        );
 
-        let signing_key_hex =
-            std::env::var("NODE_SIGNING_KEY").expect("NODE_SIGNING_KEY must be set");
-        let key_bytes = hex::decode(&signing_key_hex).expect("NODE_SIGNING_KEY must be valid hex");
+        // SEC-029: wrap all signing key intermediates in Zeroizing
+        let signing_key_hex = Zeroizing::new(
+            std::env::var("NODE_SIGNING_KEY").expect("NODE_SIGNING_KEY must be set"),
+        );
+        let key_bytes = Zeroizing::new(
+            hex::decode(&*signing_key_hex).expect("NODE_SIGNING_KEY must be valid hex"),
+        );
         assert_eq!(key_bytes.len(), 32, "NODE_SIGNING_KEY must be 32 bytes");
-        let mut arr = [0u8; 32];
+        let mut arr = Zeroizing::new([0u8; 32]);
         arr.copy_from_slice(&key_bytes);
         let signing_key = SigningKey::from_bytes(&arr);
 
@@ -230,6 +242,9 @@ async fn handle_keygen_requests(
 ) {
     use futures::StreamExt;
 
+    // SEC-030: per-group-id rate limiter to prevent request flooding
+    let mut last_request: StdHashMap<String, Instant> = StdHashMap::new();
+
     while let Some(msg) = sub.next().await {
         // SEC-026: Verify signed control message before processing
         let inner_payload = match unwrap_signed_message(&msg.payload, &config.gateway_pubkey) {
@@ -247,6 +262,18 @@ async fn handle_keygen_requests(
                 continue;
             }
         };
+
+        // SEC-030: Rate limit per group_id
+        if let Some(last) = last_request.get(&req.group_id) {
+            if last.elapsed() < MIN_REQUEST_INTERVAL {
+                tracing::warn!(
+                    group_id = %req.group_id,
+                    "rate limited: keygen request too soon (SEC-030)"
+                );
+                continue;
+            }
+        }
+        last_request.insert(req.group_id.clone(), Instant::now());
 
         tracing::info!(
             group_id = %req.group_id,
@@ -424,6 +451,9 @@ async fn handle_sign_requests(
 ) {
     use futures::StreamExt;
 
+    // SEC-031: per-group-id rate limiter to prevent request flooding
+    let mut last_request: StdHashMap<String, Instant> = StdHashMap::new();
+
     while let Some(msg) = sub.next().await {
         // SEC-026: Verify signed control message before processing
         let inner_payload = match unwrap_signed_message(&msg.payload, &config.gateway_pubkey) {
@@ -446,6 +476,18 @@ async fn handle_sign_requests(
         if !req.signer_ids.contains(&config.party_id.0) {
             continue;
         }
+
+        // SEC-031: Rate limit per group_id
+        if let Some(last) = last_request.get(&req.group_id) {
+            if last.elapsed() < MIN_REQUEST_INTERVAL {
+                tracing::warn!(
+                    group_id = %req.group_id,
+                    "rate limited: sign request too soon (SEC-031)"
+                );
+                continue;
+            }
+        }
+        last_request.insert(req.group_id.clone(), Instant::now());
 
         tracing::info!(
             group_id = %req.group_id,

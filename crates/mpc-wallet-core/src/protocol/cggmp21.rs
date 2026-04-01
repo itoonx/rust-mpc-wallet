@@ -70,12 +70,15 @@ pub struct Cggmp21ShareData {
     /// The combined group public key (compressed SEC1, 33 bytes).
     #[zeroize(skip)]
     pub group_public_key: Vec<u8>,
-    /// Paillier secret key: serialized (p, q) primes (legacy simulated format).
+    /// Paillier secret key (legacy field, kept empty for serde backward compat).
+    #[serde(default)]
     pub paillier_sk: Vec<u8>,
-    /// Paillier public key: serialized N = p * q (legacy simulated format).
+    /// Paillier public key (legacy field, kept empty for serde backward compat).
+    #[serde(default)]
     #[zeroize(skip)]
     pub paillier_pk: Vec<u8>,
-    /// Pedersen commitment parameters: serialized (s, t, N_hat).
+    /// Pedersen commitment parameters (legacy field, kept empty for serde backward compat).
+    #[serde(default)]
     #[zeroize(skip)]
     pub pedersen_params: Vec<u8>,
     /// Real Paillier secret key (Sprint 28 — replaces simulated).
@@ -114,7 +117,7 @@ pub struct Cggmp21ShareData {
 
 impl Cggmp21ShareData {
     /// Returns true if this share lacks real Paillier keys and needs a key refresh
-    /// to upgrade from legacy (simulated) Paillier keys.
+    /// to upgrade from legacy (pre-Sprint 28) Paillier keys.
     ///
     /// Shares created before Sprint 28 have `real_paillier_pk = None` and cannot
     /// participate in secure MtA-based pre-signing. In production, pre-signing
@@ -168,28 +171,6 @@ struct Round3FeldmanShare {
     share_value: Vec<u8>,
     /// Feldman commitments: C_k = a_k * G for k = 0..t-1.
     commitments: Vec<Vec<u8>>,
-}
-
-/// Simulated Paillier key pair (legacy, used when real Paillier keys are absent).
-#[derive(Serialize, Deserialize)]
-struct PaillierKeyPair {
-    /// First prime p (32 bytes for simulation).
-    p: Vec<u8>,
-    /// Second prime q (32 bytes for simulation).
-    q: Vec<u8>,
-    /// Modulus N = p * q (conceptually; stored as the hash for simulation).
-    n: Vec<u8>,
-}
-
-/// Simulated Pedersen parameters.
-#[derive(Serialize, Deserialize)]
-struct PedersenParams {
-    /// Parameter s.
-    s: Vec<u8>,
-    /// Parameter t.
-    t: Vec<u8>,
-    /// Modulus N_hat.
-    n_hat: Vec<u8>,
 }
 
 /// Default Paillier key size for production (secure, ~10s per keygen with glass_pumpkin).
@@ -271,6 +252,16 @@ pub struct PreSignature {
     /// Which parties participated in pre-signing.
     #[zeroize(skip)]
     pub signers: Vec<PartyId>,
+    /// K_i points per signer: (party_index, K_i compressed SEC1 33 bytes).
+    /// SEC-035: stored for identifiable abort — verifier checks sigma_i * G == hash * K_i + r * Chi_i.
+    #[zeroize(skip)]
+    #[serde(default)]
+    pub k_points: Vec<(u16, Vec<u8>)>,
+    /// Chi_i points per signer: (party_index, Chi_i = chi_i * G compressed SEC1 33 bytes).
+    /// Used in full CGGMP21 identifiable abort check: sigma_i * G == e * K_i + r * Chi_i.
+    #[zeroize(skip)]
+    #[serde(default)]
+    pub chi_points: Vec<(u16, Vec<u8>)>,
     /// Whether this pre-signature has been consumed (nonce reuse protection).
     #[zeroize(skip)]
     pub used: bool,
@@ -343,6 +334,70 @@ impl PreSignatureStore for InMemoryPreSignatureStore {
             .lock()
             .map(|set| set.contains(pre_sig_id))
             .unwrap_or(true) // If lock is poisoned, treat as used (safe default)
+    }
+}
+
+/// SEC-037: File-backed pre-signature store for crash-safe nonce reuse protection.
+///
+/// Each used presig ID is appended to a log file with fsync. On startup, the
+/// file is loaded to reconstruct the used set. This ensures that even if the
+/// process crashes after `mark_used` but before signing completes, the presig
+/// cannot be replayed on restart.
+pub struct FilePreSignatureStore {
+    used_ids: Mutex<HashSet<String>>,
+    file_path: std::path::PathBuf,
+}
+
+impl FilePreSignatureStore {
+    /// Create or open a file-backed store at `dir/used_presigs.log`.
+    pub fn new(dir: &std::path::Path) -> Result<Self, CoreError> {
+        let file_path = dir.join("used_presigs.log");
+        let mut used_ids = HashSet::new();
+        if file_path.exists() {
+            let content = std::fs::read_to_string(&file_path)
+                .map_err(|e| CoreError::KeyStore(format!("read presig log: {e}")))?;
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    used_ids.insert(trimmed.to_string());
+                }
+            }
+        }
+        Ok(Self {
+            used_ids: Mutex::new(used_ids),
+            file_path,
+        })
+    }
+}
+
+impl PreSignatureStore for FilePreSignatureStore {
+    fn mark_used(&self, pre_sig_id: &str) -> Result<(), CoreError> {
+        let mut set = self.used_ids.lock().unwrap();
+        if set.contains(pre_sig_id) {
+            return Err(CoreError::Protocol(
+                "pre-signature already used — nonce reuse would leak private key (SEC-037)".into(),
+            ));
+        }
+        // Write to file FIRST with fsync — crash-safe before updating in-memory
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.file_path)
+            .map_err(|e| CoreError::KeyStore(format!("open presig log: {e}")))?;
+        writeln!(file, "{}", pre_sig_id)
+            .map_err(|e| CoreError::KeyStore(format!("write presig log: {e}")))?;
+        file.sync_all()
+            .map_err(|e| CoreError::KeyStore(format!("fsync presig log: {e}")))?;
+        set.insert(pre_sig_id.to_string());
+        Ok(())
+    }
+
+    fn is_used(&self, pre_sig_id: &str) -> bool {
+        self.used_ids
+            .lock()
+            .map(|s| s.contains(pre_sig_id))
+            .unwrap_or(true) // safe default on poisoned mutex
     }
 }
 
@@ -510,62 +565,6 @@ fn schnorr_verify(
 // Auxiliary info generation
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Generate simulated Paillier key pair deterministically from party secret.
-///
-/// In production, these would be large (2048-bit) primes. For simulation
-/// purposes, we derive 32-byte values from the party's secret using SHA-256.
-fn generate_paillier_keypair(secret: &Scalar, party_index: u16) -> PaillierKeyPair {
-    let secret_bytes = secret.to_repr();
-
-    // Derive p from H("paillier-p" || secret || party_index)
-    let mut hasher = Sha256::new();
-    hasher.update(b"paillier-p");
-    hasher.update(secret_bytes.as_slice());
-    hasher.update(party_index.to_le_bytes());
-    let p = hasher.finalize().to_vec();
-
-    // Derive q from H("paillier-q" || secret || party_index)
-    let mut hasher = Sha256::new();
-    hasher.update(b"paillier-q");
-    hasher.update(secret_bytes.as_slice());
-    hasher.update(party_index.to_le_bytes());
-    let q = hasher.finalize().to_vec();
-
-    // N = H("paillier-n" || p || q) (simulated modulus)
-    let mut hasher = Sha256::new();
-    hasher.update(b"paillier-n");
-    hasher.update(&p);
-    hasher.update(&q);
-    let n = hasher.finalize().to_vec();
-
-    PaillierKeyPair { p, q, n }
-}
-
-/// Generate simulated Pedersen parameters from party secret.
-fn generate_pedersen_params(secret: &Scalar, party_index: u16) -> PedersenParams {
-    let secret_bytes = secret.to_repr();
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"pedersen-s");
-    hasher.update(secret_bytes.as_slice());
-    hasher.update(party_index.to_le_bytes());
-    let s = hasher.finalize().to_vec();
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"pedersen-t");
-    hasher.update(secret_bytes.as_slice());
-    hasher.update(party_index.to_le_bytes());
-    let t = hasher.finalize().to_vec();
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"pedersen-n-hat");
-    hasher.update(secret_bytes.as_slice());
-    hasher.update(party_index.to_le_bytes());
-    let n_hat = hasher.finalize().to_vec();
-
-    PedersenParams { s, t, n_hat }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Protocol struct
 // ─────────────────────────────────────────────────────────────────────────────
@@ -592,9 +591,10 @@ impl Cggmp21Protocol {
     ///
     /// 1. **Round 1:** Each party generates random k_i, gamma_i. Broadcasts
     ///    K_i = k_i * G, Gamma_i = gamma_i * G, plus Schnorr proof of k_i.
-    /// 2. **Round 2:** Multiplicative-to-additive (MtA) conversion:
-    ///    delta_i = k_i * sum(gamma_j for all j). In production this uses
-    ///    Paillier encryption; for simulation we compute directly.
+    /// 2. **Round 2:** Multiplicative-to-additive (MtA) conversion using real
+    ///    Paillier homomorphic encryption: each party encrypts k_i under its own
+    ///    Paillier key, then MtA produces additive shares of k_i * gamma_j.
+    ///    ZK proofs (Pienc, PiAffg, PiLogstar) are mandatory.
     /// 3. **Finalize:** Compute R = (1/delta) * G where delta = sum(delta_i),
     ///    and chi_i = k_i * x_i * lambda_i (share of k * x).
     pub async fn pre_sign(
@@ -621,6 +621,16 @@ impl Cggmp21Protocol {
     ///
     /// If the final signature fails verification, the protocol identifies
     /// which party submitted an invalid partial signature.
+    ///
+    /// # Security: CVE-2025-66017 constraints
+    ///
+    /// **DO NOT** combine presignatures with:
+    /// - **HD wallet derivation (BIP-32)**: security degrades from 128-bit to 85-bit.
+    /// - **Raw pre-hashed signing**: callers must pass the original message, not a
+    ///   pre-computed hash. This function applies SHA-256 internally.
+    ///
+    /// Presignatures are message-independent "blank cheques" — each MUST be used
+    /// exactly once. The `used` flag and optional `PreSignatureStore` enforce this.
     pub async fn sign_with_presig(
         &self,
         pre_sig: &mut PreSignature,
@@ -967,17 +977,6 @@ async fn cggmp21_keygen(
     // ── Per-round sync barrier (L-012 fix): ensure all Feldman VSS complete
     transport.wait_ready().await?;
 
-    // ── Generate auxiliary info (Paillier + Pedersen) ────────────────────
-    // Legacy simulated Paillier (kept for backward compat serialization)
-    let sim_paillier = generate_paillier_keypair(&x_i, my_index);
-    let sim_pedersen = generate_pedersen_params(&x_i, my_index);
-
-    let paillier_sk_bytes = serde_json::to_vec(&(sim_paillier.p.clone(), sim_paillier.q.clone()))
-        .map_err(|e| CoreError::Serialization(e.to_string()))?;
-    let paillier_pk_bytes = sim_paillier.n.clone();
-    let pedersen_bytes =
-        serde_json::to_vec(&sim_pedersen).map_err(|e| CoreError::Serialization(e.to_string()))?;
-
     // ── Real Paillier keygen + ZK proofs (Sprint 28) ────────────────────
     let (real_pk, real_sk) = crate::paillier::keygen::keypair_for_protocol(DEFAULT_PAILLIER_BITS)?;
 
@@ -1071,9 +1070,9 @@ async fn cggmp21_keygen(
         secret_share: final_share.to_repr().to_vec(),
         public_shares,
         group_public_key: group_pubkey_bytes.clone(),
-        paillier_sk: paillier_sk_bytes,
-        paillier_pk: paillier_pk_bytes,
-        pedersen_params: pedersen_bytes,
+        paillier_sk: vec![],
+        paillier_pk: vec![],
+        pedersen_params: vec![],
         real_paillier_sk: Some(real_sk),
         real_paillier_pk: Some(real_pk),
         all_paillier_pks: Some(all_paillier_pks),
@@ -1105,11 +1104,12 @@ async fn cggmp21_keygen(
 ///
 /// Round 1: Each party generates k_i, gamma_i, broadcasts K_i = k_i * G,
 ///          Gamma_i = gamma_i * G, plus Schnorr proof of k_i.
-/// Round 2: Multiplicative-to-additive (MtA) conversion. In production this
-///          uses Paillier encryption. For simulation, parties share their
-///          k_i and gamma_i scalars so the combined delta = k * gamma can be
-///          computed. This is insecure in production but correctly demonstrates
-///          the protocol structure and produces valid signatures.
+/// Round 2: Multiplicative-to-additive (MtA) conversion using real Paillier
+///          homomorphic encryption. Each party encrypts k_i under its own
+///          Paillier public key and broadcasts Enc(k_i). For each pair (i,j),
+///          MtA produces additive shares of k_i * gamma_j (for delta) and
+///          k_i * x_j * lambda_j (for chi). Raw scalars are never broadcast.
+///          ZK proofs (Pienc, PiAffg, PiLogstar) are mandatory for all MtA steps.
 /// Finalize: R = delta^{-1} * Gamma_sum = (k*gamma)^{-1} * gamma*G = k^{-1}*G.
 ///           chi_i = k_i * x_i * lambda_i (share of k * x).
 async fn cggmp21_pre_sign(
@@ -1236,12 +1236,17 @@ async fn cggmp21_pre_sign(
     // Check if real Paillier keys are available for secure MtA
     // Real Paillier MtA for pre-signing (enabled Sprint 28 Phase C1).
     // Shares created after Sprint 28 always have real Paillier keys from
-    // keypair_for_protocol(). The simulated fallback remains for legacy shares.
+    // keypair_for_protocol(). Legacy shares without real Paillier keys are rejected.
     let has_real_paillier = share_data.real_paillier_pk.is_some()
         && share_data.real_paillier_sk.is_some()
         && share_data.all_paillier_pks.is_some();
 
-    let (delta, chi_i_scalar): (Scalar, Zeroizing<Scalar>) = if has_real_paillier {
+    #[allow(clippy::type_complexity)]
+    let (delta, chi_i_scalar, chi_broadcast_collected): (
+        Scalar,
+        Zeroizing<Scalar>,
+        Vec<(u16, Vec<u8>)>,
+    ) = if has_real_paillier {
         // ── Real Paillier MtA (Sprint 28) ──────────────────────────────
         // Each party i: encrypt k_i under their own Paillier key, broadcast
         // Enc(k_i). Then for each pair (i,j), run MtA to compute additive
@@ -1283,6 +1288,8 @@ async fn cggmp21_pre_sign(
             n_hat: ped_n_hat.clone(),
             s: ped_s.clone(),
             t: ped_t.clone(),
+            session_id: key_share.group_public_key.as_bytes().to_vec(),
+            prover_index: my_index,
         };
         let m_big = BigUint::from_bytes_be(&mta_witness.plaintext_m);
         let r_big = BigUint::from_bytes_be(&mta_witness.randomness_r);
@@ -1297,6 +1304,8 @@ async fn cggmp21_pre_sign(
             n_hat: ped_n_hat.clone(),
             s: ped_s.clone(),
             t: ped_t.clone(),
+            session_id: key_share.group_public_key.as_bytes().to_vec(),
+            prover_index: my_index,
         };
         let pi_logstar_proof =
             crate::paillier::zk_proofs::prove_pilogstar(&m_big, &r_big, &pi_logstar_public);
@@ -1381,6 +1390,8 @@ async fn cggmp21_pre_sign(
                 n_hat: own_ped.0.clone(),
                 s: own_ped.1.clone(),
                 t: own_ped.2.clone(),
+                session_id: key_share.group_public_key.as_bytes().to_vec(),
+                prover_index: peer_msg.party_index,
             };
             if !crate::paillier::zk_proofs::verify_pienc(pi_enc, &pi_enc_public) {
                 return Err(CoreError::Protocol(format!(
@@ -1409,6 +1420,8 @@ async fn cggmp21_pre_sign(
                 n_hat: own_ped.0.clone(),
                 s: own_ped.1.clone(),
                 t: own_ped.2.clone(),
+                session_id: key_share.group_public_key.as_bytes().to_vec(),
+                prover_index: peer_msg.party_index,
             };
             if !crate::paillier::zk_proofs::verify_pilogstar(pi_logstar, &pi_logstar_public) {
                 return Err(CoreError::Protocol(format!(
@@ -1436,8 +1449,9 @@ async fn cggmp21_pre_sign(
             // Πaff-g witness: x = gamma_i (or x_i*lambda_i), y = beta' (both small).
             let beta_d = BigUint::from_bytes_be(&mta_w_delta.result.beta);
             let rho_d = BigUint::from_bytes_be(&mta_w_delta.rho_y);
+            let gamma_big = BigUint::from_bytes_be(&gamma_i_bytes);
             let pi_affg_delta = crate::paillier::zk_proofs::prove_piaffg(
-                &BigUint::from_bytes_be(&gamma_i_bytes),
+                &gamma_big,
                 &beta_d,
                 &rho_d,
                 &crate::paillier::zk_proofs::PiAffgPublicInput {
@@ -1448,13 +1462,19 @@ async fn cggmp21_pre_sign(
                     n_hat: own_ped.0.clone(),
                     s: own_ped.1.clone(),
                     t: own_ped.2.clone(),
+                    x_commitment: crate::paillier::zk_proofs::pilogstar_point_commitment(
+                        &gamma_big,
+                    ),
+                    session_id: key_share.group_public_key.as_bytes().to_vec(),
+                    prover_index: my_index,
                 },
             );
 
             let beta_c = BigUint::from_bytes_be(&mta_w_chi.result.beta);
             let rho_c = BigUint::from_bytes_be(&mta_w_chi.rho_y);
+            let x_i_lambda_big = BigUint::from_bytes_be(&x_i_lambda_i_bytes);
             let pi_affg_chi = crate::paillier::zk_proofs::prove_piaffg(
-                &BigUint::from_bytes_be(&x_i_lambda_i_bytes),
+                &x_i_lambda_big,
                 &beta_c,
                 &rho_c,
                 &crate::paillier::zk_proofs::PiAffgPublicInput {
@@ -1465,6 +1485,11 @@ async fn cggmp21_pre_sign(
                     n_hat: own_ped.0.clone(),
                     s: own_ped.1.clone(),
                     t: own_ped.2.clone(),
+                    x_commitment: crate::paillier::zk_proofs::pilogstar_point_commitment(
+                        &x_i_lambda_big,
+                    ),
+                    session_id: key_share.group_public_key.as_bytes().to_vec(),
+                    prover_index: my_index,
                 },
             );
 
@@ -1482,6 +1507,11 @@ async fn cggmp21_pre_sign(
                         peer_msg.party_index
                     ))
                 })?;
+            // Include EC point commitments for verifier-side PiAffg check (SEC-056)
+            let gamma_x_commitment =
+                crate::paillier::zk_proofs::pilogstar_point_commitment(&gamma_big);
+            let chi_x_commitment =
+                crate::paillier::zk_proofs::pilogstar_point_commitment(&x_i_lambda_big);
             let combined_response = serde_json::json!({
                 "from_party": my_index,
                 "to_party": peer_msg.party_index,
@@ -1489,6 +1519,8 @@ async fn cggmp21_pre_sign(
                 "chi_ct": serde_json::to_value(&mta_w_chi.result.ciphertext).unwrap(),
                 "pi_affg_delta": serde_json::to_value(&pi_affg_delta).unwrap(),
                 "pi_affg_chi": serde_json::to_value(&pi_affg_chi).unwrap(),
+                "gamma_x_commitment": gamma_x_commitment,
+                "chi_x_commitment": chi_x_commitment,
             });
             let payload = serde_json::to_vec(&combined_response)
                 .map_err(|e| CoreError::Serialization(e.to_string()))?;
@@ -1563,6 +1595,19 @@ async fn cggmp21_pre_sign(
             let pi_affg_d: crate::paillier::zk_proofs::PiAffgProof =
                 serde_json::from_value(pi_affg_d_val.clone())
                     .map_err(|e| CoreError::Serialization(e.to_string()))?;
+            // EC point commitments from prover (SEC-056: sent alongside proofs)
+            let gamma_x_commit: Vec<u8> = serde_json::from_value(
+                r3.get("gamma_x_commitment")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .unwrap_or_default();
+            let chi_x_commit: Vec<u8> = serde_json::from_value(
+                r3.get("chi_x_commitment")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            )
+            .unwrap_or_default();
             let verify_pub_d = crate::paillier::zk_proofs::PiAffgPublicInput {
                 pk_n0: my_pk.n.clone(),
                 pk_n0_squared: my_pk.n_squared.clone(),
@@ -1571,6 +1616,9 @@ async fn cggmp21_pre_sign(
                 n_hat: own_ped.0.clone(),
                 s: own_ped.1.clone(),
                 t: own_ped.2.clone(),
+                x_commitment: gamma_x_commit,
+                session_id: key_share.group_public_key.as_bytes().to_vec(),
+                prover_index: _from_party,
             };
             if !crate::paillier::zk_proofs::verify_piaffg(&pi_affg_d, &verify_pub_d) {
                 return Err(CoreError::Protocol(format!(
@@ -1599,6 +1647,9 @@ async fn cggmp21_pre_sign(
                 n_hat: own_ped.0.clone(),
                 s: own_ped.1.clone(),
                 t: own_ped.2.clone(),
+                x_commitment: chi_x_commit,
+                session_id: key_share.group_public_key.as_bytes().to_vec(),
+                prover_index: _from_party,
             };
             if !crate::paillier::zk_proofs::verify_piaffg(&pi_affg_c, &verify_pub_c) {
                 return Err(CoreError::Protocol(format!(
@@ -1628,10 +1679,27 @@ async fn cggmp21_pre_sign(
         // ── Per-round sync barrier (L-012 fix): ensure all MtA round 2 complete
         transport.wait_ready().await?;
 
-        // Broadcast delta_i for aggregation (as Scalar bytes, 32 bytes)
+        // Compute Chi_i = chi_i * G for identifiable abort broadcast
+        let chi_i_point = {
+            let chi_proj = ProjectivePoint::GENERATOR * chi_scalar;
+            let chi_affine = chi_proj.to_affine();
+            k256::PublicKey::from_affine(chi_affine)
+                .map_err(|e| CoreError::Crypto(format!("invalid Chi_i point: {e}")))?
+                .to_encoded_point(true)
+                .as_bytes()
+                .to_vec()
+        };
+
+        // Schnorr proof of knowledge for Chi_i (prevents framing in identifiable abort)
+        let (chi_schnorr_r, chi_schnorr_s) = schnorr_prove(&chi_scalar, &chi_i_point, my_index);
+
+        // Broadcast delta_i + Chi_i + Schnorr PoK for aggregation (round 13)
         let delta_broadcast = serde_json::json!({
             "party_index": my_index,
             "delta_i": delta_scalar.to_repr().as_slice(),
+            "chi_i_point": chi_i_point,
+            "chi_schnorr_r": chi_schnorr_r,
+            "chi_schnorr_s": chi_schnorr_s,
         });
         let delta_payload = serde_json::to_vec(&delta_broadcast)
             .map_err(|e| CoreError::Serialization(e.to_string()))?;
@@ -1644,8 +1712,9 @@ async fn cggmp21_pre_sign(
             })
             .await?;
 
-        // Collect all delta_i and sum as Scalars
+        // Collect all delta_i (+ Chi_i points) and sum deltas as Scalars
         let mut delta_sum = delta_scalar;
+        let mut chi_broadcast_collected: Vec<(u16, Vec<u8>)> = vec![(my_index, chi_i_point)];
         for _ in 1..n_signers {
             let msg = transport.recv().await?;
             let dv: serde_json::Value = serde_json::from_slice(&msg.payload)
@@ -1656,9 +1725,46 @@ async fn cggmp21_pre_sign(
                 .into_option()
                 .ok_or_else(|| CoreError::Crypto("invalid delta_i scalar".into()))?;
             delta_sum += d_scalar;
-        }
 
-        (delta_sum, Zeroizing::new(chi_scalar))
+            // Collect Chi_i point from peer and verify Schnorr PoK
+            let peer_idx = dv["party_index"].as_u64().unwrap_or(0) as u16;
+            if let Some(chi_val) = dv.get("chi_i_point") {
+                if let Ok(chi_bytes) = serde_json::from_value::<Vec<u8>>(chi_val.clone()) {
+                    if !chi_bytes.is_empty() {
+                        // Extract and verify mandatory Schnorr proof for Chi_i
+                        let chi_r: Vec<u8> = serde_json::from_value(
+                            dv.get("chi_schnorr_r").cloned().unwrap_or_default(),
+                        )
+                        .unwrap_or_default();
+                        let chi_s: Vec<u8> = serde_json::from_value(
+                            dv.get("chi_schnorr_s").cloned().unwrap_or_default(),
+                        )
+                        .unwrap_or_default();
+                        if chi_r.is_empty() || chi_s.is_empty() {
+                            return Err(CoreError::Protocol(format!(
+                                "identifiable abort: party {} missing Chi_i Schnorr proof",
+                                peer_idx
+                            )));
+                        }
+                        if !schnorr_verify(&chi_bytes, &chi_r, &chi_s, peer_idx)? {
+                            return Err(CoreError::Protocol(format!(
+                                "identifiable abort: party {} failed Chi_i Schnorr proof \
+                                 — cannot trust chi_i_point",
+                                peer_idx
+                            )));
+                        }
+                        chi_broadcast_collected.push((peer_idx, chi_bytes));
+                    }
+                }
+            }
+        }
+        chi_broadcast_collected.sort_by_key(|(idx, _)| *idx);
+
+        (
+            delta_sum,
+            Zeroizing::new(chi_scalar),
+            chi_broadcast_collected,
+        )
     } else {
         // Sprint 28: Legacy shares without real Paillier keys are unconditionally rejected.
         // No simulated MtA fallback — even in test builds. All keygen paths now generate
@@ -1684,6 +1790,12 @@ async fn cggmp21_pre_sign(
         .as_bytes()
         .to_vec();
 
+    // SEC-035: collect K_i points from Round 1 for identifiable abort
+    let k_points: Vec<(u16, Vec<u8>)> = round1_msgs
+        .iter()
+        .map(|m| (m.party_index, m.k_point.clone()))
+        .collect();
+
     Ok(PreSignature {
         id: uuid::Uuid::new_v4().to_string(),
         k_i: k_i.to_repr().to_vec(),
@@ -1692,6 +1804,8 @@ async fn cggmp21_pre_sign(
         big_r: big_r_bytes,
         party_id: my_party_id,
         signers: signers.to_vec(),
+        k_points,
+        chi_points: chi_broadcast_collected,
         used: false,
     })
 }
@@ -1851,8 +1965,8 @@ async fn cggmp21_sign_online_with_store(
         // We verify using the public K_i and X_i from keygen.
         return Err(identify_cheater(
             &all_sigmas,
-            &pre_sig.signers,
-            key_share,
+            &pre_sig.k_points,
+            &pre_sig.chi_points,
             e_scalar,
             r_scalar,
         ));
@@ -1881,52 +1995,32 @@ async fn cggmp21_sign_online_with_store(
 
 /// Attempt to identify which party provided an invalid partial signature.
 ///
-/// Checks each party's sigma_i against the expected value computed from
-/// the group's public key shares. Returns a `CoreError::Protocol` with
-/// the cheater's identity.
+/// SEC-035: Full CGGMP21 identifiable abort check using K_i and Chi_i points.
+/// For each party, verifies: `sigma_i * G == e * K_i + r * Chi_i`
+/// where e = H(message) and r = x-coordinate of R.
+///
+/// If Chi_i points are not available (backward compat with old pre-signatures),
+/// falls back to basic checks (zero sigma, malformed K_i).
 fn identify_cheater(
     all_sigmas: &[(u16, Scalar)],
-    _signers: &[PartyId],
-    key_share: &KeyShare,
-    _e_scalar: Scalar,
-    _r_scalar: Scalar,
+    k_points: &[(u16, Vec<u8>)],
+    chi_points: &[(u16, Vec<u8>)],
+    e_scalar: Scalar,
+    r_scalar: Scalar,
 ) -> CoreError {
-    // Try to load the share data to get public key shares
-    let share_data: Result<Cggmp21ShareData, _> = serde_json::from_slice(&key_share.share_data);
-    let share_data = match share_data {
-        Ok(d) => d,
-        Err(_) => {
-            return CoreError::Protocol(
-                "identifiable abort: signature verification failed but cannot identify cheater — share data corrupt".into(),
-            );
-        }
-    };
+    use k256::elliptic_curve::group::GroupEncoding;
+    use k256::elliptic_curve::sec1::FromEncodedPoint;
 
-    // For each party, verify their partial contribution
+    // Build lookups: party_index -> point bytes
+    let k_point_map: std::collections::HashMap<u16, &Vec<u8>> =
+        k_points.iter().map(|(idx, kp)| (*idx, kp)).collect();
+    let chi_point_map: std::collections::HashMap<u16, &Vec<u8>> =
+        chi_points.iter().map(|(idx, cp)| (*idx, cp)).collect();
+
+    let have_chi_points = !chi_points.is_empty();
+
     for &(party_idx, sigma_i) in all_sigmas {
-        // Compute what sigma_i * G should be
-        let sigma_point = ProjectivePoint::GENERATOR * sigma_i;
-
-        // Expected: sigma_i * G = k_i * e * G + (k_i * x_i * lambda_i) * r * G
-        //         = e * K_i + r * lambda_i * x_i * K_i
-        // We don't have K_i stored, but we know:
-        //   sigma_i = k_i * e + chi_i * r where chi_i = k_i * x_i * lambda_i
-        //
-        // Alternative check: verify that the partial signature is consistent
-        // by checking sum. If sum doesn't verify, at least one party is bad.
-        // We use a simpler heuristic: check if sigma_i is zero or the identity
-        // contribution is trivially wrong.
-
-        // Get the public key share for this party
-        let pk_idx = (party_idx - 1) as usize;
-        if pk_idx >= share_data.public_shares.len() {
-            return CoreError::Protocol(format!(
-                "identifiable abort: party {} cheated: party index out of range",
-                party_idx
-            ));
-        }
-
-        // Verify the partial sigma_i is a valid non-zero scalar contribution
+        // Check 1: zero sigma is always invalid
         if sigma_i == Scalar::ZERO {
             return CoreError::Protocol(format!(
                 "identifiable abort: party {} cheated: submitted zero partial signature",
@@ -1934,18 +2028,82 @@ fn identify_cheater(
             ));
         }
 
-        // Without K_i (nonce commitment point per party) stored from pre-signing,
-        // we cannot fully verify each party's sigma_i independently. However, we
-        // can detect obviously invalid contributions like zero values.
-        // In production CGGMP21, K_i would be stored during pre-signing and used
-        // here to verify: sigma_i * G == e * K_i + r * chi_i * G.
-        let _ = sigma_point; // Would be used with stored K_i in production
+        // Check 2: validate K_i is a valid curve point
+        if let Some(k_bytes) = k_point_map.get(&party_idx) {
+            let k_encoded = match k256::EncodedPoint::from_bytes(k_bytes) {
+                Ok(e) => e,
+                Err(_) => {
+                    return CoreError::Protocol(format!(
+                        "identifiable abort: party {} cheated: invalid K_i encoding",
+                        party_idx
+                    ));
+                }
+            };
+            let k_affine: Option<k256::AffinePoint> =
+                k256::AffinePoint::from_encoded_point(&k_encoded).into();
+            if k_affine.is_none() {
+                return CoreError::Protocol(format!(
+                    "identifiable abort: party {} cheated: K_i is not on the curve",
+                    party_idx
+                ));
+            }
+            let k_proj: ProjectivePoint = k_affine.unwrap().into();
+
+            // Verify sigma_i * G is not the identity (point at infinity)
+            let sigma_point = ProjectivePoint::GENERATOR * sigma_i;
+            if sigma_point.to_bytes() == ProjectivePoint::IDENTITY.to_bytes() {
+                return CoreError::Protocol(format!(
+                    "identifiable abort: party {} cheated: sigma_i * G is the identity point",
+                    party_idx
+                ));
+            }
+
+            // Check 3: Full CGGMP21 abort check if Chi_i is available
+            // Verify: sigma_i * G == e * K_i + r * Chi_i
+            if let Some(chi_bytes) = chi_point_map.get(&party_idx) {
+                let chi_encoded = match k256::EncodedPoint::from_bytes(chi_bytes) {
+                    Ok(e) => e,
+                    Err(_) => {
+                        return CoreError::Protocol(format!(
+                            "identifiable abort: party {} cheated: invalid Chi_i encoding",
+                            party_idx
+                        ));
+                    }
+                };
+                let chi_affine: Option<k256::AffinePoint> =
+                    k256::AffinePoint::from_encoded_point(&chi_encoded).into();
+                if chi_affine.is_none() {
+                    return CoreError::Protocol(format!(
+                        "identifiable abort: party {} cheated: Chi_i is not on the curve",
+                        party_idx
+                    ));
+                }
+                let chi_proj: ProjectivePoint = chi_affine.unwrap().into();
+
+                // sigma_i * G == e * K_i + r * Chi_i
+                let expected: ProjectivePoint = k_proj * e_scalar + chi_proj * r_scalar;
+                if sigma_point != expected {
+                    return CoreError::Protocol(format!(
+                        "identifiable abort: party {} cheated: sigma_i * G != e * K_i + r * Chi_i",
+                        party_idx
+                    ));
+                }
+            }
+        }
     }
 
-    // If we can't pinpoint the exact cheater, report all sigmas failed
-    CoreError::Protocol(
-        "identifiable abort: final signature verification failed — at least one party submitted invalid partial signature".into(),
-    )
+    // If we have Chi_i points but couldn't pinpoint, all individual checks passed
+    // but the aggregate still failed -- possible Chi_i broadcast mismatch.
+    if have_chi_points {
+        CoreError::Protocol(
+            "identifiable abort: final signature verification failed — all individual sigma_i * G == e * K_i + r * Chi_i checks passed but aggregate is invalid".into(),
+        )
+    } else {
+        // Fallback without Chi_i points -- cannot pinpoint exact cheater
+        CoreError::Protocol(
+            "identifiable abort: final signature verification failed — at least one party submitted invalid partial signature (Chi_i points unavailable for full check)".into(),
+        )
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2261,17 +2419,7 @@ async fn cggmp21_refresh(
         }
     }
 
-    // ── Generate fresh auxiliary info (Paillier + Pedersen) ───────────────
-    let sim_paillier = generate_paillier_keypair(&new_share, my_index);
-    let sim_pedersen = generate_pedersen_params(&new_share, my_index);
-
-    let paillier_sk_bytes = serde_json::to_vec(&(sim_paillier.p.clone(), sim_paillier.q.clone()))
-        .map_err(|e| CoreError::Serialization(e.to_string()))?;
-    let paillier_pk_bytes = sim_paillier.n.clone();
-    let pedersen_bytes =
-        serde_json::to_vec(&sim_pedersen).map_err(|e| CoreError::Serialization(e.to_string()))?;
-
-    // Generate fresh real Paillier keys + ZK proofs
+    // ── Generate fresh real Paillier keys + ZK proofs ─────────────────
     let (fresh_pk, fresh_sk) =
         crate::paillier::keygen::keypair_for_protocol(DEFAULT_PAILLIER_BITS)?;
 
@@ -2351,9 +2499,9 @@ async fn cggmp21_refresh(
         secret_share: new_share.to_repr().to_vec(),
         public_shares: all_public_shares,
         group_public_key: share_data.group_public_key.clone(),
-        paillier_sk: paillier_sk_bytes,
-        paillier_pk: paillier_pk_bytes,
-        pedersen_params: pedersen_bytes,
+        paillier_sk: vec![],
+        paillier_pk: vec![],
+        pedersen_params: vec![],
         real_paillier_sk: Some(fresh_sk),
         real_paillier_pk: Some(fresh_pk),
         all_paillier_pks: Some(fresh_all_pks),
@@ -2482,30 +2630,6 @@ mod tests {
         assert_eq!(lambda, Scalar::from(2u64));
     }
 
-    // ── Paillier + Pedersen aux info tests ──────────────────────────────
-
-    #[test]
-    fn test_paillier_keypair_generated() {
-        let secret = Scalar::from(42u64);
-        let kp = generate_paillier_keypair(&secret, 1);
-        assert_eq!(kp.p.len(), 32);
-        assert_eq!(kp.q.len(), 32);
-        assert_eq!(kp.n.len(), 32);
-        // Different parties get different keys
-        let kp2 = generate_paillier_keypair(&secret, 2);
-        assert_ne!(kp.p, kp2.p);
-        assert_ne!(kp.q, kp2.q);
-    }
-
-    #[test]
-    fn test_pedersen_params_generated() {
-        let secret = Scalar::from(42u64);
-        let pp = generate_pedersen_params(&secret, 1);
-        assert_eq!(pp.s.len(), 32);
-        assert_eq!(pp.t.len(), 32);
-        assert_eq!(pp.n_hat.len(), 32);
-    }
-
     // ── Share data serialization test ───────────────────────────────────
 
     #[test]
@@ -2534,9 +2658,10 @@ mod tests {
         assert_eq!(restored.secret_share, vec![1u8; 32]);
         assert_eq!(restored.public_shares.len(), 2);
         assert_eq!(restored.group_public_key, vec![4u8; 33]);
-        assert!(!restored.paillier_sk.is_empty());
-        assert!(!restored.paillier_pk.is_empty());
-        assert!(!restored.pedersen_params.is_empty());
+        // Legacy fields preserved through serde roundtrip
+        assert_eq!(restored.paillier_sk, vec![5u8; 64]);
+        assert_eq!(restored.paillier_pk, vec![6u8; 32]);
+        assert_eq!(restored.pedersen_params, vec![7u8; 96]);
         // Optional fields should be None for old shares
         assert!(restored.real_paillier_sk.is_none());
         assert!(restored.real_paillier_pk.is_none());
@@ -2649,26 +2774,33 @@ mod tests {
                 assert_eq!(ps.len(), 33, "compressed SEC1 point is 33 bytes");
             }
 
-            // Paillier keys must be non-empty
-            assert!(!data.paillier_sk.is_empty(), "Paillier SK must exist");
-            assert!(!data.paillier_pk.is_empty(), "Paillier PK must exist");
-
-            // Pedersen params must be non-empty
+            // Legacy fields are now empty (simulated Paillier removed)
             assert!(
-                !data.pedersen_params.is_empty(),
-                "Pedersen params must exist"
+                data.paillier_sk.is_empty(),
+                "Legacy paillier_sk should be empty"
+            );
+            assert!(
+                data.paillier_pk.is_empty(),
+                "Legacy paillier_pk should be empty"
+            );
+            assert!(
+                data.pedersen_params.is_empty(),
+                "Legacy pedersen_params should be empty"
             );
 
-            // Verify Paillier SK can be deserialized
-            let (p, q): (Vec<u8>, Vec<u8>) = serde_json::from_slice(&data.paillier_sk).unwrap();
-            assert_eq!(p.len(), 32);
-            assert_eq!(q.len(), 32);
-
-            // Verify Pedersen params can be deserialized
-            let pp: PedersenParams = serde_json::from_slice(&data.pedersen_params).unwrap();
-            assert_eq!(pp.s.len(), 32);
-            assert_eq!(pp.t.len(), 32);
-            assert_eq!(pp.n_hat.len(), 32);
+            // Real Paillier keys must be present
+            assert!(
+                data.real_paillier_sk.is_some(),
+                "Real Paillier SK must exist"
+            );
+            assert!(
+                data.real_paillier_pk.is_some(),
+                "Real Paillier PK must exist"
+            );
+            assert!(
+                data.all_paillier_pks.is_some(),
+                "All Paillier PKs must exist"
+            );
         }
     }
 
@@ -2811,6 +2943,8 @@ mod tests {
                     big_r: vec![],
                     party_id: PartyId(0),
                     signers: vec![],
+                    k_points: vec![],
+                    chi_points: vec![],
                     used: true,
                 },
             );
@@ -2994,8 +3128,6 @@ mod tests {
     #[tokio::test]
     async fn test_cggmp21_identifiable_abort_detection() {
         // Test that a corrupted partial signature triggers identifiable abort
-        let signers = vec![PartyId(1), PartyId(2)];
-        // Create fake sigma values where one is deliberately wrong
         let mut rng = rand::thread_rng();
         let sigma_good = Scalar::random(&mut rng);
         let sigma_bad = Scalar::ZERO; // Zero is always wrong
@@ -3004,59 +3136,9 @@ mod tests {
         let e_scalar = Scalar::from(42u64);
         let r_scalar = Scalar::from(7u64);
 
-        // Create a minimal key share for testing
-        let share_data = Cggmp21ShareData {
-            party_index: 1,
-            secret_share: Scalar::from(1u64).to_repr().to_vec(),
-            public_shares: vec![
-                // Two dummy compressed points
-                {
-                    let p = (ProjectivePoint::GENERATOR * Scalar::from(1u64)).to_affine();
-                    k256::PublicKey::from_affine(p)
-                        .unwrap()
-                        .to_encoded_point(true)
-                        .as_bytes()
-                        .to_vec()
-                },
-                {
-                    let p = (ProjectivePoint::GENERATOR * Scalar::from(2u64)).to_affine();
-                    k256::PublicKey::from_affine(p)
-                        .unwrap()
-                        .to_encoded_point(true)
-                        .as_bytes()
-                        .to_vec()
-                },
-            ],
-            group_public_key: {
-                let p = (ProjectivePoint::GENERATOR * Scalar::from(3u64)).to_affine();
-                k256::PublicKey::from_affine(p)
-                    .unwrap()
-                    .to_encoded_point(true)
-                    .as_bytes()
-                    .to_vec()
-            },
-            paillier_sk: vec![0u8; 32],
-            paillier_pk: vec![0u8; 32],
-            pedersen_params: vec![0u8; 32],
-            real_paillier_sk: None,
-            real_paillier_pk: None,
-            all_paillier_pks: None,
-            real_pedersen_n_hat: None,
-            real_pedersen_s: None,
-            real_pedersen_t: None,
-            all_pedersen_params: None,
-        };
-
-        let share_bytes = serde_json::to_vec(&share_data).unwrap();
-        let key_share = KeyShare {
-            scheme: CryptoScheme::Cggmp21Secp256k1,
-            party_id: PartyId(1),
-            config: ThresholdConfig::new(2, 3).unwrap(),
-            group_public_key: GroupPublicKey::Secp256k1(share_data.group_public_key.clone()),
-            share_data: Zeroizing::new(share_bytes),
-        };
-
-        let err = identify_cheater(&all_sigmas, &signers, &key_share, e_scalar, r_scalar);
+        let k_points: Vec<(u16, Vec<u8>)> = vec![];
+        let chi_points: Vec<(u16, Vec<u8>)> = vec![];
+        let err = identify_cheater(&all_sigmas, &k_points, &chi_points, e_scalar, r_scalar);
         let err_msg = err.to_string();
         assert!(
             err_msg.contains("identifiable abort"),
@@ -3163,14 +3245,14 @@ mod tests {
             "secret shares must change after refresh"
         );
 
-        // Paillier and Pedersen aux info must have changed
-        assert_ne!(
-            old_data.paillier_sk, new_data.paillier_sk,
-            "Paillier SK must be refreshed"
+        // Real Paillier and Pedersen aux info must have been refreshed
+        assert!(
+            new_data.real_paillier_sk.is_some(),
+            "Refreshed share must have real Paillier SK"
         );
-        assert_ne!(
-            old_data.pedersen_params, new_data.pedersen_params,
-            "Pedersen params must be refreshed"
+        assert!(
+            new_data.real_pedersen_n_hat.is_some(),
+            "Refreshed share must have real Pedersen params"
         );
     }
 
@@ -3452,13 +3534,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_cggmp21_sign_with_real_paillier_keygen() {
-        // Test that keygen with real Paillier + signing with simulation MtA works
+        // Test that keygen with real Paillier + signing with real Paillier MtA works
         use crate::transport::local::LocalTransportNetwork;
         use k256::ecdsa::signature::hazmat::PrehashVerifier;
 
         let shares = run_keygen(2, 3).await;
         let signers = vec![PartyId(1), PartyId(2)];
-        let message = b"Sprint 28: real Paillier keygen + simulation sign";
+        let message = b"Sprint 28: real Paillier keygen + real MtA sign";
 
         let net = LocalTransportNetwork::new(2);
         let mut handles = Vec::new();
@@ -3557,8 +3639,6 @@ mod tests {
 
         // Create a Pifac proof with wrong bit sizes (simulating a bad key with small factors)
         let bad_proof = PifacProof {
-            commitment: vec![0u8; 32],
-            nonce: vec![0u8; 32],
             p_bits: 64, // Too small! Must be >= 256 bits
             q_bits: 64,
             nth_root_proofs: vec![NthRootProofRound {
@@ -3664,6 +3744,8 @@ mod tests {
             big_r: vec![4u8; 33],
             party_id: PartyId(1),
             signers: vec![PartyId(1), PartyId(2)],
+            k_points: vec![],
+            chi_points: vec![],
             used: false,
         };
         let ps2 = PreSignature {
@@ -3674,6 +3756,8 @@ mod tests {
             big_r: vec![4u8; 33],
             party_id: PartyId(2),
             signers: vec![PartyId(1), PartyId(2)],
+            k_points: vec![],
+            chi_points: vec![],
             used: false,
         };
 
@@ -3732,6 +3816,8 @@ mod tests {
             big_r: vec![4u8; 33],
             party_id: PartyId(1),
             signers: vec![PartyId(1), PartyId(2)],
+            k_points: vec![],
+            chi_points: vec![],
             used: false, // in-memory flag says "not used" — simulating post-crash state
         };
 
@@ -3873,5 +3959,33 @@ mod tests {
         assert!(validate_paillier_bits(512).is_ok());
         assert!(validate_paillier_bits(1024).is_ok());
         assert!(validate_paillier_bits(2048).is_ok());
+    }
+
+    // ── SEC-037: FilePreSignatureStore crash-safe nonce reuse protection ──
+
+    #[test]
+    fn test_file_presignature_store_crash_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FilePreSignatureStore::new(dir.path()).unwrap();
+
+        // Mark a presig as used
+        store.mark_used("presig-001").unwrap();
+        assert!(store.is_used("presig-001"));
+        assert!(!store.is_used("presig-002"));
+
+        // Duplicate should fail
+        assert!(store.mark_used("presig-001").is_err());
+
+        // "Crash" — drop the store, reload from file
+        drop(store);
+        let store2 = FilePreSignatureStore::new(dir.path()).unwrap();
+
+        // Must still be marked as used after reload
+        assert!(store2.is_used("presig-001"), "presig must survive restart");
+        assert!(!store2.is_used("presig-002"));
+
+        // Can mark new ones
+        store2.mark_used("presig-002").unwrap();
+        assert!(store2.is_used("presig-002"));
     }
 }

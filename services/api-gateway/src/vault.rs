@@ -35,7 +35,7 @@
 
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Vault client configuration.
@@ -52,12 +52,18 @@ pub struct VaultConfig {
 }
 
 /// Vault authentication method.
+///
+/// All credential fields are wrapped in [`Zeroizing`] to ensure sensitive
+/// material is cleared from memory on drop (SEC-047).
 #[derive(Debug, Clone)]
 pub enum VaultAuth {
     /// Static token (dev/CI).
-    Token(String),
+    Token(Zeroizing<String>),
     /// AppRole (production) — role_id + secret_id.
-    AppRole { role_id: String, secret_id: String },
+    AppRole {
+        role_id: Zeroizing<String>,
+        secret_id: Zeroizing<String>,
+    },
 }
 
 /// Secrets fetched from Vault.
@@ -133,12 +139,16 @@ impl VaultConfig {
         let addr = std::env::var("VAULT_ADDR").ok()?;
 
         let auth = if let Ok(token) = std::env::var("VAULT_TOKEN") {
-            VaultAuth::Token(token)
+            VaultAuth::Token(Zeroizing::new(token))
         } else {
-            let role_id = std::env::var("VAULT_ROLE_ID")
-                .expect("VAULT_ADDR set but neither VAULT_TOKEN nor VAULT_ROLE_ID provided");
-            let secret_id = std::env::var("VAULT_SECRET_ID")
-                .expect("VAULT_ROLE_ID set but VAULT_SECRET_ID not provided");
+            let role_id = Zeroizing::new(
+                std::env::var("VAULT_ROLE_ID")
+                    .expect("VAULT_ADDR set but neither VAULT_TOKEN nor VAULT_ROLE_ID provided"),
+            );
+            let secret_id = Zeroizing::new(
+                std::env::var("VAULT_SECRET_ID")
+                    .expect("VAULT_ROLE_ID set but VAULT_SECRET_ID not provided"),
+            );
             VaultAuth::AppRole { role_id, secret_id }
         };
 
@@ -176,12 +186,12 @@ impl VaultClient {
     /// Authenticate and get a Vault token.
     async fn get_token(&self) -> Result<String, VaultError> {
         match &self.config.auth {
-            VaultAuth::Token(token) => Ok(token.clone()),
+            VaultAuth::Token(token) => Ok((**token).clone()),
             VaultAuth::AppRole { role_id, secret_id } => {
                 let url = format!("{}/v1/auth/approle/login", self.config.addr);
                 let body = serde_json::json!({
-                    "role_id": role_id,
-                    "secret_id": secret_id,
+                    "role_id": &**role_id,
+                    "secret_id": &**secret_id,
                 });
 
                 let resp = self
@@ -434,7 +444,7 @@ impl SecretRefresher {
     /// Returns a `JoinHandle` for the spawned task (can be used for graceful shutdown).
     pub fn start_background_refresh(
         &self,
-        config: Arc<Mutex<crate::config::AppConfig>>,
+        config: Arc<tokio::sync::Mutex<crate::config::AppConfig>>,
     ) -> tokio::task::JoinHandle<()> {
         let vault_client = Arc::clone(&self.vault_client);
         let interval_secs = self.config.refresh_interval_secs;
@@ -447,32 +457,23 @@ impl SecretRefresher {
 
                 match vault_client.read_secrets().await {
                     Ok(secrets) => {
-                        match config.lock() {
-                            Ok(mut app_config) => {
-                                // Update mutable secret fields. Non-secret config
-                                // (port, network, etc.) is NOT overwritten.
-                                // Deref Zeroizing<String> to get &String for clone.
-                                if let Some(ref jwt) = secrets.jwt_secret {
-                                    app_config.jwt_secret = (**jwt).clone();
-                                }
-                                if let Some(ref key) = secrets.server_signing_key {
-                                    app_config.server_signing_key = Some((**key).clone());
-                                }
-                                if let Some(ref key) = secrets.session_encryption_key {
-                                    app_config.session_encryption_key = Some((**key).clone());
-                                }
-                                if let Some(ref url) = secrets.redis_url {
-                                    app_config.redis_url = Some((**url).clone());
-                                }
-                                tracing::info!("vault secrets refreshed successfully");
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "failed to lock config for Vault secret refresh — will retry"
-                                );
-                            }
+                        let mut app_config = config.lock().await;
+                        // Update mutable secret fields. Non-secret config
+                        // (port, network, etc.) is NOT overwritten.
+                        // Deref Zeroizing<String> to get &String for clone.
+                        if let Some(ref jwt) = secrets.jwt_secret {
+                            app_config.jwt_secret = (**jwt).clone();
                         }
+                        if let Some(ref key) = secrets.server_signing_key {
+                            app_config.server_signing_key = Some((**key).clone());
+                        }
+                        if let Some(ref key) = secrets.session_encryption_key {
+                            app_config.session_encryption_key = Some((**key).clone());
+                        }
+                        if let Some(ref url) = secrets.redis_url {
+                            app_config.redis_url = Some((**url).clone());
+                        }
+                        tracing::info!("vault secrets refreshed successfully");
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -564,7 +565,7 @@ mod tests {
         // Without a real Vault server, we test the validation path.
         let config = VaultConfig {
             addr: "http://127.0.0.1:1".into(), // unreachable
-            auth: VaultAuth::Token("test-token".into()),
+            auth: VaultAuth::Token(Zeroizing::new("test-token".into())),
             mount: "secret".into(),
             secrets_path: "test/path".into(),
         };
@@ -598,7 +599,7 @@ mod tests {
         // Verify that read_secret_version constructs the correct URL with version param.
         let config = VaultConfig {
             addr: "http://127.0.0.1:1".into(), // unreachable
-            auth: VaultAuth::Token("test-token".into()),
+            auth: VaultAuth::Token(Zeroizing::new("test-token".into())),
             mount: "secret".into(),
             secrets_path: "mpc-wallet/gateway".into(),
         };
@@ -654,7 +655,7 @@ mod tests {
     fn test_secret_refresher_interval() {
         let vault_config = VaultConfig {
             addr: "http://127.0.0.1:8200".into(),
-            auth: VaultAuth::Token("test".into()),
+            auth: VaultAuth::Token(Zeroizing::new("test".into())),
             mount: "secret".into(),
             secrets_path: "test".into(),
         };
@@ -671,12 +672,12 @@ mod tests {
         // Token auth
         let config = VaultConfig {
             addr: "http://vault:8200".into(),
-            auth: VaultAuth::Token("s.test-token-123".into()),
+            auth: VaultAuth::Token(Zeroizing::new("s.test-token-123".into())),
             mount: "secret".into(),
             secrets_path: "mpc-wallet/gateway".into(),
         };
         match &config.auth {
-            VaultAuth::Token(t) => assert_eq!(t, "s.test-token-123"),
+            VaultAuth::Token(t) => assert_eq!(&**t, "s.test-token-123"),
             _ => panic!("expected Token auth"),
         }
 
@@ -684,16 +685,16 @@ mod tests {
         let config = VaultConfig {
             addr: "http://vault:8200".into(),
             auth: VaultAuth::AppRole {
-                role_id: "role-abc".into(),
-                secret_id: "secret-xyz".into(),
+                role_id: Zeroizing::new("role-abc".into()),
+                secret_id: Zeroizing::new("secret-xyz".into()),
             },
             mount: "kv".into(),
             secrets_path: "prod/gateway".into(),
         };
         match &config.auth {
             VaultAuth::AppRole { role_id, secret_id } => {
-                assert_eq!(role_id, "role-abc");
-                assert_eq!(secret_id, "secret-xyz");
+                assert_eq!(&**role_id, "role-abc");
+                assert_eq!(&**secret_id, "secret-xyz");
             }
             _ => panic!("expected AppRole auth"),
         }

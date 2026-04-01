@@ -276,6 +276,12 @@ pub fn keypair_for_protocol(
     }
     #[cfg(not(any(test, feature = "local-transport")))]
     {
+        // SEC-054: Double-guard — even if validate_paillier_bits is somehow bypassed,
+        // this runtime assert ensures production never gets weak keys.
+        assert!(
+            production_bits >= 2048,
+            "SECURITY: Paillier keys must be >= 2048 bits in production (got {production_bits})"
+        );
         generate_paillier_keypair(production_bits)
     }
 }

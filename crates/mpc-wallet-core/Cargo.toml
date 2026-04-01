@@ -26,6 +26,9 @@ schnorrkel = { workspace = true }
 blst = { workspace = true }
 x25519-dalek = { workspace = true }
 hkdf = { workspace = true }
+starknet-crypto = { workspace = true }
+starknet-curve = { workspace = true }
+starknet-types-core = { workspace = true }
 
 # Key storage encryption
 aes-gcm = { workspace = true }

@@ -737,3 +737,65 @@ MtA-based distributed nonce as future work using existing Paillier MtA infrastru
 > Before implementing a new cryptographic protocol variant, verify the mathematical
 > correctness on paper first. In threshold ECDSA, any operation involving both k⁻¹
 > and x (like s = k⁻¹(m + rx)) requires MtA — there is no shortcut.
+
+---
+
+### LESSON-021: SEC-034 was mis-reported as open (Sprint 29 audit)
+- **Date:** 2026-03-30
+- **Category:** Workflow
+- **Severity:** Medium
+- **Found by:** R10 during Sprint 29 close-out documentation sync
+- **Related finding:** SEC-034
+
+**What happened:**
+SEC-034 ("CGGMP21 MtA simulation broadcasts raw nonce shares") was listed as OPEN in SECURITY_FINDINGS.md, but deep Sprint 29 audit revealed the simulation was already removed in Sprint 28. The real Paillier MtA (encrypt, homomorphic ops, decrypt) was fully wired in. Only stale doc comments remained.
+
+**Root cause:**
+R6 filed the finding based on Sprint 19 code when simulation existed, but it wasn't re-verified after Sprint 28 replaced the simulation with real Paillier.
+
+**Fix / Resolution:**
+Sprint 29 deep audit confirmed real Paillier MtA end-to-end. SEC-034 marked RESOLVED.
+
+**Takeaway:**
+> Always re-audit open findings against the current codebase before planning sprint work.
+> A finding that was valid 10 sprints ago may already be resolved. Stale findings waste
+> planning cycles and create false urgency.
+
+---
+
+### LESSON-022: SEC-055/057 verification equations were correct (Sprint 29 audit)
+- **Date:** 2026-03-30
+- **Category:** Workflow
+- **Severity:** Medium
+- **Found by:** R10 during Sprint 29 close-out documentation sync
+- **Related finding:** SEC-055, SEC-057
+
+**What happened:**
+SEC-055 ("Pienc Pedersen verification discards computed LHS") and SEC-057 ("Pilogstar EC verification is a hash stand-in") were listed as OPEN MEDIUM findings. Sprint 29 deep code audit confirmed both verification equations are correctly implemented and enforced.
+
+**Root cause:**
+Finding descriptions were based on early-stage code review notes that weren't updated after the implementations were completed.
+
+**Fix / Resolution:**
+Sprint 29 deep audit confirmed: SEC-055 has ped_lhs != ped_rhs check at line 897 of zk_proofs.rs. SEC-057 has z1*G == Y + e*X check using real k256 EC arithmetic at lines 1418-1425. Both marked RESOLVED.
+
+**Takeaway:**
+> R6 finding descriptions can be misleading. Always read the actual verification code before
+> treating a finding as actionable. A "discarded" result may have been wired in since the
+> finding was filed.
+
+### LESSON-023 — GG20 distributed_sign_mta has NO coordinator trust issue (Sprint 30 analysis)
+
+**Finding:** GG20's `distributed_sign_mta` was listed as having a "coordinator nonce trust" risk (SEC-024). Sprint 30 deep analysis confirmed this was actually about the OLD `distributed_sign` function (deleted in Sprint 30b). The current MtA path generates k_i per-party from independent OsRng, computes R fully distributed (every party aggregates locally), and requires mandatory Pienc + PiLogstar + PiAffg proofs. No single-party trust assumption exists.
+
+**Root Cause:** SEC-024 was filed against the legacy `distributed_sign` function where Party 1 alone generated k and broadcast k_inv. After Sprint 28b switched the dispatch to `distributed_sign_mta`, the finding became stale but wasn't re-verified.
+
+**Lesson:** When a finding names a specific function, always check if that function is still in the call path. A finding against dead code is not a finding against the active system.
+
+### LESSON-024 — Threshold ECDSA is curve-agnostic at the Paillier/MtA layer (Sprint 31b)
+
+**Finding:** Implementing threshold Stark ECDSA required zero changes to the Paillier module (keygen, encrypt, decrypt, MtA), Pimod, Pifac, or Pienc proofs. These operate on BigUint in the Paillier plaintext space and are completely independent of the elliptic curve. Only PiLogStar and PiAffg (which bind Paillier ciphertexts to EC points) needed curve-specific variants.
+
+**Root Cause:** The CGGMP21 architecture cleanly separates Paillier-domain operations (MtA, range proofs) from curve-domain operations (point commitments, Schnorr proofs). This separation made it possible to add a new curve in ~1900 lines without touching the ~2000 lines of Paillier infrastructure.
+
+**Lesson:** When adding new curves to a threshold ECDSA implementation, focus effort on the EC-binding proofs (PiLogStar, PiAffg, Schnorr) and Shamir/Lagrange over the new field. The Paillier layer is reusable as-is.

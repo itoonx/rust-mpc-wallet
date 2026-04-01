@@ -21,7 +21,7 @@ use num_traits::{One, Zero};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Paillier public key: N = p*q where p, q are safe primes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,7 +179,8 @@ fn l_function(x: &BigUint, n: &BigUint) -> BigUint {
 /// Sample a random number in Z*_N (coprime to N).
 pub(crate) fn sample_coprime(n: &BigUint) -> BigUint {
     let byte_len = (n.bits() as usize).div_ceil(8);
-    let mut buf = vec![0u8; byte_len];
+    // SEC-061: Wrap random buffer in Zeroizing to clear from memory on drop.
+    let mut buf = Zeroizing::new(vec![0u8; byte_len]);
     loop {
         OsRng.fill_bytes(&mut buf);
         let r = BigUint::from_bytes_be(&buf) % n;
