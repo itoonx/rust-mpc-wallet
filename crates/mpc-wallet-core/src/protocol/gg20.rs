@@ -500,12 +500,18 @@ async fn distributed_keygen(
     let share_bytes = serde_json::to_vec(&final_share_data)
         .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
+    // BIP32: generate random chain code for HD derivation support
+    let mut chain_code = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut chain_code);
+
     Ok(KeyShare {
         scheme: CryptoScheme::Gg20Ecdsa,
         party_id,
         config,
         group_public_key: GroupPublicKey::Secp256k1(group_pubkey_bytes),
         share_data: zeroize::Zeroizing::new(share_bytes),
+        chain_code: Some(chain_code),
+        is_derived: false,
     })
 }
 
@@ -1276,6 +1282,8 @@ async fn distributed_refresh(
         config: key_share.config,
         group_public_key: key_share.group_public_key.clone(),
         share_data: Zeroizing::new(new_share_bytes),
+        chain_code: key_share.chain_code,
+        is_derived: key_share.is_derived,
     })
 }
 
@@ -1518,6 +1526,8 @@ async fn distributed_reshare(
             config: new_config,
             group_public_key: key_share.group_public_key.clone(),
             share_data: Zeroizing::new(new_share_bytes),
+            chain_code: key_share.chain_code,
+            is_derived: key_share.is_derived,
         })
     } else {
         // Old-only party: does not receive a new share. Return a dummy key share
@@ -1616,6 +1626,8 @@ async fn simulation_keygen(
                 serde_json::to_vec(&share_data)
                     .map_err(|e| CoreError::Serialization(e.to_string()))?,
             ),
+            chain_code: None,
+            is_derived: false,
         })
     } else {
         let msg = transport.recv().await?;
@@ -1633,6 +1645,8 @@ async fn simulation_keygen(
             group_public_key: GroupPublicKey::Secp256k1(group_pubkey_bytes),
             // SEC-004 root fix (T-S4-00/T-S4-01): wrap in Zeroizing
             share_data: zeroize::Zeroizing::new(share_bytes),
+            chain_code: None,
+            is_derived: false,
         })
     }
 }

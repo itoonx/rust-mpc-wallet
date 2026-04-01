@@ -3568,6 +3568,7 @@ dependencies = [
  "glass_pumpkin",
  "hex",
  "hkdf",
+ "hmac",
  "jsonwebtoken",
  "k256",
  "mpc-wallet-chains",

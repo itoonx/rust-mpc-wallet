@@ -849,6 +849,8 @@ async fn stark_threshold_keygen(
         config,
         group_public_key: GroupPublicKey::StarkCurve(group_pubkey_x),
         share_data: share_bytes,
+        chain_code: None,
+        is_derived: false,
     })
 }
 

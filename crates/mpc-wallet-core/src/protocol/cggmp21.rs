@@ -689,6 +689,54 @@ impl MpcProtocol for Cggmp21Protocol {
     ) -> Result<KeyShare, CoreError> {
         cggmp21_refresh(key_share, signers, transport).await
     }
+
+    fn derive_child(&self, parent_share: &KeyShare, index: u32) -> Result<KeyShare, CoreError> {
+        cggmp21_derive_child(parent_share, index)
+    }
+}
+
+/// BIP32 non-hardened child key derivation for CGGMP21 shares.
+///
+/// Tweaks the secret share, all public shares, and the group public key
+/// using the BIP32 derivation formula. No network communication needed.
+fn cggmp21_derive_child(parent_share: &KeyShare, index: u32) -> Result<KeyShare, CoreError> {
+    use crate::protocol::hd;
+
+    let chain_code = parent_share.chain_code.ok_or_else(|| {
+        CoreError::Protocol("KeyShare has no chain_code -- cannot derive child".into())
+    })?;
+
+    let mut share_data: Cggmp21ShareData = serde_json::from_slice(&parent_share.share_data)
+        .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+    let parent_pubkey = &share_data.group_public_key;
+    let (tweak, child_chain_code) =
+        hd::bip32_derive_non_hardened(&chain_code, parent_pubkey, index)?;
+
+    // Tweak secret share: child_share = parent_share + tweak
+    share_data.secret_share = hd::tweak_secret_scalar(&share_data.secret_share, &tweak)?;
+
+    // Tweak all public shares: child_pub_i = parent_pub_i + tweak * G
+    let tweak_point = ProjectivePoint::GENERATOR * tweak;
+    for pub_share in &mut share_data.public_shares {
+        *pub_share = hd::tweak_public_key(pub_share, &tweak_point)?;
+    }
+
+    // Tweak group pubkey
+    share_data.group_public_key = hd::tweak_public_key(&share_data.group_public_key, &tweak_point)?;
+
+    let child_share_bytes =
+        serde_json::to_vec(&share_data).map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+    Ok(KeyShare {
+        scheme: parent_share.scheme,
+        party_id: parent_share.party_id,
+        config: parent_share.config,
+        group_public_key: GroupPublicKey::Secp256k1(share_data.group_public_key.clone()),
+        share_data: Zeroizing::new(child_share_bytes),
+        chain_code: Some(child_chain_code),
+        is_derived: true,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1070,12 +1118,18 @@ async fn cggmp21_keygen(
     let share_bytes =
         serde_json::to_vec(&share_data).map_err(|e| CoreError::Serialization(e.to_string()))?;
 
+    // BIP32: generate random chain code for HD derivation support
+    let mut chain_code = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut chain_code);
+
     Ok(KeyShare {
         scheme: CryptoScheme::Cggmp21Secp256k1,
         party_id,
         config,
         group_public_key: GroupPublicKey::Secp256k1(group_pubkey_bytes),
         share_data: Zeroizing::new(share_bytes),
+        chain_code: Some(chain_code),
+        is_derived: false,
     })
 }
 
@@ -1830,6 +1884,17 @@ async fn cggmp21_sign_online_with_store(
     transport: &dyn Transport,
     store: Option<&dyn PreSignatureStore>,
 ) -> Result<MpcSignature, CoreError> {
+    // ── CVE-2025-66017: block presignature signing with HD-derived shares ──
+    // Presignatures are message-independent "blank cheques". Combining them
+    // with BIP32-derived shares degrades security from 128-bit to ~85-bit.
+    if key_share.is_derived {
+        return Err(CoreError::Protocol(
+            "CVE-2025-66017: presignature signing forbidden with HD-derived shares \
+             -- use full interactive sign instead"
+                .into(),
+        ));
+    }
+
     // ── Nonce reuse protection (SEC-037) ──────────────────────────────
     // Mark-before-use: persistent store is checked/marked BEFORE any
     // cryptographic computation to prevent crash-replay attacks.
@@ -2505,6 +2570,8 @@ async fn cggmp21_refresh(
         config: key_share.config,
         group_public_key: key_share.group_public_key.clone(),
         share_data: Zeroizing::new(new_share_bytes),
+        chain_code: key_share.chain_code,
+        is_derived: key_share.is_derived,
     })
 }
 
@@ -3795,6 +3862,8 @@ mod tests {
             party_id: PartyId(1),
             share_data: zeroize::Zeroizing::new(vec![]),
             group_public_key: GroupPublicKey::Secp256k1(vec![]),
+            chain_code: None,
+            is_derived: false,
         };
 
         let net = crate::transport::local::LocalTransportNetwork::new(2);

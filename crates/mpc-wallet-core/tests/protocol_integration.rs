@@ -211,6 +211,8 @@ async fn test_gg20_reshare_add_party() {
             config: ThresholdConfig::new(2, 3).unwrap(),
             group_public_key: shares[0].group_public_key.clone(),
             share_data: zeroize::Zeroizing::new(vec![]),
+            chain_code: None,
+            is_derived: false,
         };
         let transport = net.get_transport(PartyId(4));
         let protocol = gg20_factory();
@@ -663,6 +665,8 @@ async fn test_frost_ed25519_reshare_new_config() {
             config: ThresholdConfig::new(2, 3).unwrap(),
             group_public_key: shares[0].group_public_key.clone(),
             share_data: zeroize::Zeroizing::new(vec![]),
+            chain_code: None,
+            is_derived: false,
         };
         let transport = net.get_transport(PartyId(4));
         let protocol = frost_ed25519_factory();
@@ -743,6 +747,8 @@ async fn test_frost_secp256k1_reshare_new_config() {
             config: ThresholdConfig::new(2, 3).unwrap(),
             group_public_key: shares[0].group_public_key.clone(),
             share_data: zeroize::Zeroizing::new(vec![]),
+            chain_code: None,
+            is_derived: false,
         };
         let transport = net.get_transport(PartyId(4));
         let protocol = frost_secp256k1_factory();

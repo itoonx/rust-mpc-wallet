@@ -22,6 +22,7 @@ frost-ed25519 = { workspace = true }
 k256 = { workspace = true }
 ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 schnorrkel = { workspace = true }
 blst = { workspace = true }
 x25519-dalek = { workspace = true }
