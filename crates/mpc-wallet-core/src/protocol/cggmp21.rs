@@ -3128,8 +3128,6 @@ mod tests {
     #[tokio::test]
     async fn test_cggmp21_identifiable_abort_detection() {
         // Test that a corrupted partial signature triggers identifiable abort
-        let signers = vec![PartyId(1), PartyId(2)];
-        // Create fake sigma values where one is deliberately wrong
         let mut rng = rand::thread_rng();
         let sigma_good = Scalar::random(&mut rng);
         let sigma_bad = Scalar::ZERO; // Zero is always wrong
@@ -3137,58 +3135,6 @@ mod tests {
         let all_sigmas = vec![(1u16, sigma_good), (2u16, sigma_bad)];
         let e_scalar = Scalar::from(42u64);
         let r_scalar = Scalar::from(7u64);
-
-        // Create a minimal key share for testing
-        let share_data = Cggmp21ShareData {
-            party_index: 1,
-            secret_share: Scalar::from(1u64).to_repr().to_vec(),
-            public_shares: vec![
-                // Two dummy compressed points
-                {
-                    let p = (ProjectivePoint::GENERATOR * Scalar::from(1u64)).to_affine();
-                    k256::PublicKey::from_affine(p)
-                        .unwrap()
-                        .to_encoded_point(true)
-                        .as_bytes()
-                        .to_vec()
-                },
-                {
-                    let p = (ProjectivePoint::GENERATOR * Scalar::from(2u64)).to_affine();
-                    k256::PublicKey::from_affine(p)
-                        .unwrap()
-                        .to_encoded_point(true)
-                        .as_bytes()
-                        .to_vec()
-                },
-            ],
-            group_public_key: {
-                let p = (ProjectivePoint::GENERATOR * Scalar::from(3u64)).to_affine();
-                k256::PublicKey::from_affine(p)
-                    .unwrap()
-                    .to_encoded_point(true)
-                    .as_bytes()
-                    .to_vec()
-            },
-            paillier_sk: vec![0u8; 32],
-            paillier_pk: vec![0u8; 32],
-            pedersen_params: vec![0u8; 32],
-            real_paillier_sk: None,
-            real_paillier_pk: None,
-            all_paillier_pks: None,
-            real_pedersen_n_hat: None,
-            real_pedersen_s: None,
-            real_pedersen_t: None,
-            all_pedersen_params: None,
-        };
-
-        let share_bytes = serde_json::to_vec(&share_data).unwrap();
-        let key_share = KeyShare {
-            scheme: CryptoScheme::Cggmp21Secp256k1,
-            party_id: PartyId(1),
-            config: ThresholdConfig::new(2, 3).unwrap(),
-            group_public_key: GroupPublicKey::Secp256k1(share_data.group_public_key.clone()),
-            share_data: Zeroizing::new(share_bytes),
-        };
 
         let k_points: Vec<(u16, Vec<u8>)> = vec![];
         let chi_points: Vec<(u16, Vec<u8>)> = vec![];
