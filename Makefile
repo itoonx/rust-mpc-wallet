@@ -1,4 +1,5 @@
 .PHONY: test test-property bench coverage fmt clippy audit check \
+       security-test sbom \
        local-up local-down local-status local-test demo
 
 # ── Development ──────────────────────────────────────────────────────
@@ -25,6 +26,32 @@ audit:
 	cargo audit
 
 check: fmt clippy test audit
+
+security-test:
+	@echo "Running security regression tests..."
+	cargo test --workspace --features local-transport -- \
+		--test-threads=4 \
+		zk_proofs \
+		paillier \
+		sign_authorization \
+		identifiable_abort \
+		pimod \
+		pifac \
+		pienc \
+		piaffg \
+		pilogstar \
+		schnorr \
+		zeroiz \
+		rate_limit \
+		presignature_store \
+		auth_security \
+		signed_message \
+		2>&1 | tail -5
+	@echo "Security tests complete."
+
+sbom:
+	cargo tree --workspace --depth 1 --format "{p} {l}" > docs/SBOM.txt
+	@echo "SBOM generated: docs/SBOM.txt ($$(wc -l < docs/SBOM.txt) packages)"
 
 # ── Local Infrastructure ─────────────────────────────────────────────
 

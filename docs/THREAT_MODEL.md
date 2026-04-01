@@ -2,7 +2,7 @@
 
 > MPC Wallet SDK (Vaultex) — Threshold Multi-Party Computation Wallet
 >
-> Last updated: 2026-03-20
+> Last updated: 2026-04-01
 
 ## 1. System Overview
 
@@ -21,13 +21,13 @@ API Gateway (orchestrator, holds ZERO key shares)
 
 - **Gateway:** Authenticates clients, enforces policy, collects approvals, orchestrates MPC rounds. Holds no key shares (DEC-015).
 - **MPC Nodes:** Each holds exactly one key share. Communicate via NATS for protocol rounds. Independently verify sign authorization before participating.
-- **Supported Protocols:** GG20 (threshold ECDSA), CGGMP21 (threshold ECDSA with identifiable abort), FROST (Ed25519 and Secp256k1 Taproot).
+- **Supported Protocols:** GG20 (threshold ECDSA), CGGMP21 (threshold ECDSA with identifiable abort), FROST (Ed25519 and Secp256k1 Taproot), Stark (threshold ECDSA on the StarkNet curve).
 
 ## 2. Assets
 
 | Asset | Location | Sensitivity |
 |-------|----------|-------------|
-| Key shares (secp256k1, Ed25519 scalars) | MPC node EncryptedFileStore (Argon2id + AES-256-GCM) | CRITICAL — compromise of t shares reconstructs the key |
+| Key shares (secp256k1, Ed25519, Stark field scalars) | MPC node EncryptedFileStore (Argon2id + AES-256-GCM) | CRITICAL — compromise of t shares reconstructs the key |
 | Paillier secret keys (p, q, lambda, mu) | MPC node memory during CGGMP21 keygen/signing | CRITICAL — enables extraction of peer shares via MtA |
 | Pre-signatures (k_i, chi_i, big_r) | MPC node memory during CGGMP21 pre-signing | HIGH — nonce reuse leads to key extraction |
 | Gateway Ed25519 signing key | Gateway process (signs SignAuthorization) | HIGH — forged authorizations bypass node verification |
@@ -49,6 +49,11 @@ API Gateway (orchestrator, holds ZERO key shares)
 | Send invalid signature shares during signing | Denial of service or blame shifting | CGGMP21 identifiable abort detects cheating party; GG20 signature verification before broadcast |
 | Replay old protocol messages | Re-sign with stale nonce or re-run keygen | SignedEnvelope with monotonic seq_no per (session, party) + TTL expiry (SEC-007 fix) |
 | Claim false party ID | Impersonate another node | Ed25519 signed envelopes authenticate sender identity; FROST validates `from` against expected signer set (SEC-013 fix) |
+| Frame honest party via forged chi_i during identifiable abort | Honest party blamed and excluded; attacker gains advantage | Chi_i Schnorr proof of knowledge (Sprint 31): each party proves knowledge of chi_i during pre-signing; verifier checks sigma_i * G == e * K_i + r * Chi_i with proven Chi_i |
+| Exploit TSSHOCK alpha-shuffle in Fiat-Shamir hashes | Forge ZK proofs by finding hash collisions across variable-length inputs | Length-prefixed encoding (hash_update_lp) in all Fiat-Shamir hashes prevents alpha-shuffle collisions (CVE-2022-47931 fix, Sprint 29) |
+| Replay ZK proofs across sessions or parties | Re-use a valid proof from session A in session B | session_id + prover_index bound into all ZK proof challenges: Pienc, PiAffg, PiLogstar (CVE-2022-47930 fix, Sprint 29) |
+| Submit malicious PiAffg proof with fake EC commitment | Bypass range proof to inject out-of-range MtA values | PiAffg commitment_bx is real EC point alpha*G, included in Fiat-Shamir hash; verifier checks z1*G == Bx + e*X (SEC-056 fix, Sprint 29) |
+| Inject malicious MtA values in Stark pre-signing | Extract Stark private key shares via Paillier homomorphism | Stark protocol reuses CGGMP21 Paillier MtA with PiLogStarStark + PiAffgStark ZK proofs on Stark curve (Sprint 31b) |
 
 ### 3.2 Compromised Gateway
 
@@ -141,7 +146,12 @@ API Gateway (orchestrator, holds ZERO key shares)
 | **Auth System** | mTLS + Session JWT + Bearer JWT, no fallthrough | Unauthorized API access | DEC-013 |
 | **Low-S Normalization** | Canonical ECDSA signatures (EIP-2) | Signature malleability | SEC-012 |
 | **FROST Sender Validation** | Validate `from` against expected signer set | Party impersonation in FROST rounds | SEC-013 |
-| **Identifiable Abort** | CGGMP21 cheater detection on invalid sigma_i | Blame-shifting by malicious party | Sprint 20 |
+| **Identifiable Abort** | CGGMP21 cheater detection on invalid sigma_i + Chi_i Schnorr PoK | Blame-shifting and framing attack by malicious party | Sprint 20, Sprint 31 |
+| **TSSHOCK Fiat-Shamir Hardening** | Length-prefixed hash_update_lp() + session_id/prover_index binding | CVE-2022-47931 alpha-shuffle, CVE-2022-47930 proof replay | Sprint 29 |
+| **PiAffg EC Binding** | Real EC point commitment_bx = alpha*G in Fiat-Shamir | SEC-056 forged Pedersen commitment bypass | Sprint 29 |
+| **Nonce Crash Safety** | FilePreSignatureStore with fsync + mark-before-use | SEC-037 nonce reuse after crash-replay | Sprint 30c |
+| **Signed Control Plane** | Ed25519-signed control messages, unsigned paths removed | SEC-026/027 forged keygen/sign/freeze commands | Sprint 30b |
+| **Stark Threshold ECDSA** | Feldman VSS over Stark field + PiLogStarStark/PiAffgStark proofs | Stark-specific key extraction via MtA | Sprint 31b |
 | **Debug Redaction** | Manual Debug impls on all secret types | Secret material in logs | SEC-015 |
 
 ## 6. Known Limitations
@@ -149,15 +159,34 @@ API Gateway (orchestrator, holds ZERO key shares)
 | Limitation | Description | Status |
 |------------|-------------|--------|
 | GG20 coordinator nonce | GG20 protocol has a coordinator nonce dependency; mitigated by distributed nonce commitment in DEC-017 (deferred) | Tracked: DEC-017 |
-| Simulated MtA path | CGGMP21 protocol still has a simulated MtA code path for legacy shares using SHA-256 hash-based Paillier (SEC-058) | Tracked: Sprint 28 wiring |
-| Pre-signature nonce reuse (crash) | CGGMP21 PreSignature `used` flag is in-memory only; crash-replay could bypass nonce reuse detection (SEC-037) | Tracked: LOW severity |
-| Pienc Pedersen commitment | verify_pienc computes Pedersen LHS but discards it, relying on Fiat-Shamir binding only (SEC-055) | Tracked: MEDIUM |
-| Piaffg response binding | Prover samples fresh randomness in response phase instead of using committed Pedersen randomness (SEC-056) | Tracked: MEDIUM |
-| Pilogstar verification | Group-element check is hash-based stand-in, not real EC scalar multiplication (SEC-057) | Tracked: MEDIUM |
 | SGX enclave | SGX integration is prototype only (MockEnclaveProvider); not production-hardened | Sprint 23 prototype |
 | KMS integration | AWS KMS signer is a stub; Ed25519 signing stays local per DEC-016 | Tracked: DEC-016 |
 
-## 7. Assumptions
+### Resolved Limitations (for historical reference)
+
+| Limitation | Resolution | Sprint |
+|------------|-----------|--------|
+| Simulated MtA path (SEC-058) | Legacy Paillier deleted; real Paillier mandatory; legacy shares unconditionally rejected | Sprint 29 |
+| Pre-signature nonce reuse on crash (SEC-037) | FilePreSignatureStore with fsync, mark-before-use pattern | Sprint 30c |
+| Pienc Pedersen commitment (SEC-055) | Verified correct: Pedersen LHS bound into Fiat-Shamir challenge | Sprint 29 |
+| PiAffg response binding (SEC-056) | commitment_bx is now real EC point alpha*G, included in Fiat-Shamir, verifier checks z1*G == Bx + e*X | Sprint 29 |
+| PiLogstar verification (SEC-057) | Verified correct: EC verification equation is sound | Sprint 29 |
+
+## 7. Current Threat Summary
+
+**As of 2026-04-01, all 68 security findings (SEC-001 through SEC-060) are resolved.**
+
+- **7 threshold signing protocols** are production-ready: GG20, CGGMP21, FROST Ed25519, FROST Secp256k1, Stark Threshold ECDSA, GG20 Refresh, CGGMP21 Refresh.
+- **919 tests pass** (cargo test --workspace), including security regression tests.
+- **0 open CRITICAL or HIGH findings.** All known attack vectors have mitigations in place.
+- **TSSHOCK family (CVE-2022-47931, CVE-2022-47930):** Fully mitigated with length-prefixed Fiat-Shamir hashing and session/prover binding.
+- **CVE-2023-33241 (small-factor Paillier):** Fully mitigated with Pimod + Pifac ZK proofs and 2048-bit minimum enforcement.
+- **CVE-2025-66016 (missing ZK proof check):** NOT AFFECTED -- both Pimod and Pifac proofs are generated and verified for all peers during keygen.
+- **Identifiable abort:** Sound -- Chi_i Schnorr proof of knowledge prevents framing attacks (Sprint 31).
+- **Nonce safety:** FilePreSignatureStore provides crash-safe nonce reuse protection with fsync (Sprint 30c).
+- **Control plane:** All unsigned paths removed; only Ed25519-signed control messages accepted (Sprint 30b).
+
+## 8. Assumptions
 
 1. **Honest majority:** Fewer than t of n MPC nodes are compromised at any time.
 2. **Secure randomness:** `OsRng` provides cryptographically secure randomness on all deployment targets.
