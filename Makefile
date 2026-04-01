@@ -1,5 +1,5 @@
 .PHONY: test test-property bench coverage fmt clippy audit check \
-       security-test sbom \
+       security-test sbom openapi \
        local-up local-down local-status local-test demo
 
 # ── Development ──────────────────────────────────────────────────────
@@ -52,6 +52,10 @@ security-test:
 sbom:
 	cargo tree --workspace --depth 1 --format "{p} {l}" > docs/SBOM.txt
 	@echo "SBOM generated: docs/SBOM.txt ($$(wc -l < docs/SBOM.txt) packages)"
+
+openapi:
+	cargo test -p mpc-wallet-api export_openapi_spec -- --ignored --nocapture
+	@echo "OpenAPI spec exported to docs/openapi.json"
 
 # ── Local Infrastructure ─────────────────────────────────────────────
 
