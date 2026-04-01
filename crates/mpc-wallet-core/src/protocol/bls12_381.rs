@@ -101,6 +101,8 @@ impl MpcProtocol for Bls12_381Protocol {
             config,
             group_public_key: GroupPublicKey::Bls12_381(group_pubkey),
             share_data: share_bytes,
+            chain_code: None,
+            is_derived: false,
         })
     }
 

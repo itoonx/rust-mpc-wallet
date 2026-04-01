@@ -295,6 +295,8 @@ mod tests {
             config,
             group_public_key: GroupPublicKey::Ed25519(vec![0u8; 32]),
             share_data: zeroize::Zeroizing::new(vec![1, 2, 3, 4]),
+            chain_code: None,
+            is_derived: false,
         };
 
         store
@@ -332,6 +334,8 @@ mod tests {
                 config,
                 group_public_key: GroupPublicKey::Secp256k1(vec![0u8; 33]),
                 share_data: zeroize::Zeroizing::new(vec![]),
+                chain_code: None,
+                is_derived: false,
             };
             store
                 .save(&group_id, &metadata, PartyId(1), &share)
@@ -392,6 +396,8 @@ mod tests {
             config: ThresholdConfig::new(2, 3).unwrap(),
             group_public_key: GroupPublicKey::Ed25519(vec![0u8; 32]),
             share_data: zeroize::Zeroizing::new(vec![0xAB, 0xCD]),
+            chain_code: None,
+            is_derived: false,
         }
     }
 

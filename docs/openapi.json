@@ -1,0 +1,2071 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MPC Wallet API",
+    "description": "Threshold MPC wallet REST API. No single party ever holds a complete private key.",
+    "license": {
+      "name": "MIT"
+    },
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/v1/auth/hello": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "`POST /v1/auth/hello`",
+        "operationId": "auth_hello",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClientHello"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "ServerHello with challenge",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_ServerHello"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/refresh-session": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "`POST /v1/auth/refresh-session`",
+        "operationId": "refresh_session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshSessionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Session refreshed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_RefreshSessionResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/revoke-key": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "`POST /v1/auth/revoke-key` — Admin-only dynamic key revocation.",
+        "description": "This endpoint is behind auth + HMAC middleware (protected route).\nOnly admin role can revoke keys.",
+        "operationId": "revoke_key",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevokeKeyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Key revoked"
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Admin role required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_token": []
+          }
+        ]
+      }
+    },
+    "/v1/auth/revoked-keys": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "`GET /v1/auth/revoked-keys`",
+        "operationId": "revoked_keys",
+        "responses": {
+          "200": {
+            "description": "List of revoked key IDs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_Vec_String"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/verify": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "`POST /v1/auth/verify`",
+        "operationId": "auth_verify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthVerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Session established",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_SessionEstablished"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chains": {
+      "get": {
+        "tags": [
+          "Chains"
+        ],
+        "summary": "`GET /v1/chains` — list all supported chains.",
+        "operationId": "list_chains",
+        "responses": {
+          "200": {
+            "description": "List of supported chains",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_ChainsListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chains/{chain}/address/{id}": {
+      "get": {
+        "tags": [
+          "Chains"
+        ],
+        "summary": "`GET /v1/chains/:chain/address/:id` — derive address for a chain.",
+        "description": "NOTE: In a production system this would load the wallet's group public key\nfrom the key store and derive the chain-specific address. This stub returns\na placeholder demonstrating the routing.",
+        "operationId": "derive_address",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Chain name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Wallet ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Derived address"
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Wallet not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_token": []
+          }
+        ]
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "`GET /v1/health` — basic health check (backward compatible).",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Service is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/health/live": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "`GET /v1/health/live` — liveness probe, always returns 200.",
+        "operationId": "health_live",
+        "responses": {
+          "200": {
+            "description": "Service is alive",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivenessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/health/ready": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "`GET /v1/health/ready` — readiness probe, checks backend connectivity.",
+        "operationId": "health_ready",
+        "responses": {
+          "200": {
+            "description": "Service is ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service degraded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/metrics": {
+      "get": {
+        "tags": [
+          "Metrics"
+        ],
+        "summary": "`GET /v1/metrics` — Prometheus metrics export.",
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "description": "Prometheus text format metrics",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/wallets": {
+      "get": {
+        "tags": [
+          "Wallets"
+        ],
+        "summary": "`GET /v1/wallets` — list all wallets.",
+        "operationId": "list_wallets",
+        "responses": {
+          "200": {
+            "description": "Wallet list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_WalletListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_token": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "Wallets"
+        ],
+        "summary": "`POST /v1/wallets` — create a new MPC wallet (distributed keygen).",
+        "operationId": "create_wallet",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWalletRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Wallet created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_WalletResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Admin+MFA required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_token": []
+          }
+        ]
+      }
+    },
+    "/v1/wallets/{id}": {
+      "get": {
+        "tags": [
+          "Wallets"
+        ],
+        "summary": "`GET /v1/wallets/:id` — get wallet details with derived addresses.",
+        "operationId": "get_wallet",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Wallet ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Wallet details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_WalletDetailResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Wallet not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_token": []
+          }
+        ]
+      }
+    },
+    "/v1/wallets/{id}/freeze": {
+      "post": {
+        "tags": [
+          "Wallets"
+        ],
+        "summary": "`POST /v1/wallets/:id/freeze` — freeze wallet (gateway + all nodes).",
+        "operationId": "freeze_wallet",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Wallet ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Wallet frozen"
+          },
+          "403": {
+            "description": "Admin+MFA required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Wallet not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_token": []
+          }
+        ]
+      }
+    },
+    "/v1/wallets/{id}/refresh": {
+      "post": {
+        "tags": [
+          "Wallets"
+        ],
+        "summary": "`POST /v1/wallets/:id/refresh` — proactive key refresh (distributed).",
+        "operationId": "refresh_wallet",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Wallet ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "403": {
+            "description": "Admin+MFA required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Not yet implemented"
+          }
+        },
+        "security": [
+          {
+            "session_token": []
+          }
+        ]
+      }
+    },
+    "/v1/wallets/{id}/sign": {
+      "post": {
+        "tags": [
+          "Wallets"
+        ],
+        "summary": "`POST /v1/wallets/:id/sign` — distributed MPC sign.",
+        "operationId": "sign_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Wallet ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Signature result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_SignResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Wallet not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_token": []
+          }
+        ]
+      }
+    },
+    "/v1/wallets/{id}/simulate": {
+      "post": {
+        "tags": [
+          "Transactions"
+        ],
+        "summary": "`POST /v1/wallets/:id/simulate` — simulate transaction risk.\nRequires: Viewer+",
+        "operationId": "simulate_transaction",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Wallet ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Simulation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_SimulationResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_token": []
+          }
+        ]
+      }
+    },
+    "/v1/wallets/{id}/transactions": {
+      "post": {
+        "tags": [
+          "Transactions"
+        ],
+        "summary": "`POST /v1/wallets/:id/transactions` — build + sign + broadcast.\nRequires: Initiator or Admin + risk tier check",
+        "operationId": "create_transaction",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Wallet ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransactionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Transaction broadcast",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse_TransactionResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Wallet not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_token": []
+          }
+        ]
+      }
+    },
+    "/v1/wallets/{id}/unfreeze": {
+      "post": {
+        "tags": [
+          "Wallets"
+        ],
+        "summary": "`POST /v1/wallets/:id/unfreeze` — unfreeze wallet (gateway + all nodes).",
+        "operationId": "unfreeze_wallet",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Wallet ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Wallet unfrozen"
+          },
+          "403": {
+            "description": "Admin+MFA required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Wallet not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session_token": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AddressEntry": {
+        "type": "object",
+        "description": "A chain-specific address derived from the wallet's group public key.",
+        "required": [
+          "chain",
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "chain": {
+            "type": "string"
+          }
+        }
+      },
+      "AeadAlgorithm": {
+        "type": "string",
+        "description": "Supported AEAD algorithms.",
+        "enum": [
+          "chacha20-poly1305"
+        ]
+      },
+      "ApiResponse_ChainsListResponse": {
+        "type": "object",
+        "description": "Generic API response wrapper.",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response for chains list.",
+            "required": [
+              "chains",
+              "total"
+            ],
+            "properties": {
+              "chains": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ChainInfo"
+                }
+              },
+              "total": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiResponse_HealthResponse": {
+        "type": "object",
+        "description": "Generic API response wrapper.",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Health check response.",
+            "required": [
+              "status",
+              "version",
+              "chains_supported"
+            ],
+            "properties": {
+              "chains_supported": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "status": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            }
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiResponse_RefreshSessionResponse": {
+        "type": "object",
+        "description": "Generic API response wrapper.",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response for session refresh.",
+            "required": [
+              "session_id",
+              "expires_at",
+              "session_token"
+            ],
+            "properties": {
+              "expires_at": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "session_id": {
+                "type": "string"
+              },
+              "session_token": {
+                "type": "string"
+              }
+            }
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiResponse_ServerHello": {
+        "type": "object",
+        "description": "Generic API response wrapper.",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Server's response with ephemeral key and challenge.",
+            "required": [
+              "protocol_version",
+              "selected_kex",
+              "selected_sig",
+              "selected_aead",
+              "server_ephemeral_pubkey",
+              "server_nonce",
+              "server_challenge",
+              "timestamp",
+              "server_key_id",
+              "server_signature"
+            ],
+            "properties": {
+              "protocol_version": {
+                "type": "string"
+              },
+              "selected_aead": {
+                "$ref": "#/components/schemas/AeadAlgorithm"
+              },
+              "selected_kex": {
+                "$ref": "#/components/schemas/KeyExchangeAlgorithm"
+              },
+              "selected_sig": {
+                "$ref": "#/components/schemas/SignatureAlgorithm"
+              },
+              "server_challenge": {
+                "type": "string"
+              },
+              "server_ephemeral_pubkey": {
+                "type": "string"
+              },
+              "server_key_id": {
+                "type": "string"
+              },
+              "server_nonce": {
+                "type": "string"
+              },
+              "server_signature": {
+                "type": "string"
+              },
+              "timestamp": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              }
+            }
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiResponse_SessionEstablished": {
+        "type": "object",
+        "description": "Generic API response wrapper.",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Session establishment confirmation from server.",
+            "required": [
+              "session_id",
+              "expires_at",
+              "session_token",
+              "key_fingerprint"
+            ],
+            "properties": {
+              "expires_at": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "key_fingerprint": {
+                "type": "string"
+              },
+              "session_id": {
+                "type": "string"
+              },
+              "session_token": {
+                "type": "string"
+              }
+            }
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiResponse_SignResponse": {
+        "type": "object",
+        "description": "Generic API response wrapper.",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response for signing.",
+            "required": [
+              "signature",
+              "scheme"
+            ],
+            "properties": {
+              "scheme": {
+                "type": "string"
+              },
+              "signature": {}
+            }
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiResponse_SimulationResponse": {
+        "type": "object",
+        "description": "Generic API response wrapper.",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response for simulation.",
+            "required": [
+              "success",
+              "gas_used",
+              "risk_score",
+              "risk_flags"
+            ],
+            "properties": {
+              "gas_used": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "risk_flags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "risk_score": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "success": {
+                "type": "boolean"
+              }
+            }
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiResponse_TransactionResponse": {
+        "type": "object",
+        "description": "Generic API response wrapper.",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response for transaction broadcast.",
+            "required": [
+              "tx_hash",
+              "chain",
+              "status"
+            ],
+            "properties": {
+              "chain": {
+                "type": "string"
+              },
+              "explorer_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": "string"
+              },
+              "tx_hash": {
+                "type": "string"
+              }
+            }
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiResponse_Vec_String": {
+        "type": "object",
+        "description": "Generic API response wrapper.",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiResponse_WalletDetailResponse": {
+        "type": "object",
+        "description": "Generic API response wrapper.",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response for wallet details with addresses.",
+            "required": [
+              "id",
+              "label",
+              "scheme",
+              "threshold",
+              "total_parties",
+              "created_at",
+              "addresses"
+            ],
+            "properties": {
+              "addresses": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/AddressEntry"
+                }
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "scheme": {
+                "type": "string"
+              },
+              "threshold": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "total_parties": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiResponse_WalletListResponse": {
+        "type": "object",
+        "description": "Generic API response wrapper.",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response for wallet list.",
+            "required": [
+              "wallets"
+            ],
+            "properties": {
+              "wallets": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/WalletResponse"
+                }
+              }
+            }
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ApiResponse_WalletResponse": {
+        "type": "object",
+        "description": "Generic API response wrapper.",
+        "required": [
+          "success"
+        ],
+        "properties": {
+          "data": {
+            "type": "object",
+            "description": "Response for wallet creation.",
+            "required": [
+              "id",
+              "label",
+              "scheme",
+              "threshold",
+              "total_parties",
+              "created_at"
+            ],
+            "properties": {
+              "created_at": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "id": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "scheme": {
+                "type": "string"
+              },
+              "threshold": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "total_parties": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AuthVerifyRequest": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ClientAuth"
+          },
+          {
+            "type": "object",
+            "required": [
+              "server_challenge"
+            ],
+            "properties": {
+              "server_challenge": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "Request for `/v1/auth/verify` — uses `#[serde(flatten)]` to embed ClientAuth."
+      },
+      "ChainInfo": {
+        "type": "object",
+        "description": "Single chain info in the chains list.",
+        "required": [
+          "name",
+          "display_name",
+          "category"
+        ],
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ChainsListResponse": {
+        "type": "object",
+        "description": "Response for chains list.",
+        "required": [
+          "chains",
+          "total"
+        ],
+        "properties": {
+          "chains": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChainInfo"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ClientAuth": {
+        "type": "object",
+        "description": "Client's authentication proof.",
+        "required": [
+          "client_signature",
+          "client_static_pubkey"
+        ],
+        "properties": {
+          "client_signature": {
+            "type": "string"
+          },
+          "client_static_pubkey": {
+            "type": "string"
+          }
+        }
+      },
+      "ClientHello": {
+        "type": "object",
+        "description": "Client's initial handshake message.",
+        "required": [
+          "protocol_version",
+          "supported_kex",
+          "supported_sig",
+          "client_ephemeral_pubkey",
+          "client_nonce",
+          "timestamp",
+          "client_key_id"
+        ],
+        "properties": {
+          "client_ephemeral_pubkey": {
+            "type": "string",
+            "description": "Client's ephemeral X25519 public key (32 bytes, hex-encoded)."
+          },
+          "client_key_id": {
+            "type": "string",
+            "description": "Client's static public key ID (first 8 bytes of Ed25519 pubkey, hex)."
+          },
+          "client_nonce": {
+            "type": "string",
+            "description": "Client's random nonce (32 bytes, hex-encoded)."
+          },
+          "protocol_version": {
+            "type": "string"
+          },
+          "supported_kex": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KeyExchangeAlgorithm"
+            }
+          },
+          "supported_sig": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignatureAlgorithm"
+            }
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ComponentStatus": {
+        "type": "string",
+        "description": "Status of an individual component.",
+        "enum": [
+          "connected",
+          "disconnected",
+          "not_configured"
+        ]
+      },
+      "ComponentStatuses": {
+        "type": "object",
+        "description": "Individual component health statuses.",
+        "required": [
+          "nats",
+          "redis",
+          "vault"
+        ],
+        "properties": {
+          "nats": {
+            "$ref": "#/components/schemas/ComponentStatus"
+          },
+          "redis": {
+            "$ref": "#/components/schemas/ComponentStatus"
+          },
+          "vault": {
+            "$ref": "#/components/schemas/ComponentStatus"
+          }
+        }
+      },
+      "CreateWalletRequest": {
+        "type": "object",
+        "description": "Request body for `POST /v1/wallets` — create a new MPC wallet.",
+        "required": [
+          "label",
+          "scheme",
+          "threshold",
+          "total_parties"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "Human-readable label for the wallet."
+          },
+          "scheme": {
+            "type": "string",
+            "description": "Cryptographic scheme: \"gg20-ecdsa\", \"frost-ed25519\", etc."
+          },
+          "threshold": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Signing threshold (t).",
+            "minimum": 0
+          },
+          "total_parties": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Total number of parties (n).",
+            "minimum": 0
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "Structured error body in JSON responses.",
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "ErrorCode": {
+        "type": "string",
+        "description": "Machine-readable error code for programmatic client handling.",
+        "enum": [
+          "AUTH_FAILED",
+          "AUTH_RATE_LIMITED",
+          "PERMISSION_DENIED",
+          "MFA_REQUIRED",
+          "INVALID_INPUT",
+          "INVALID_CONFIG",
+          "NOT_FOUND",
+          "POLICY_DENIED",
+          "APPROVAL_REQUIRED",
+          "SESSION_ERROR",
+          "KEY_FROZEN",
+          "PROTOCOL_ERROR",
+          "CRYPTO_ERROR",
+          "SERIALIZATION_ERROR",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "HealthResponse": {
+        "type": "object",
+        "description": "Health check response.",
+        "required": [
+          "status",
+          "version",
+          "chains_supported"
+        ],
+        "properties": {
+          "chains_supported": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "KeyExchangeAlgorithm": {
+        "type": "string",
+        "description": "Supported ECDH algorithms.",
+        "enum": [
+          "x25519"
+        ]
+      },
+      "LivenessResponse": {
+        "type": "object",
+        "description": "Liveness probe response.",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "ReadinessResponse": {
+        "type": "object",
+        "description": "Readiness probe response with component health.",
+        "required": [
+          "status",
+          "components"
+        ],
+        "properties": {
+          "components": {
+            "$ref": "#/components/schemas/ComponentStatuses"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "RefreshSessionRequest": {
+        "type": "object",
+        "description": "Request for session refresh.",
+        "required": [
+          "session_token"
+        ],
+        "properties": {
+          "session_token": {
+            "type": "string"
+          }
+        }
+      },
+      "RefreshSessionResponse": {
+        "type": "object",
+        "description": "Response for session refresh.",
+        "required": [
+          "session_id",
+          "expires_at",
+          "session_token"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "session_token": {
+            "type": "string"
+          }
+        }
+      },
+      "RevokeKeyRequest": {
+        "type": "object",
+        "description": "Request for dynamic key revocation.",
+        "required": [
+          "key_id"
+        ],
+        "properties": {
+          "key_id": {
+            "type": "string"
+          }
+        }
+      },
+      "ServerHello": {
+        "type": "object",
+        "description": "Server's response with ephemeral key and challenge.",
+        "required": [
+          "protocol_version",
+          "selected_kex",
+          "selected_sig",
+          "selected_aead",
+          "server_ephemeral_pubkey",
+          "server_nonce",
+          "server_challenge",
+          "timestamp",
+          "server_key_id",
+          "server_signature"
+        ],
+        "properties": {
+          "protocol_version": {
+            "type": "string"
+          },
+          "selected_aead": {
+            "$ref": "#/components/schemas/AeadAlgorithm"
+          },
+          "selected_kex": {
+            "$ref": "#/components/schemas/KeyExchangeAlgorithm"
+          },
+          "selected_sig": {
+            "$ref": "#/components/schemas/SignatureAlgorithm"
+          },
+          "server_challenge": {
+            "type": "string"
+          },
+          "server_ephemeral_pubkey": {
+            "type": "string"
+          },
+          "server_key_id": {
+            "type": "string"
+          },
+          "server_nonce": {
+            "type": "string"
+          },
+          "server_signature": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "SessionEstablished": {
+        "type": "object",
+        "description": "Session establishment confirmation from server.",
+        "required": [
+          "session_id",
+          "expires_at",
+          "session_token",
+          "key_fingerprint"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "key_fingerprint": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "session_token": {
+            "type": "string"
+          }
+        }
+      },
+      "SignRequest": {
+        "type": "object",
+        "description": "Request body for `POST /v1/wallets/:id/sign` — sign a message.",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "Hex-encoded message to sign."
+          }
+        }
+      },
+      "SignResponse": {
+        "type": "object",
+        "description": "Response for signing.",
+        "required": [
+          "signature",
+          "scheme"
+        ],
+        "properties": {
+          "scheme": {
+            "type": "string"
+          },
+          "signature": {}
+        }
+      },
+      "SignatureAlgorithm": {
+        "type": "string",
+        "description": "Supported signature algorithms.",
+        "enum": [
+          "ed25519"
+        ]
+      },
+      "SimulateRequest": {
+        "type": "object",
+        "description": "Request body for `POST /v1/wallets/:id/simulate`.",
+        "required": [
+          "chain",
+          "to",
+          "value"
+        ],
+        "properties": {
+          "chain": {
+            "type": "string",
+            "description": "Target chain."
+          },
+          "data": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional calldata (hex-encoded)."
+          },
+          "extra": {
+            "description": "Extra chain-specific parameters."
+          },
+          "to": {
+            "type": "string",
+            "description": "Recipient address."
+          },
+          "value": {
+            "type": "string",
+            "description": "Value as string."
+          }
+        }
+      },
+      "SimulationResponse": {
+        "type": "object",
+        "description": "Response for simulation.",
+        "required": [
+          "success",
+          "gas_used",
+          "risk_score",
+          "risk_flags"
+        ],
+        "properties": {
+          "gas_used": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "risk_flags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "risk_score": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "TransactionRequest": {
+        "type": "object",
+        "description": "Request body for `POST /v1/wallets/:id/transactions` — build + sign + broadcast.",
+        "required": [
+          "chain",
+          "to",
+          "value"
+        ],
+        "properties": {
+          "chain": {
+            "type": "string",
+            "description": "Target chain: \"ethereum\", \"bitcoin\", \"solana\", etc."
+          },
+          "data": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional calldata (hex-encoded, for smart contract calls)."
+          },
+          "extra": {
+            "description": "Extra chain-specific parameters."
+          },
+          "to": {
+            "type": "string",
+            "description": "Recipient address."
+          },
+          "value": {
+            "type": "string",
+            "description": "Value as string (chain-native denomination, e.g. wei for EVM)."
+          }
+        }
+      },
+      "TransactionResponse": {
+        "type": "object",
+        "description": "Response for transaction broadcast.",
+        "required": [
+          "tx_hash",
+          "chain",
+          "status"
+        ],
+        "properties": {
+          "chain": {
+            "type": "string"
+          },
+          "explorer_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "tx_hash": {
+            "type": "string"
+          }
+        }
+      },
+      "WalletDetailResponse": {
+        "type": "object",
+        "description": "Response for wallet details with addresses.",
+        "required": [
+          "id",
+          "label",
+          "scheme",
+          "threshold",
+          "total_parties",
+          "created_at",
+          "addresses"
+        ],
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AddressEntry"
+            }
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "scheme": {
+            "type": "string"
+          },
+          "threshold": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "total_parties": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "WalletListResponse": {
+        "type": "object",
+        "description": "Response for wallet list.",
+        "required": [
+          "wallets"
+        ],
+        "properties": {
+          "wallets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WalletResponse"
+            }
+          }
+        }
+      },
+      "WalletResponse": {
+        "type": "object",
+        "description": "Response for wallet creation.",
+        "required": [
+          "id",
+          "label",
+          "scheme",
+          "threshold",
+          "total_parties",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "scheme": {
+            "type": "string"
+          },
+          "threshold": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "total_parties": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  },
+  "security": [
+    {
+      "session_token": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Health",
+      "description": "Health checks and metrics"
+    },
+    {
+      "name": "Auth",
+      "description": "Authentication and session management"
+    },
+    {
+      "name": "Wallets",
+      "description": "MPC wallet operations"
+    },
+    {
+      "name": "Transactions",
+      "description": "Transaction building and simulation"
+    },
+    {
+      "name": "Chains",
+      "description": "Blockchain chain information"
+    },
+    {
+      "name": "Metrics",
+      "description": "Prometheus metrics export"
+    }
+  ]
+}

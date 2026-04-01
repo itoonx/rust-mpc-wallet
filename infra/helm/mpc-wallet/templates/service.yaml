@@ -1,0 +1,84 @@
+# Gateway Service — external access point for the REST API
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mpc-wallet.fullname" . }}-gateway
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mpc-wallet.labels" . | nindent 4 }}
+    {{- include "mpc-wallet.gateway.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  type: {{ .Values.gateway.service.type }}
+  selector:
+    {{- include "mpc-wallet.gateway.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.gateway.service.port }}
+      targetPort: http
+      protocol: TCP
+---
+# MPC Node Headless Service — stable DNS for StatefulSet pods
+# Each pod gets: <pod-name>.<service-name>.<namespace>.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mpc-wallet.fullname" . }}-node
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mpc-wallet.labels" . | nindent 4 }}
+    {{- include "mpc-wallet.node.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mpc-node
+spec:
+  clusterIP: None
+  selector:
+    {{- include "mpc-wallet.node.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.node.port }}
+      targetPort: http
+{{- if .Values.nats.enabled }}
+---
+# NATS Service — internal transport for MPC protocol messages
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mpc-wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "mpc-wallet.name" . }}-nats
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: client
+      port: 4222
+      targetPort: 4222
+    - name: monitor
+      port: {{ .Values.nats.monitorPort }}
+      targetPort: {{ .Values.nats.monitorPort }}
+{{- end }}
+{{- if .Values.redis.enabled }}
+---
+# Redis Service — session storage backend
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mpc-wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "mpc-wallet.name" . }}-redis
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+{{- end }}

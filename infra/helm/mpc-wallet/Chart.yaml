@@ -1,0 +1,13 @@
+apiVersion: v2
+name: mpc-wallet
+description: MPC Wallet SDK — Threshold multi-party computation wallet
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - mpc
+  - wallet
+  - threshold-cryptography
+  - custody
+maintainers:
+  - name: Vaultex Team

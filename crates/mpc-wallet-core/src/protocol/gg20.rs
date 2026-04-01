@@ -183,24 +183,9 @@ fn shamir_split(secret: &Scalar, threshold: u16, total: u16) -> Vec<(u16, Scalar
 /// given the full set of participating party x-coordinates.
 ///
 /// `λ_i(0) = ∏_{j≠i} (0 - x_j) / (x_i - x_j)  mod n`
+/// Delegates to [`super::common::lagrange_coefficient`].
 fn lagrange_coefficient(party_index: u16, all_parties: &[u16]) -> Result<Scalar, CoreError> {
-    let x_i = Scalar::from(party_index as u64);
-    let mut basis = Scalar::ONE;
-    for &j in all_parties {
-        if j == party_index {
-            continue;
-        }
-        let x_j = Scalar::from(j as u64);
-        let num = Scalar::ZERO - x_j;
-        let den = x_i - x_j;
-        let den_inv = den.invert().into_option().ok_or_else(|| {
-            CoreError::Crypto(
-                "zero denominator in Lagrange coefficient — duplicate party index".into(),
-            )
-        })?;
-        basis *= num * den_inv;
-    }
-    Ok(basis)
+    super::common::lagrange_coefficient(party_index, all_parties)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -515,12 +500,18 @@ async fn distributed_keygen(
     let share_bytes = serde_json::to_vec(&final_share_data)
         .map_err(|e| CoreError::Serialization(e.to_string()))?;
 
+    // BIP32: generate random chain code for HD derivation support
+    let mut chain_code = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut chain_code);
+
     Ok(KeyShare {
         scheme: CryptoScheme::Gg20Ecdsa,
         party_id,
         config,
         group_public_key: GroupPublicKey::Secp256k1(group_pubkey_bytes),
         share_data: zeroize::Zeroizing::new(share_bytes),
+        chain_code: Some(chain_code),
+        is_derived: false,
     })
 }
 
@@ -902,16 +893,14 @@ async fn distributed_sign_mta(
     // Aggregate delta and chi
     let n_big = my_pk.n_biguint();
     let n_half = &n_big >> 1;
-    let secp_order = BigUint::from_bytes_be(
-        &hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141").unwrap(),
-    );
+    let secp_order = BigUint::from_bytes_be(&super::common::secp256k1_order_bytes());
 
     let mut delta_scalar = *k_i * *gamma_i;
     let mut chi_scalar = *k_i * *x_i_add;
 
     // Subtract beta shares (MtA formula: alpha - beta = a*b)
     for beta_bytes in &delta_beta_shares {
-        delta_scalar -= crate::protocol::cggmp21::to_scalar_signed(
+        delta_scalar -= crate::protocol::common::to_scalar_signed(
             &BigUint::from_bytes_be(beta_bytes),
             &n_big,
             &n_half,
@@ -919,7 +908,7 @@ async fn distributed_sign_mta(
         );
     }
     for beta_bytes in &chi_beta_shares {
-        chi_scalar -= crate::protocol::cggmp21::to_scalar_signed(
+        chi_scalar -= crate::protocol::common::to_scalar_signed(
             &BigUint::from_bytes_be(beta_bytes),
             &n_big,
             &n_half,
@@ -1019,7 +1008,7 @@ async fn distributed_sign_mta(
         }
 
         let alpha_d = mta_party_a_k.round2_finish(&delta_ct);
-        delta_scalar += crate::protocol::cggmp21::to_scalar_signed(
+        delta_scalar += crate::protocol::common::to_scalar_signed(
             &BigUint::from_bytes_be(&alpha_d),
             &n_big,
             &n_half,
@@ -1027,7 +1016,7 @@ async fn distributed_sign_mta(
         );
 
         let alpha_c = mta_party_a_k.round2_finish(&chi_ct);
-        chi_scalar += crate::protocol::cggmp21::to_scalar_signed(
+        chi_scalar += crate::protocol::common::to_scalar_signed(
             &BigUint::from_bytes_be(&alpha_c),
             &n_big,
             &n_half,
@@ -1293,6 +1282,8 @@ async fn distributed_refresh(
         config: key_share.config,
         group_public_key: key_share.group_public_key.clone(),
         share_data: Zeroizing::new(new_share_bytes),
+        chain_code: key_share.chain_code,
+        is_derived: key_share.is_derived,
     })
 }
 
@@ -1535,6 +1526,8 @@ async fn distributed_reshare(
             config: new_config,
             group_public_key: key_share.group_public_key.clone(),
             share_data: Zeroizing::new(new_share_bytes),
+            chain_code: key_share.chain_code,
+            is_derived: key_share.is_derived,
         })
     } else {
         // Old-only party: does not receive a new share. Return a dummy key share
@@ -1633,6 +1626,8 @@ async fn simulation_keygen(
                 serde_json::to_vec(&share_data)
                     .map_err(|e| CoreError::Serialization(e.to_string()))?,
             ),
+            chain_code: None,
+            is_derived: false,
         })
     } else {
         let msg = transport.recv().await?;
@@ -1650,6 +1645,8 @@ async fn simulation_keygen(
             group_public_key: GroupPublicKey::Secp256k1(group_pubkey_bytes),
             // SEC-004 root fix (T-S4-00/T-S4-01): wrap in Zeroizing
             share_data: zeroize::Zeroizing::new(share_bytes),
+            chain_code: None,
+            is_derived: false,
         })
     }
 }

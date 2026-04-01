@@ -2,12 +2,16 @@
 pub mod bls12_381;
 /// CGGMP21 threshold ECDSA protocol on secp256k1 (next-gen, UC-secure).
 pub mod cggmp21;
+/// Shared helpers for secp256k1-based threshold protocols (GG20, CGGMP21).
+pub mod common;
 /// FROST threshold EdDSA protocol implementation for Ed25519 (Solana, Sui).
 pub mod frost_ed25519;
 /// FROST threshold Schnorr protocol implementation for secp256k1 with Taproot tweaks (Bitcoin).
 pub mod frost_secp256k1;
 /// GG20 threshold ECDSA protocol implementation for secp256k1 (EVM chains).
 pub mod gg20;
+/// BIP32 HD wallet derivation for MPC threshold signing (non-hardened only).
+pub mod hd;
 /// Encrypted request context — IP, device, fingerprint for sign audit trail.
 pub mod request_context;
 /// Sign authorization proof — MPC nodes independently verify gateway decisions.
@@ -104,6 +108,13 @@ pub struct KeyShare {
     /// keygen output in `Zeroizing::new(...)` (enforced in T-S4-01).
     #[serde(with = "serde_zeroizing_vec")]
     pub share_data: Zeroizing<Vec<u8>>,
+    /// Chain code for BIP32 HD derivation (32 bytes). Generated during keygen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_code: Option<[u8; 32]>,
+    /// Whether this share was derived from a parent via HD derivation.
+    /// CVE-2025-66017: derived shares MUST NOT be used with presignatures.
+    #[serde(default)]
+    pub is_derived: bool,
 }
 
 /// Manual `Debug` implementation that redacts `share_data` to prevent secret key
@@ -116,6 +127,8 @@ impl std::fmt::Debug for KeyShare {
             .field("config", &self.config)
             .field("group_public_key", &self.group_public_key)
             .field("share_data", &"[REDACTED]")
+            .field("chain_code", &self.chain_code.map(|_| "[32 bytes]"))
+            .field("is_derived", &self.is_derived)
             .finish()
     }
 }
@@ -243,6 +256,20 @@ pub trait MpcProtocol: Send + Sync {
     ) -> Result<KeyShare, CoreError> {
         Err(CoreError::Protocol(
             "key refresh not supported by this protocol".into(),
+        ))
+    }
+
+    /// Derive a child KeyShare using BIP32 non-hardened derivation.
+    ///
+    /// Supported for secp256k1 protocols only (GG20, CGGMP21).
+    /// Ed25519/BLS/Sr25519/Stark/FROST-secp256k1-tr return error.
+    ///
+    /// Each party calls this independently -- no network communication needed.
+    /// The child share has `is_derived = true`, which blocks presignature signing
+    /// (CVE-2025-66017).
+    fn derive_child(&self, _parent_share: &KeyShare, _index: u32) -> Result<KeyShare, CoreError> {
+        Err(CoreError::Protocol(
+            "HD child derivation not supported by this protocol".into(),
         ))
     }
 

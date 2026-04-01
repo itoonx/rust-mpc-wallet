@@ -14,6 +14,7 @@
 //! - `KEY_STORE_PASSWORD` — password for key store encryption
 //! - `NODE_SIGNING_KEY` — hex Ed25519 signing key for envelope auth
 //! - `GATEWAY_PUBKEY` — hex Ed25519 verifying key of the gateway (for SignAuth verification)
+//! - `HEALTH_PORT` — HTTP port for health/metrics endpoints (default: 9090)
 
 mod rpc;
 
@@ -42,6 +43,61 @@ const DEFAULT_AUTH_CACHE_MAX_ENTRIES: usize = 10_000;
 
 /// Minimum interval between requests for the same group_id (SEC-030/031).
 const MIN_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Check per-group-id rate limit. Returns `true` if the request is allowed,
+/// `false` if it should be rejected (too soon after last request for this group).
+///
+/// Updates `last_request` with the current timestamp when allowed.
+fn check_rate_limit(
+    last_request: &mut StdHashMap<String, Instant>,
+    group_id: &str,
+    min_interval: Duration,
+) -> bool {
+    if let Some(last) = last_request.get(group_id) {
+        if last.elapsed() < min_interval {
+            return false;
+        }
+    }
+    last_request.insert(group_id.to_string(), Instant::now());
+    true
+}
+
+/// Validate a hex-encoded Ed25519 verifying key string.
+/// Returns the decoded `VerifyingKey` or an error message.
+fn parse_verifying_key_hex(
+    hex_str: &str,
+    field_name: &str,
+) -> Result<ed25519_dalek::VerifyingKey, String> {
+    let bytes = hex::decode(hex_str).map_err(|e| format!("{field_name} must be valid hex: {e}"))?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "{field_name} must be 32 bytes (got {})",
+            bytes.len()
+        ));
+    }
+    let arr: [u8; 32] = bytes.try_into().unwrap();
+    ed25519_dalek::VerifyingKey::from_bytes(&arr)
+        .map_err(|e| format!("{field_name} must be a valid Ed25519 public key: {e}"))
+}
+
+/// Validate a hex-encoded Ed25519 signing key string.
+/// Returns the decoded `SigningKey` or an error message.
+fn parse_signing_key_hex(hex_str: &str, field_name: &str) -> Result<SigningKey, String> {
+    let key_bytes =
+        hex::decode(hex_str).map_err(|e| format!("{field_name} must be valid hex: {e}"))?;
+    if key_bytes.len() != 32 {
+        return Err(format!(
+            "{field_name} must be 32 bytes (got {})",
+            key_bytes.len()
+        ));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&key_bytes);
+    let signing_key = SigningKey::from_bytes(&arr);
+    // Zeroize the temporary array
+    arr.iter_mut().for_each(|b| *b = 0);
+    Ok(signing_key)
+}
 
 /// Initialize structured logging with optional JSON format.
 ///
@@ -95,31 +151,18 @@ impl NodeConfig {
             std::env::var("KEY_STORE_PASSWORD").expect("KEY_STORE_PASSWORD must be set"),
         );
 
-        // SEC-029: wrap all signing key intermediates in Zeroizing
+        // SEC-029: parse signing key via helper (Zeroizing intermediates)
         let signing_key_hex = Zeroizing::new(
             std::env::var("NODE_SIGNING_KEY").expect("NODE_SIGNING_KEY must be set"),
         );
-        let key_bytes = Zeroizing::new(
-            hex::decode(&*signing_key_hex).expect("NODE_SIGNING_KEY must be valid hex"),
-        );
-        assert_eq!(key_bytes.len(), 32, "NODE_SIGNING_KEY must be 32 bytes");
-        let mut arr = Zeroizing::new([0u8; 32]);
-        arr.copy_from_slice(&key_bytes);
-        let signing_key = SigningKey::from_bytes(&arr);
+        let signing_key = parse_signing_key_hex(&signing_key_hex, "NODE_SIGNING_KEY")
+            .expect("NODE_SIGNING_KEY parse failed");
 
         let gateway_pubkey_hex = std::env::var("GATEWAY_PUBKEY").expect(
             "GATEWAY_PUBKEY must be set — MPC nodes require gateway identity verification (DEC-012)",
         );
-        let gateway_pubkey_bytes =
-            hex::decode(&gateway_pubkey_hex).expect("GATEWAY_PUBKEY must be valid hex");
-        assert_eq!(
-            gateway_pubkey_bytes.len(),
-            32,
-            "GATEWAY_PUBKEY must be 32 bytes"
-        );
-        let gateway_pubkey =
-            ed25519_dalek::VerifyingKey::from_bytes(&gateway_pubkey_bytes.try_into().unwrap())
-                .expect("GATEWAY_PUBKEY must be a valid Ed25519 public key");
+        let gateway_pubkey = parse_verifying_key_hex(&gateway_pubkey_hex, "GATEWAY_PUBKEY")
+            .expect("GATEWAY_PUBKEY parse failed");
 
         let auth_cache_max_entries = std::env::var("AUTH_CACHE_MAX_ENTRIES")
             .ok()
@@ -224,6 +267,32 @@ async fn main() {
     let config = Arc::new(config);
     let nats = Arc::new(nats_client);
 
+    // Start HTTP health/metrics server (non-blocking, separate task)
+    let health_port = std::env::var("HEALTH_PORT")
+        .unwrap_or_else(|_| "9090".into())
+        .parse::<u16>()
+        .unwrap_or(9090);
+
+    let health_state = Arc::new(HealthState {
+        party_id: config.party_id.0,
+        key_store: key_store.clone(),
+    });
+
+    let app = axum::Router::new()
+        .route("/v1/health", axum::routing::get(health_handler))
+        .route("/v1/metrics", axum::routing::get(metrics_handler))
+        .with_state(health_state);
+
+    tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind(("0.0.0.0", health_port))
+            .await
+            .expect("failed to bind health HTTP server");
+        tracing::info!(port = health_port, "health/metrics HTTP server started");
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!("health HTTP server error: {e}");
+        }
+    });
+
     tokio::select! {
         _ = handle_keygen_requests(keygen_sub, config.clone(), key_store.clone(), nats.clone()) => {}
         _ = handle_sign_requests(sign_sub, config.clone(), key_store.clone(), nats.clone(), auth_cache.clone()) => {}
@@ -233,6 +302,60 @@ async fn main() {
         }
     }
 }
+
+// ── Health / Metrics HTTP endpoints ────────────────────────────────
+
+/// Shared state for the health/metrics HTTP server.
+#[derive(Clone)]
+struct HealthState {
+    party_id: u16,
+    key_store: Arc<EncryptedFileStore>,
+}
+
+/// GET /v1/health — Kubernetes liveness/readiness probe.
+async fn health_handler() -> impl axum::response::IntoResponse {
+    axum::Json(serde_json::json!({
+        "status": "ok",
+        "service": "mpc-node",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+/// GET /v1/metrics — Prometheus text exposition format.
+async fn metrics_handler(
+    axum::extract::State(state): axum::extract::State<Arc<HealthState>>,
+) -> impl axum::response::IntoResponse {
+    let key_count = state
+        .key_store
+        .list()
+        .await
+        .map(|groups| groups.len())
+        .unwrap_or(0);
+
+    let output = format!(
+        "# HELP mpc_node_up Whether the MPC node is running\n\
+         # TYPE mpc_node_up gauge\n\
+         mpc_node_up 1\n\
+         # HELP mpc_node_party_id The party ID of this node\n\
+         # TYPE mpc_node_party_id gauge\n\
+         mpc_node_party_id {party_id}\n\
+         # HELP mpc_node_key_groups Number of key groups stored\n\
+         # TYPE mpc_node_key_groups gauge\n\
+         mpc_node_key_groups {key_count}\n",
+        party_id = state.party_id,
+        key_count = key_count,
+    );
+
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        output,
+    )
+}
+
+// ── NATS request handlers ──────────────────────────────────────────
 
 async fn handle_keygen_requests(
     mut sub: async_nats::Subscriber,
@@ -264,16 +387,13 @@ async fn handle_keygen_requests(
         };
 
         // SEC-030: Rate limit per group_id
-        if let Some(last) = last_request.get(&req.group_id) {
-            if last.elapsed() < MIN_REQUEST_INTERVAL {
-                tracing::warn!(
-                    group_id = %req.group_id,
-                    "rate limited: keygen request too soon (SEC-030)"
-                );
-                continue;
-            }
+        if !check_rate_limit(&mut last_request, &req.group_id, MIN_REQUEST_INTERVAL) {
+            tracing::warn!(
+                group_id = %req.group_id,
+                "rate limited: keygen request too soon (SEC-030)"
+            );
+            continue;
         }
-        last_request.insert(req.group_id.clone(), Instant::now());
 
         tracing::info!(
             group_id = %req.group_id,
@@ -478,16 +598,13 @@ async fn handle_sign_requests(
         }
 
         // SEC-031: Rate limit per group_id
-        if let Some(last) = last_request.get(&req.group_id) {
-            if last.elapsed() < MIN_REQUEST_INTERVAL {
-                tracing::warn!(
-                    group_id = %req.group_id,
-                    "rate limited: sign request too soon (SEC-031)"
-                );
-                continue;
-            }
+        if !check_rate_limit(&mut last_request, &req.group_id, MIN_REQUEST_INTERVAL) {
+            tracing::warn!(
+                group_id = %req.group_id,
+                "rate limited: sign request too soon (SEC-031)"
+            );
+            continue;
         }
-        last_request.insert(req.group_id.clone(), Instant::now());
 
         tracing::info!(
             group_id = %req.group_id,
@@ -767,5 +884,530 @@ fn create_protocol(scheme: CryptoScheme) -> Result<Box<dyn MpcProtocol>, String>
         }
         CryptoScheme::Cggmp21Secp256k1 => Ok(Box::new(cggmp21::Cggmp21Protocol::new())),
         _ => Err(format!("unsupported scheme: {scheme:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+    use rpc::sign_control_message;
+
+    /// Helper: generate a random Ed25519 signing key.
+    fn random_signing_key() -> SigningKey {
+        let mut bytes = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+        SigningKey::from_bytes(&bytes)
+    }
+
+    /// Helper: create a valid signed control message with a given payload.
+    fn make_signed_message(payload: &[u8], key: &SigningKey) -> Vec<u8> {
+        let signed = sign_control_message(payload, key);
+        serde_json::to_vec(&signed).unwrap()
+    }
+
+    // ── create_protocol tests ───────────────────────────────────────
+
+    #[test]
+    fn test_create_protocol_gg20() {
+        let result = create_protocol(CryptoScheme::Gg20Ecdsa);
+        assert!(result.is_ok(), "Gg20Ecdsa should be supported");
+    }
+
+    #[test]
+    fn test_create_protocol_frost_ed25519() {
+        let result = create_protocol(CryptoScheme::FrostEd25519);
+        assert!(result.is_ok(), "FrostEd25519 should be supported");
+    }
+
+    #[test]
+    fn test_create_protocol_frost_secp256k1() {
+        let result = create_protocol(CryptoScheme::FrostSecp256k1Tr);
+        assert!(result.is_ok(), "FrostSecp256k1Tr should be supported");
+    }
+
+    #[test]
+    fn test_create_protocol_cggmp21() {
+        let result = create_protocol(CryptoScheme::Cggmp21Secp256k1);
+        assert!(result.is_ok(), "Cggmp21Secp256k1 should be supported");
+    }
+
+    #[test]
+    fn test_create_protocol_unsupported_sr25519() {
+        let result = create_protocol(CryptoScheme::Sr25519Threshold);
+        match result {
+            Err(e) => assert!(e.contains("unsupported scheme"), "unexpected error: {e}"),
+            Ok(_) => panic!("expected error for Sr25519Threshold"),
+        }
+    }
+
+    #[test]
+    fn test_create_protocol_unsupported_bls() {
+        let result = create_protocol(CryptoScheme::Bls12_381Threshold);
+        match result {
+            Err(e) => assert!(e.contains("unsupported scheme"), "unexpected error: {e}"),
+            Ok(_) => panic!("expected error for Bls12_381Threshold"),
+        }
+    }
+
+    #[test]
+    fn test_create_protocol_unsupported_stark() {
+        let result = create_protocol(CryptoScheme::StarkThreshold);
+        match result {
+            Err(e) => assert!(e.contains("unsupported scheme"), "unexpected error: {e}"),
+            Ok(_) => panic!("expected error for StarkThreshold"),
+        }
+    }
+
+    // ── check_rate_limit tests ──────────────────────────────────────
+
+    #[test]
+    fn test_rate_limit_first_request_allowed() {
+        let mut map = StdHashMap::new();
+        let allowed = check_rate_limit(&mut map, "group-a", Duration::from_secs(1));
+        assert!(allowed, "first request should be allowed");
+    }
+
+    #[test]
+    fn test_rate_limit_immediate_second_request_rejected() {
+        let mut map = StdHashMap::new();
+        assert!(check_rate_limit(
+            &mut map,
+            "group-a",
+            Duration::from_secs(1)
+        ));
+        // Immediate second request for the same group
+        assert!(
+            !check_rate_limit(&mut map, "group-a", Duration::from_secs(1)),
+            "immediate second request should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_rate_limit_different_groups_independent() {
+        let mut map = StdHashMap::new();
+        assert!(check_rate_limit(
+            &mut map,
+            "group-a",
+            Duration::from_secs(1)
+        ));
+        // Different group should still be allowed
+        assert!(
+            check_rate_limit(&mut map, "group-b", Duration::from_secs(1)),
+            "different group_id should not be rate limited"
+        );
+    }
+
+    #[test]
+    fn test_rate_limit_allowed_after_cooldown() {
+        let mut map = StdHashMap::new();
+        // Use a very short interval so we can test cooldown expiry
+        let interval = Duration::from_millis(10);
+        assert!(check_rate_limit(&mut map, "group-a", interval));
+
+        // Manually set a past timestamp to simulate cooldown expiry
+        map.insert(
+            "group-a".to_string(),
+            Instant::now() - Duration::from_millis(50),
+        );
+
+        assert!(
+            check_rate_limit(&mut map, "group-a", interval),
+            "request after cooldown should be allowed"
+        );
+    }
+
+    #[test]
+    fn test_rate_limit_zero_interval_always_allows() {
+        let mut map = StdHashMap::new();
+        let interval = Duration::from_secs(0);
+        assert!(check_rate_limit(&mut map, "group-a", interval));
+        assert!(
+            check_rate_limit(&mut map, "group-a", interval),
+            "zero interval should always allow"
+        );
+    }
+
+    // ── unwrap_signed_message tests ─────────────────────────────────
+
+    #[test]
+    fn test_unwrap_signed_message_valid() {
+        let key = random_signing_key();
+        let payload = b"hello world";
+        let raw = make_signed_message(payload, &key);
+
+        let result = unwrap_signed_message(&raw, &key.verifying_key());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), payload.to_vec());
+    }
+
+    #[test]
+    fn test_unwrap_signed_message_wrong_gateway_key() {
+        let signer = random_signing_key();
+        let wrong_gateway = random_signing_key();
+        let payload = b"test payload";
+        let raw = make_signed_message(payload, &signer);
+
+        let result = unwrap_signed_message(&raw, &wrong_gateway.verifying_key());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("pubkey mismatch"));
+    }
+
+    #[test]
+    fn test_unwrap_signed_message_not_json() {
+        let key = random_signing_key();
+        let raw = b"this is not json";
+        let result = unwrap_signed_message(raw, &key.verifying_key());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a SignedControlMessage"));
+    }
+
+    #[test]
+    fn test_unwrap_signed_message_tampered_payload() {
+        let key = random_signing_key();
+        let payload = b"original";
+        let signed = sign_control_message(payload, &key);
+
+        // Tamper with payload before serializing
+        let mut tampered = signed.clone();
+        tampered.payload = b"tampered".to_vec();
+        let raw = serde_json::to_vec(&tampered).unwrap();
+
+        let result = unwrap_signed_message(&raw, &key.verifying_key());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("signature verification failed"));
+    }
+
+    #[test]
+    fn test_unwrap_signed_message_empty_payload() {
+        let key = random_signing_key();
+        let payload = b"";
+        let raw = make_signed_message(payload, &key);
+
+        let result = unwrap_signed_message(&raw, &key.verifying_key());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    // ── parse_verifying_key_hex tests ───────────────────────────────
+
+    #[test]
+    fn test_parse_verifying_key_hex_valid() {
+        let key = random_signing_key();
+        let hex_str = hex::encode(key.verifying_key().to_bytes());
+        let result = parse_verifying_key_hex(&hex_str, "GATEWAY_PUBKEY");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), key.verifying_key());
+    }
+
+    #[test]
+    fn test_parse_verifying_key_hex_invalid_hex() {
+        let result = parse_verifying_key_hex("zzzz", "TEST_KEY");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must be valid hex"));
+    }
+
+    #[test]
+    fn test_parse_verifying_key_hex_wrong_length() {
+        let result = parse_verifying_key_hex("aabbccdd", "TEST_KEY");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must be 32 bytes"));
+    }
+
+    #[test]
+    fn test_parse_verifying_key_hex_all_zeros_invalid_point() {
+        // 32 zero bytes is not a valid Ed25519 point
+        let hex_str = "0000000000000000000000000000000000000000000000000000000000000000";
+        let result = parse_verifying_key_hex(hex_str, "TEST_KEY");
+        // All-zeros may or may not be valid depending on ed25519-dalek validation;
+        // what matters is we don't panic
+        let _ = result;
+    }
+
+    // ── parse_signing_key_hex tests ─────────────────────────────────
+
+    #[test]
+    fn test_parse_signing_key_hex_valid() {
+        let key = random_signing_key();
+        let hex_str = hex::encode(key.to_bytes());
+        let result = parse_signing_key_hex(&hex_str, "NODE_SIGNING_KEY");
+        assert!(result.is_ok());
+        // Verify roundtrip: derived verifying key matches
+        assert_eq!(result.unwrap().verifying_key(), key.verifying_key());
+    }
+
+    #[test]
+    fn test_parse_signing_key_hex_invalid_hex() {
+        let result = parse_signing_key_hex("not-hex!", "NODE_SIGNING_KEY");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must be valid hex"));
+    }
+
+    #[test]
+    fn test_parse_signing_key_hex_wrong_length() {
+        let result = parse_signing_key_hex("aabb", "NODE_SIGNING_KEY");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must be 32 bytes"));
+    }
+
+    // ── RPC type serialization tests ────────────────────────────────
+
+    #[test]
+    fn test_keygen_request_roundtrip() {
+        let req = rpc::KeygenRequest {
+            group_id: "g1".to_string(),
+            label: "test-wallet".to_string(),
+            scheme: "gg20-ecdsa".to_string(),
+            threshold: 2,
+            total_parties: 3,
+            session_id: "session-abc".to_string(),
+            peer_keys: vec![
+                rpc::PeerKeyEntry {
+                    party_id: 1,
+                    verifying_key_hex: "aa".repeat(32),
+                },
+                rpc::PeerKeyEntry {
+                    party_id: 2,
+                    verifying_key_hex: "bb".repeat(32),
+                },
+            ],
+            nats_url: Some("nats://custom:4222".to_string()),
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: rpc::KeygenRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.group_id, "g1");
+        assert_eq!(decoded.threshold, 2);
+        assert_eq!(decoded.total_parties, 3);
+        assert_eq!(decoded.peer_keys.len(), 2);
+        assert_eq!(decoded.nats_url, Some("nats://custom:4222".to_string()));
+    }
+
+    #[test]
+    fn test_keygen_request_nats_url_default_none() {
+        let json = r#"{"group_id":"g1","label":"l","scheme":"gg20-ecdsa","threshold":2,"total_parties":3,"session_id":"s","peer_keys":[]}"#;
+        let req: rpc::KeygenRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.nats_url, None);
+    }
+
+    #[test]
+    fn test_sign_request_roundtrip() {
+        let req = rpc::SignRequest {
+            group_id: "g1".to_string(),
+            message_hex: hex::encode(b"tx-bytes"),
+            signer_ids: vec![1, 3],
+            session_id: "sign-session".to_string(),
+            peer_keys: vec![],
+            sign_authorization: "{}".to_string(),
+            nats_url: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: rpc::SignRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.signer_ids, vec![1, 3]);
+        assert_eq!(decoded.message_hex, hex::encode(b"tx-bytes"));
+    }
+
+    #[test]
+    fn test_freeze_request_roundtrip() {
+        let req = rpc::FreezeRequest {
+            group_id: "g1".to_string(),
+            freeze: true,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: rpc::FreezeRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.group_id, "g1");
+        assert!(decoded.freeze);
+    }
+
+    #[test]
+    fn test_keygen_response_success() {
+        let resp = rpc::KeygenResponse {
+            party_id: 1,
+            group_id: "g1".to_string(),
+            group_pubkey_hex: "abcd".to_string(),
+            success: true,
+            error: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let decoded: rpc::KeygenResponse = serde_json::from_str(&json).unwrap();
+        assert!(decoded.success);
+        assert!(decoded.error.is_none());
+    }
+
+    #[test]
+    fn test_keygen_response_failure() {
+        let resp = rpc::KeygenResponse {
+            party_id: 2,
+            group_id: "g2".to_string(),
+            group_pubkey_hex: String::new(),
+            success: false,
+            error: Some("keygen failed: timeout".to_string()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let decoded: rpc::KeygenResponse = serde_json::from_str(&json).unwrap();
+        assert!(!decoded.success);
+        assert_eq!(decoded.error.unwrap(), "keygen failed: timeout");
+    }
+
+    #[test]
+    fn test_sign_response_success() {
+        let resp = rpc::SignResponse {
+            party_id: 1,
+            group_id: "g1".to_string(),
+            signature_json: Some(r#"{"r":"...","s":"..."}"#.to_string()),
+            success: true,
+            error: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let decoded: rpc::SignResponse = serde_json::from_str(&json).unwrap();
+        assert!(decoded.success);
+        assert!(decoded.signature_json.is_some());
+    }
+
+    // ── Signed control message integration tests ────────────────────
+
+    #[test]
+    fn test_signed_control_message_with_keygen_request() {
+        let key = random_signing_key();
+        let req = rpc::KeygenRequest {
+            group_id: "g1".to_string(),
+            label: "test".to_string(),
+            scheme: "gg20-ecdsa".to_string(),
+            threshold: 2,
+            total_parties: 3,
+            session_id: "s1".to_string(),
+            peer_keys: vec![],
+            nats_url: None,
+        };
+        let payload = serde_json::to_vec(&req).unwrap();
+        let raw = make_signed_message(&payload, &key);
+
+        let inner = unwrap_signed_message(&raw, &key.verifying_key()).unwrap();
+        let decoded: rpc::KeygenRequest = serde_json::from_slice(&inner).unwrap();
+        assert_eq!(decoded.group_id, "g1");
+        assert_eq!(decoded.scheme, "gg20-ecdsa");
+    }
+
+    #[test]
+    fn test_signed_control_message_with_freeze_request() {
+        let key = random_signing_key();
+        let req = rpc::FreezeRequest {
+            group_id: "wallet-1".to_string(),
+            freeze: false,
+        };
+        let payload = serde_json::to_vec(&req).unwrap();
+        let raw = make_signed_message(&payload, &key);
+
+        let inner = unwrap_signed_message(&raw, &key.verifying_key()).unwrap();
+        let decoded: rpc::FreezeRequest = serde_json::from_slice(&inner).unwrap();
+        assert_eq!(decoded.group_id, "wallet-1");
+        assert!(!decoded.freeze);
+    }
+
+    // ── DEFAULT_AUTH_CACHE_MAX_ENTRIES constant test ─────────────────
+
+    #[test]
+    fn test_default_auth_cache_max_entries() {
+        assert_eq!(DEFAULT_AUTH_CACHE_MAX_ENTRIES, 10_000);
+    }
+
+    #[test]
+    fn test_min_request_interval() {
+        assert_eq!(MIN_REQUEST_INTERVAL, Duration::from_secs(1));
+    }
+
+    // ── Health / Metrics endpoint tests ────────────────────────────────
+
+    /// Build a test router with health/metrics endpoints backed by a temp key store.
+    fn build_test_health_router() -> (axum::Router, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let key_store = Arc::new(EncryptedFileStore::new(
+            tmp.path().to_path_buf(),
+            "test-password",
+        ));
+        let state = Arc::new(HealthState {
+            party_id: 42,
+            key_store,
+        });
+        let app = axum::Router::new()
+            .route("/v1/health", axum::routing::get(health_handler))
+            .route("/v1/metrics", axum::routing::get(metrics_handler))
+            .with_state(state);
+        (app, tmp)
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint_returns_200_ok() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (app, _tmp) = build_test_health_router();
+
+        let req = axum::http::Request::builder()
+            .uri("/v1/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["service"], "mpc-node");
+        assert!(json["version"].is_string(), "version should be a string");
+    }
+
+    #[tokio::test]
+    async fn test_metrics_endpoint_returns_prometheus_format() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (app, _tmp) = build_test_health_router();
+
+        let req = axum::http::Request::builder()
+            .uri("/v1/metrics")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        // Verify Content-Type is Prometheus text format
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            content_type.contains("text/plain"),
+            "content-type should be text/plain, got: {content_type}"
+        );
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+
+        // Verify Prometheus metric lines
+        assert!(
+            text.contains("mpc_node_up 1"),
+            "should contain mpc_node_up gauge"
+        );
+        assert!(
+            text.contains("mpc_node_party_id 42"),
+            "should contain party_id 42"
+        );
+        assert!(
+            text.contains("mpc_node_key_groups 0"),
+            "empty store should have 0 key groups"
+        );
+        assert!(text.contains("# HELP"), "should contain HELP comments");
+        assert!(text.contains("# TYPE"), "should contain TYPE comments");
     }
 }

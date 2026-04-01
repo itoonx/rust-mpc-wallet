@@ -114,7 +114,12 @@ use crate::state::AppState;
         ("session_token" = [])
     )
 )]
-struct ApiDoc;
+pub struct ApiDoc;
+
+/// Return the OpenAPI spec as a pretty-printed JSON string.
+pub fn openapi_spec_json() -> String {
+    serde_json::to_string_pretty(&ApiDoc::openapi()).expect("OpenAPI spec must serialize to JSON")
+}
 
 /// Serve the OpenAPI JSON spec.
 async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
@@ -273,5 +278,32 @@ mod tests {
         assert!(json.contains("\"openapi\""));
         assert!(json.contains("MPC Wallet API"));
         assert!(json.len() > 1000, "spec should be substantial");
+    }
+
+    /// Write the OpenAPI spec to `docs/openapi.json`.
+    /// Run with: cargo test -p mpc-wallet-api export_openapi_spec -- --ignored
+    #[test]
+    #[ignore]
+    fn export_openapi_spec() {
+        let json = openapi_spec_json();
+
+        // Validate basics before writing
+        assert!(json.contains("\"openapi\""), "must contain openapi key");
+        assert!(json.contains("/v1/health"), "must contain health endpoint");
+        assert!(
+            json.contains("/v1/wallets"),
+            "must contain wallets endpoint"
+        );
+
+        // Write to docs/openapi.json (relative to workspace root)
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
+        let output_path = workspace_root.join("docs").join("openapi.json");
+
+        std::fs::write(&output_path, &json)
+            .unwrap_or_else(|e| panic!("failed to write {}: {e}", output_path.display()));
+
+        println!("OpenAPI spec exported to {}", output_path.display());
+        assert!(output_path.exists());
     }
 }

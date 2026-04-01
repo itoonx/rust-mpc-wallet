@@ -92,6 +92,8 @@ impl MpcProtocol for Sr25519Protocol {
             config,
             group_public_key: GroupPublicKey::Sr25519(group_pubkey_bytes),
             share_data: share_bytes,
+            chain_code: None,
+            is_derived: false,
         })
     }
 

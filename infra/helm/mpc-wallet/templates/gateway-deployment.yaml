@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mpc-wallet.fullname" . }}-gateway
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mpc-wallet.labels" . | nindent 4 }}
+    {{- include "mpc-wallet.gateway.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mpc-wallet.gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mpc-wallet.gateway.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway
+      {{- with .Values.gateway.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "mpc-wallet.serviceAccountName" . }}
+      containers:
+        - name: gateway
+          image: "{{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag }}"
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.gateway.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.gateway.port | quote }}
+            - name: NATS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "mpc-wallet.fullname" . }}-config
+                  key: nats_url
+            - name: NETWORK
+              value: {{ .Values.gateway.env.NETWORK | quote }}
+            - name: SESSION_BACKEND
+              value: {{ .Values.gateway.env.SESSION_BACKEND | quote }}
+            - name: LOG_FORMAT
+              value: {{ .Values.gateway.env.LOG_FORMAT | quote }}
+            - name: RUST_LOG
+              value: {{ .Values.gateway.env.RUST_LOG | quote }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mpc-wallet.fullname" . }}-secrets
+                  key: jwt_secret
+            - name: GATEWAY_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mpc-wallet.fullname" . }}-secrets
+                  key: gateway_signing_key
+            {{- if .Values.redis.enabled }}
+            - name: SESSION_BACKEND
+              value: "redis"
+            - name: REDIS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "mpc-wallet.fullname" . }}-config
+                  key: redis_url
+            - name: SESSION_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mpc-wallet.fullname" . }}-secrets
+                  key: session_encryption_key
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.gateway.healthPath }}
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.gateway.healthPath }}
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

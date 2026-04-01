@@ -459,24 +459,9 @@ fn poly_eval(coefficients: &[Scalar], x: &Scalar) -> Scalar {
 /// Compute Lagrange coefficient lambda_i(0) for party `i` in the given set.
 /// Used in the signing protocol (T-S19-04).
 #[allow(dead_code)]
+/// Delegates to [`super::common::lagrange_coefficient`].
 fn lagrange_coefficient(party_index: u16, all_parties: &[u16]) -> Result<Scalar, CoreError> {
-    let x_i = Scalar::from(party_index as u64);
-    let mut basis = Scalar::ONE;
-    for &j in all_parties {
-        if j == party_index {
-            continue;
-        }
-        let x_j = Scalar::from(j as u64);
-        let num = Scalar::ZERO - x_j;
-        let den = x_i - x_j;
-        let den_inv = den.invert().into_option().ok_or_else(|| {
-            CoreError::Crypto(
-                "zero denominator in Lagrange coefficient — duplicate party index".into(),
-            )
-        })?;
-        basis *= num * den_inv;
-    }
-    Ok(basis)
+    super::common::lagrange_coefficient(party_index, all_parties)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -704,6 +689,54 @@ impl MpcProtocol for Cggmp21Protocol {
     ) -> Result<KeyShare, CoreError> {
         cggmp21_refresh(key_share, signers, transport).await
     }
+
+    fn derive_child(&self, parent_share: &KeyShare, index: u32) -> Result<KeyShare, CoreError> {
+        cggmp21_derive_child(parent_share, index)
+    }
+}
+
+/// BIP32 non-hardened child key derivation for CGGMP21 shares.
+///
+/// Tweaks the secret share, all public shares, and the group public key
+/// using the BIP32 derivation formula. No network communication needed.
+fn cggmp21_derive_child(parent_share: &KeyShare, index: u32) -> Result<KeyShare, CoreError> {
+    use crate::protocol::hd;
+
+    let chain_code = parent_share.chain_code.ok_or_else(|| {
+        CoreError::Protocol("KeyShare has no chain_code -- cannot derive child".into())
+    })?;
+
+    let mut share_data: Cggmp21ShareData = serde_json::from_slice(&parent_share.share_data)
+        .map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+    let parent_pubkey = &share_data.group_public_key;
+    let (tweak, child_chain_code) =
+        hd::bip32_derive_non_hardened(&chain_code, parent_pubkey, index)?;
+
+    // Tweak secret share: child_share = parent_share + tweak
+    share_data.secret_share = hd::tweak_secret_scalar(&share_data.secret_share, &tweak)?;
+
+    // Tweak all public shares: child_pub_i = parent_pub_i + tweak * G
+    let tweak_point = ProjectivePoint::GENERATOR * tweak;
+    for pub_share in &mut share_data.public_shares {
+        *pub_share = hd::tweak_public_key(pub_share, &tweak_point)?;
+    }
+
+    // Tweak group pubkey
+    share_data.group_public_key = hd::tweak_public_key(&share_data.group_public_key, &tweak_point)?;
+
+    let child_share_bytes =
+        serde_json::to_vec(&share_data).map_err(|e| CoreError::Serialization(e.to_string()))?;
+
+    Ok(KeyShare {
+        scheme: parent_share.scheme,
+        party_id: parent_share.party_id,
+        config: parent_share.config,
+        group_public_key: GroupPublicKey::Secp256k1(share_data.group_public_key.clone()),
+        share_data: Zeroizing::new(child_share_bytes),
+        chain_code: Some(child_chain_code),
+        is_derived: true,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1085,12 +1118,18 @@ async fn cggmp21_keygen(
     let share_bytes =
         serde_json::to_vec(&share_data).map_err(|e| CoreError::Serialization(e.to_string()))?;
 
+    // BIP32: generate random chain code for HD derivation support
+    let mut chain_code = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut chain_code);
+
     Ok(KeyShare {
         scheme: CryptoScheme::Cggmp21Secp256k1,
         party_id,
         config,
         group_public_key: GroupPublicKey::Secp256k1(group_pubkey_bytes),
         share_data: Zeroizing::new(share_bytes),
+        chain_code: Some(chain_code),
+        is_derived: false,
     })
 }
 
@@ -1845,6 +1884,17 @@ async fn cggmp21_sign_online_with_store(
     transport: &dyn Transport,
     store: Option<&dyn PreSignatureStore>,
 ) -> Result<MpcSignature, CoreError> {
+    // ── CVE-2025-66017: block presignature signing with HD-derived shares ──
+    // Presignatures are message-independent "blank cheques". Combining them
+    // with BIP32-derived shares degrades security from 128-bit to ~85-bit.
+    if key_share.is_derived {
+        return Err(CoreError::Protocol(
+            "CVE-2025-66017: presignature signing forbidden with HD-derived shares \
+             -- use full interactive sign instead"
+                .into(),
+        ));
+    }
+
     // ── Nonce reuse protection (SEC-037) ──────────────────────────────
     // Mark-before-use: persistent store is checked/marked BEFORE any
     // cryptographic computation to prevent crash-replay attacks.
@@ -2520,6 +2570,8 @@ async fn cggmp21_refresh(
         config: key_share.config,
         group_public_key: key_share.group_public_key.clone(),
         share_data: Zeroizing::new(new_share_bytes),
+        chain_code: key_share.chain_code,
+        is_derived: key_share.is_derived,
     })
 }
 
@@ -2531,40 +2583,19 @@ async fn cggmp21_refresh(
 ///
 /// This ensures `to_scalar_signed(alpha) + to_scalar_signed(beta) == a * b` as a
 /// `Scalar`, even when the unsigned sum `alpha + beta` wraps modulo `N`.
+/// Delegates to [`super::common::to_scalar_signed`].
 pub fn to_scalar_signed(
     big: &BigUint,
     n: &BigUint,
     n_half: &BigUint,
     secp_order: &BigUint,
 ) -> Scalar {
-    use k256::elliptic_curve::ops::Reduce;
-    if big <= n_half {
-        // Positive: reduce directly mod q
-        let reduced = big % secp_order;
-        let be = reduced.to_bytes_be();
-        let mut padded = [0u8; 32];
-        padded[32usize.saturating_sub(be.len())..].copy_from_slice(&be);
-        <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&padded))
-    } else {
-        // Negative: true value is big - N, so Scalar = -(N - big) mod q
-        let abs_val = n - big;
-        let reduced = &abs_val % secp_order;
-        let be = reduced.to_bytes_be();
-        let mut padded = [0u8; 32];
-        padded[32usize.saturating_sub(be.len())..].copy_from_slice(&be);
-        let pos = <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&padded));
-        Scalar::ZERO - pos
-    }
+    super::common::to_scalar_signed(big, n, n_half, secp_order)
 }
 
-/// Return the secp256k1 curve order as 32 big-endian bytes.
+/// Delegates to [`super::common::secp256k1_order_bytes`].
 fn hex_decode_secp_order() -> [u8; 32] {
-    // n = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-    [
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
-        0x41, 0x41,
-    ]
+    super::common::secp256k1_order_bytes()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3831,6 +3862,8 @@ mod tests {
             party_id: PartyId(1),
             share_data: zeroize::Zeroizing::new(vec![]),
             group_public_key: GroupPublicKey::Secp256k1(vec![]),
+            chain_code: None,
+            is_derived: false,
         };
 
         let net = crate::transport::local::LocalTransportNetwork::new(2);

@@ -1,0 +1,56 @@
+============================================================
+  MPC Wallet SDK — Deployed Successfully
+============================================================
+
+Architecture (DEC-015):
+  Gateway (orchestrator, ZERO key shares) -> NATS -> {{ .Values.node.replicas }} MPC Nodes
+
+Components:
+  - API Gateway:  {{ .Values.gateway.replicas }} replica(s)
+  - MPC Nodes:    {{ .Values.node.replicas }} replica(s) (StatefulSet)
+  - NATS:         {{ if .Values.nats.enabled }}enabled{{ else }}external ({{ .Values.nats.url }}){{ end }}
+  - Redis:        {{ if .Values.redis.enabled }}enabled{{ else }}disabled (using {{ .Values.gateway.env.SESSION_BACKEND }} session backend){{ end }}
+
+------------------------------------------------------------
+  Access the API Gateway
+------------------------------------------------------------
+
+{{- if .Values.ingress.enabled }}
+  URL: https://{{ .Values.ingress.host }}/v1/health
+{{- else }}
+  # Port-forward to access locally:
+  kubectl port-forward svc/{{ include "mpc-wallet.fullname" . }}-gateway {{ .Values.gateway.port }}:{{ .Values.gateway.service.port }} -n {{ .Values.namespace }}
+
+  # Then test:
+  curl http://localhost:{{ .Values.gateway.port }}/v1/health
+{{- end }}
+
+------------------------------------------------------------
+  Verify MPC Nodes
+------------------------------------------------------------
+
+  # Check all nodes are running:
+  kubectl get pods -l app.kubernetes.io/component=mpc-node -n {{ .Values.namespace }}
+
+  # Check node logs:
+  kubectl logs {{ include "mpc-wallet.fullname" . }}-node-0 -n {{ .Values.namespace }}
+
+------------------------------------------------------------
+  IMPORTANT — Security Reminders
+------------------------------------------------------------
+
+  1. Replace ALL placeholder secrets before production use:
+     helm upgrade {{ .Release.Name }} ./infra/helm/mpc-wallet \
+       --set secrets.jwtSecret=<real-secret> \
+       --set secrets.keyStorePassword=<real-password> \
+       --set secrets.gatewaySigningKey=<real-key-hex>
+
+  2. Set the gateway public key so MPC nodes can verify control messages:
+     --set configmap.gatewayPubkey=<gateway-ed25519-pubkey-hex>
+
+  3. For production, use Sealed Secrets or External Secrets Operator
+     instead of Helm --set for secret injection.
+
+  4. Container images should be tagged with git SHA, not :latest.
+
+============================================================

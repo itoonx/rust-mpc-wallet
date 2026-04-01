@@ -197,6 +197,8 @@ impl MpcProtocol for FrostEd25519Protocol {
                 serde_json::to_vec(&share_data)
                     .map_err(|e| CoreError::Serialization(e.to_string()))?,
             ),
+            chain_code: None,
+            is_derived: false,
         })
     }
 
@@ -349,6 +351,8 @@ impl MpcProtocol for FrostEd25519Protocol {
                 serde_json::to_vec(&new_share_data)
                     .map_err(|e| CoreError::Serialization(e.to_string()))?,
             ),
+            chain_code: None,
+            is_derived: false,
         })
     }
 
