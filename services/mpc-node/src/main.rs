@@ -14,6 +14,7 @@
 //! - `KEY_STORE_PASSWORD` — password for key store encryption
 //! - `NODE_SIGNING_KEY` — hex Ed25519 signing key for envelope auth
 //! - `GATEWAY_PUBKEY` — hex Ed25519 verifying key of the gateway (for SignAuth verification)
+//! - `HEALTH_PORT` — HTTP port for health/metrics endpoints (default: 9090)
 
 mod rpc;
 
@@ -266,6 +267,32 @@ async fn main() {
     let config = Arc::new(config);
     let nats = Arc::new(nats_client);
 
+    // Start HTTP health/metrics server (non-blocking, separate task)
+    let health_port = std::env::var("HEALTH_PORT")
+        .unwrap_or_else(|_| "9090".into())
+        .parse::<u16>()
+        .unwrap_or(9090);
+
+    let health_state = Arc::new(HealthState {
+        party_id: config.party_id.0,
+        key_store: key_store.clone(),
+    });
+
+    let app = axum::Router::new()
+        .route("/v1/health", axum::routing::get(health_handler))
+        .route("/v1/metrics", axum::routing::get(metrics_handler))
+        .with_state(health_state);
+
+    tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind(("0.0.0.0", health_port))
+            .await
+            .expect("failed to bind health HTTP server");
+        tracing::info!(port = health_port, "health/metrics HTTP server started");
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!("health HTTP server error: {e}");
+        }
+    });
+
     tokio::select! {
         _ = handle_keygen_requests(keygen_sub, config.clone(), key_store.clone(), nats.clone()) => {}
         _ = handle_sign_requests(sign_sub, config.clone(), key_store.clone(), nats.clone(), auth_cache.clone()) => {}
@@ -275,6 +302,60 @@ async fn main() {
         }
     }
 }
+
+// ── Health / Metrics HTTP endpoints ────────────────────────────────
+
+/// Shared state for the health/metrics HTTP server.
+#[derive(Clone)]
+struct HealthState {
+    party_id: u16,
+    key_store: Arc<EncryptedFileStore>,
+}
+
+/// GET /v1/health — Kubernetes liveness/readiness probe.
+async fn health_handler() -> impl axum::response::IntoResponse {
+    axum::Json(serde_json::json!({
+        "status": "ok",
+        "service": "mpc-node",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+/// GET /v1/metrics — Prometheus text exposition format.
+async fn metrics_handler(
+    axum::extract::State(state): axum::extract::State<Arc<HealthState>>,
+) -> impl axum::response::IntoResponse {
+    let key_count = state
+        .key_store
+        .list()
+        .await
+        .map(|groups| groups.len())
+        .unwrap_or(0);
+
+    let output = format!(
+        "# HELP mpc_node_up Whether the MPC node is running\n\
+         # TYPE mpc_node_up gauge\n\
+         mpc_node_up 1\n\
+         # HELP mpc_node_party_id The party ID of this node\n\
+         # TYPE mpc_node_party_id gauge\n\
+         mpc_node_party_id {party_id}\n\
+         # HELP mpc_node_key_groups Number of key groups stored\n\
+         # TYPE mpc_node_key_groups gauge\n\
+         mpc_node_key_groups {key_count}\n",
+        party_id = state.party_id,
+        key_count = key_count,
+    );
+
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        output,
+    )
+}
+
+// ── NATS request handlers ──────────────────────────────────────────
 
 async fn handle_keygen_requests(
     mut sub: async_nats::Subscriber,
@@ -1236,5 +1317,97 @@ mod tests {
     #[test]
     fn test_min_request_interval() {
         assert_eq!(MIN_REQUEST_INTERVAL, Duration::from_secs(1));
+    }
+
+    // ── Health / Metrics endpoint tests ────────────────────────────────
+
+    /// Build a test router with health/metrics endpoints backed by a temp key store.
+    fn build_test_health_router() -> (axum::Router, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().expect("failed to create tempdir");
+        let key_store = Arc::new(EncryptedFileStore::new(
+            tmp.path().to_path_buf(),
+            "test-password",
+        ));
+        let state = Arc::new(HealthState {
+            party_id: 42,
+            key_store,
+        });
+        let app = axum::Router::new()
+            .route("/v1/health", axum::routing::get(health_handler))
+            .route("/v1/metrics", axum::routing::get(metrics_handler))
+            .with_state(state);
+        (app, tmp)
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint_returns_200_ok() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (app, _tmp) = build_test_health_router();
+
+        let req = axum::http::Request::builder()
+            .uri("/v1/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["service"], "mpc-node");
+        assert!(json["version"].is_string(), "version should be a string");
+    }
+
+    #[tokio::test]
+    async fn test_metrics_endpoint_returns_prometheus_format() {
+        use axum::body::Body;
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (app, _tmp) = build_test_health_router();
+
+        let req = axum::http::Request::builder()
+            .uri("/v1/metrics")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(req).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        // Verify Content-Type is Prometheus text format
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            content_type.contains("text/plain"),
+            "content-type should be text/plain, got: {content_type}"
+        );
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+
+        // Verify Prometheus metric lines
+        assert!(
+            text.contains("mpc_node_up 1"),
+            "should contain mpc_node_up gauge"
+        );
+        assert!(
+            text.contains("mpc_node_party_id 42"),
+            "should contain party_id 42"
+        );
+        assert!(
+            text.contains("mpc_node_key_groups 0"),
+            "empty store should have 0 key groups"
+        );
+        assert!(text.contains("# HELP"), "should contain HELP comments");
+        assert!(text.contains("# TYPE"), "should contain TYPE comments");
     }
 }

@@ -1,0 +1,186 @@
+# ============================================================================
+# MPC Wallet Helm Chart — Default Values
+#
+# Architecture (DEC-015):
+#   Gateway (orchestrator, ZERO key shares) -> NATS -> N MPC Nodes (1 share each)
+#
+# Secrets are NOT stored here. Provide them at install time:
+#   helm install mpc-wallet ./infra/helm/mpc-wallet \
+#     --set secrets.jwtSecret=<value> \
+#     --set secrets.keyStorePassword=<value> \
+#     --set secrets.gatewaySigningKey=<value>
+# ============================================================================
+
+# -- Namespace for all resources
+namespace: mpc-wallet
+
+# -- Global image settings
+global:
+  imagePullSecrets: []
+
+# ============================================================================
+# API Gateway — REST API, orchestrator, holds ZERO key shares
+# ============================================================================
+gateway:
+  replicas: 1
+  image:
+    repository: mpc-wallet/gateway
+    tag: latest
+    pullPolicy: IfNotPresent
+  port: 3000
+  service:
+    type: ClusterIP
+    port: 80
+  resources:
+    limits:
+      memory: 512Mi
+      cpu: "1"
+    requests:
+      memory: 256Mi
+      cpu: "0.5"
+  env:
+    SESSION_BACKEND: memory
+    LOG_FORMAT: json
+    NETWORK: mainnet
+    RUST_LOG: mpc_wallet_api=info
+  # -- Liveness/readiness probe path
+  healthPath: /v1/health
+  # -- Pod annotations (e.g., Prometheus scrape config)
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "3000"
+    prometheus.io/path: /v1/metrics
+
+# ============================================================================
+# MPC Nodes — StatefulSet, each holds exactly 1 key share
+# ============================================================================
+node:
+  # -- Number of MPC node replicas (threshold participants)
+  replicas: 3
+  image:
+    repository: mpc-wallet/node
+    tag: latest
+    pullPolicy: IfNotPresent
+  port: 3000
+  resources:
+    limits:
+      memory: 1Gi
+      cpu: "2"
+    requests:
+      memory: 512Mi
+      cpu: "1"
+  env:
+    RUST_LOG: mpc_wallet_node=info
+    KEY_STORE_DIR: /data/keys
+  # -- Liveness/readiness probe path
+  healthPath: /v1/health
+  # -- Persistent volume for key store
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 10Gi
+    accessMode: ReadWriteOnce
+  # -- Pod annotations
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "3000"
+    prometheus.io/path: /v1/metrics
+  # -- Security context for pods
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+
+# ============================================================================
+# NATS — MPC transport + control channels
+# ============================================================================
+nats:
+  # -- Deploy a NATS instance alongside the chart.
+  #    Set to false if using an external NATS cluster.
+  enabled: true
+  image:
+    repository: nats
+    tag: 2.10-alpine
+    pullPolicy: IfNotPresent
+  url: nats://nats:4222
+  # -- Enable JetStream
+  jetstream: true
+  # -- NATS monitoring port
+  monitorPort: 8222
+  resources:
+    limits:
+      memory: 256Mi
+      cpu: "0.5"
+    requests:
+      memory: 128Mi
+      cpu: "0.25"
+
+# ============================================================================
+# Redis — Optional session backend
+# ============================================================================
+redis:
+  # -- Deploy a Redis instance alongside the chart.
+  #    Set to false if using an external Redis or memory backend.
+  enabled: false
+  image:
+    repository: redis
+    tag: 7-alpine
+    pullPolicy: IfNotPresent
+  url: redis://redis:6379
+  maxmemory: 128mb
+  resources:
+    limits:
+      memory: 256Mi
+      cpu: "0.5"
+    requests:
+      memory: 128Mi
+      cpu: "0.25"
+
+# ============================================================================
+# Secrets — Provide at install time, never commit real values
+# ============================================================================
+secrets:
+  # -- JWT signing secret (required)
+  jwtSecret: "REPLACE_AT_INSTALL_TIME"
+  # -- Key store encryption password (required)
+  keyStorePassword: "REPLACE_AT_INSTALL_TIME"
+  # -- Gateway Ed25519 signing key seed hex (required)
+  gatewaySigningKey: "REPLACE_AT_INSTALL_TIME"
+  # -- Per-node signing keys (comma-separated hex seeds, one per replica)
+  #    If empty, nodes will generate ephemeral keys (not recommended for production)
+  nodeSigningKeys: ""
+  # -- Session encryption key for Redis backend (required if redis.enabled)
+  sessionEncryptionKey: ""
+
+# ============================================================================
+# Ingress — Optional external access
+# ============================================================================
+ingress:
+  enabled: false
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1s"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: 1m
+  host: api.mpc-wallet.example.com
+  tls:
+    enabled: true
+    secretName: mpc-api-tls
+
+# ============================================================================
+# Service Account
+# ============================================================================
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# ============================================================================
+# ConfigMap overrides
+# ============================================================================
+configmap:
+  # -- Gateway Ed25519 public key hex (MPC nodes verify control messages with this)
+  #    MUST be set at install time: --set configmap.gatewayPubkey=<hex>
+  gatewayPubkey: ""

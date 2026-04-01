@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mpc-wallet.fullname" . }}-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mpc-wallet.labels" . | nindent 4 }}
+data:
+  # NATS connection URL for MPC transport + control channels
+  nats_url: {{ .Values.nats.url | quote }}
+  # Gateway Ed25519 public key — MPC nodes use this to verify control messages (SEC-025)
+  # MUST be set at install time: --set configmap.gatewayPubkey=<hex>
+  gateway_pubkey: {{ .Values.configmap.gatewayPubkey | default "" | quote }}
+  {{- if .Values.redis.enabled }}
+  # Redis connection URL for session backend
+  redis_url: {{ .Values.redis.url | quote }}
+  {{- end }}

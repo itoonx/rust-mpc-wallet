@@ -1,0 +1,54 @@
+{{- if .Values.nats.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mpc-wallet.fullname" . }}-nats
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mpc-wallet.labels" . | nindent 4 }}
+    app.kubernetes.io/name: {{ include "mpc-wallet.name" . }}-nats
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: nats
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "mpc-wallet.name" . }}-nats
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "mpc-wallet.name" . }}-nats
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: nats
+    spec:
+      containers:
+        - name: nats
+          image: "{{ .Values.nats.image.repository }}:{{ .Values.nats.image.tag }}"
+          imagePullPolicy: {{ .Values.nats.image.pullPolicy }}
+          args:
+            {{- if .Values.nats.jetstream }}
+            - "-js"
+            {{- end }}
+            - "-m"
+            - {{ .Values.nats.monitorPort | quote }}
+          ports:
+            - name: client
+              containerPort: 4222
+            - name: monitor
+              containerPort: {{ .Values.nats.monitorPort }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: monitor
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: monitor
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.nats.resources | nindent 12 }}
+{{- end }}

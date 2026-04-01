@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "mpc-wallet.fullname" . }}-node
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "mpc-wallet.labels" . | nindent 4 }}
+    {{- include "mpc-wallet.node.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mpc-node
+spec:
+  serviceName: {{ include "mpc-wallet.fullname" . }}-node
+  replicas: {{ .Values.node.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mpc-wallet.node.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mpc-wallet.node.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mpc-node
+      {{- with .Values.node.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "mpc-wallet.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: {{ .Values.node.securityContext.runAsNonRoot }}
+        runAsUser: {{ .Values.node.securityContext.runAsUser }}
+        fsGroup: {{ .Values.node.securityContext.fsGroup }}
+      containers:
+        - name: mpc-node
+          image: "{{ .Values.node.image.repository }}:{{ .Values.node.image.tag }}"
+          imagePullPolicy: {{ .Values.node.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.node.port }}
+              protocol: TCP
+          env:
+            # PARTY_ID derived from StatefulSet ordinal (pod name suffix + 1)
+            # mpc-wallet-node-0 -> PARTY_ID=1, mpc-wallet-node-1 -> PARTY_ID=2, etc.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NATS_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "mpc-wallet.fullname" . }}-config
+                  key: nats_url
+            - name: GATEWAY_PUBKEY
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "mpc-wallet.fullname" . }}-config
+                  key: gateway_pubkey
+            - name: KEY_STORE_DIR
+              value: {{ .Values.node.env.KEY_STORE_DIR | quote }}
+            - name: RUST_LOG
+              value: {{ .Values.node.env.RUST_LOG | quote }}
+            - name: KEY_STORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mpc-wallet.fullname" . }}-secrets
+                  key: key_store_password
+            - name: NODE_SIGNING_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mpc-wallet.fullname" . }}-secrets
+                  key: node_signing_keys
+                  optional: true
+          # Extract ordinal from pod name and set PARTY_ID = ordinal + 1
+          command:
+            - /bin/sh
+            - -c
+            - |
+              ORDINAL=$(echo $POD_NAME | rev | cut -d'-' -f1 | rev)
+              export PARTY_ID=$((ORDINAL + 1))
+              echo "Starting MPC node with PARTY_ID=$PARTY_ID"
+              exec /usr/local/bin/mpc-node
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.node.healthPath }}
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.node.healthPath }}
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.node.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.node.persistence.enabled }}
+            - name: key-store
+              mountPath: /data/keys
+            {{- end }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.node.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: key-store
+      spec:
+        accessModes:
+          - {{ .Values.node.persistence.accessMode }}
+        {{- if .Values.node.persistence.storageClass }}
+        storageClassName: {{ .Values.node.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.node.persistence.size }}
+  {{- end }}

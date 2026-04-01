@@ -27,6 +27,9 @@ ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }
 zeroize = { workspace = true }
 
+# HTTP (health + metrics endpoints)
+axum = "0.8"
+
 # Utilities
 hex = { workspace = true }
 uuid = { workspace = true }
@@ -35,3 +38,6 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
