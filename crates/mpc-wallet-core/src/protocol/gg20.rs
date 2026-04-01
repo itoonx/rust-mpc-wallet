@@ -183,24 +183,9 @@ fn shamir_split(secret: &Scalar, threshold: u16, total: u16) -> Vec<(u16, Scalar
 /// given the full set of participating party x-coordinates.
 ///
 /// `λ_i(0) = ∏_{j≠i} (0 - x_j) / (x_i - x_j)  mod n`
+/// Delegates to [`super::common::lagrange_coefficient`].
 fn lagrange_coefficient(party_index: u16, all_parties: &[u16]) -> Result<Scalar, CoreError> {
-    let x_i = Scalar::from(party_index as u64);
-    let mut basis = Scalar::ONE;
-    for &j in all_parties {
-        if j == party_index {
-            continue;
-        }
-        let x_j = Scalar::from(j as u64);
-        let num = Scalar::ZERO - x_j;
-        let den = x_i - x_j;
-        let den_inv = den.invert().into_option().ok_or_else(|| {
-            CoreError::Crypto(
-                "zero denominator in Lagrange coefficient — duplicate party index".into(),
-            )
-        })?;
-        basis *= num * den_inv;
-    }
-    Ok(basis)
+    super::common::lagrange_coefficient(party_index, all_parties)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -902,16 +887,14 @@ async fn distributed_sign_mta(
     // Aggregate delta and chi
     let n_big = my_pk.n_biguint();
     let n_half = &n_big >> 1;
-    let secp_order = BigUint::from_bytes_be(
-        &hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141").unwrap(),
-    );
+    let secp_order = BigUint::from_bytes_be(&super::common::secp256k1_order_bytes());
 
     let mut delta_scalar = *k_i * *gamma_i;
     let mut chi_scalar = *k_i * *x_i_add;
 
     // Subtract beta shares (MtA formula: alpha - beta = a*b)
     for beta_bytes in &delta_beta_shares {
-        delta_scalar -= crate::protocol::cggmp21::to_scalar_signed(
+        delta_scalar -= crate::protocol::common::to_scalar_signed(
             &BigUint::from_bytes_be(beta_bytes),
             &n_big,
             &n_half,
@@ -919,7 +902,7 @@ async fn distributed_sign_mta(
         );
     }
     for beta_bytes in &chi_beta_shares {
-        chi_scalar -= crate::protocol::cggmp21::to_scalar_signed(
+        chi_scalar -= crate::protocol::common::to_scalar_signed(
             &BigUint::from_bytes_be(beta_bytes),
             &n_big,
             &n_half,
@@ -1019,7 +1002,7 @@ async fn distributed_sign_mta(
         }
 
         let alpha_d = mta_party_a_k.round2_finish(&delta_ct);
-        delta_scalar += crate::protocol::cggmp21::to_scalar_signed(
+        delta_scalar += crate::protocol::common::to_scalar_signed(
             &BigUint::from_bytes_be(&alpha_d),
             &n_big,
             &n_half,
@@ -1027,7 +1010,7 @@ async fn distributed_sign_mta(
         );
 
         let alpha_c = mta_party_a_k.round2_finish(&chi_ct);
-        chi_scalar += crate::protocol::cggmp21::to_scalar_signed(
+        chi_scalar += crate::protocol::common::to_scalar_signed(
             &BigUint::from_bytes_be(&alpha_c),
             &n_big,
             &n_half,

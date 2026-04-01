@@ -2,6 +2,8 @@
 pub mod bls12_381;
 /// CGGMP21 threshold ECDSA protocol on secp256k1 (next-gen, UC-secure).
 pub mod cggmp21;
+/// Shared helpers for secp256k1-based threshold protocols (GG20, CGGMP21).
+pub mod common;
 /// FROST threshold EdDSA protocol implementation for Ed25519 (Solana, Sui).
 pub mod frost_ed25519;
 /// FROST threshold Schnorr protocol implementation for secp256k1 with Taproot tweaks (Bitcoin).

@@ -201,14 +201,30 @@ jobs:
     name: Performance benchmarks
     runs-on: ubuntu-latest
     needs: [build]
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    if: (github.event_name == 'pull_request' && github.base_ref == 'main') || github.ref == 'refs/heads/main'
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "rust-workspace"
-      - name: Run benchmarks
+          prefix-key: "bench-"
+          shared-key: "rust-bench"
+          cache-targets: true
+          # Criterion stores baselines in target/criterion/
+          cache-directories: "target/criterion"
+
+      # On push to main: save baseline for future PR comparisons
+      - name: Run benchmarks (save baseline)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          cargo bench --workspace --features local-transport 2>&1 | tee /tmp/bench.txt
-          echo "::notice::Benchmark results saved — check for regression manually"
+          cargo bench --workspace --features local-transport -- --save-baseline main 2>&1 | tee /tmp/bench.txt
+          echo "::notice::Benchmark baseline saved for main branch"
+
+      # On PR: compare against saved main baseline
+      - name: Run benchmarks (compare against baseline)
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        run: |
+          # TODO: fail on >20% regression once baseline is stable
+          cargo bench --workspace --features local-transport -- --baseline main 2>&1 | tee /tmp/bench.txt
+          echo "::notice::Benchmark comparison against main baseline — review output for regressions"

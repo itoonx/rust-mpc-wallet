@@ -459,24 +459,9 @@ fn poly_eval(coefficients: &[Scalar], x: &Scalar) -> Scalar {
 /// Compute Lagrange coefficient lambda_i(0) for party `i` in the given set.
 /// Used in the signing protocol (T-S19-04).
 #[allow(dead_code)]
+/// Delegates to [`super::common::lagrange_coefficient`].
 fn lagrange_coefficient(party_index: u16, all_parties: &[u16]) -> Result<Scalar, CoreError> {
-    let x_i = Scalar::from(party_index as u64);
-    let mut basis = Scalar::ONE;
-    for &j in all_parties {
-        if j == party_index {
-            continue;
-        }
-        let x_j = Scalar::from(j as u64);
-        let num = Scalar::ZERO - x_j;
-        let den = x_i - x_j;
-        let den_inv = den.invert().into_option().ok_or_else(|| {
-            CoreError::Crypto(
-                "zero denominator in Lagrange coefficient — duplicate party index".into(),
-            )
-        })?;
-        basis *= num * den_inv;
-    }
-    Ok(basis)
+    super::common::lagrange_coefficient(party_index, all_parties)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2531,40 +2516,19 @@ async fn cggmp21_refresh(
 ///
 /// This ensures `to_scalar_signed(alpha) + to_scalar_signed(beta) == a * b` as a
 /// `Scalar`, even when the unsigned sum `alpha + beta` wraps modulo `N`.
+/// Delegates to [`super::common::to_scalar_signed`].
 pub fn to_scalar_signed(
     big: &BigUint,
     n: &BigUint,
     n_half: &BigUint,
     secp_order: &BigUint,
 ) -> Scalar {
-    use k256::elliptic_curve::ops::Reduce;
-    if big <= n_half {
-        // Positive: reduce directly mod q
-        let reduced = big % secp_order;
-        let be = reduced.to_bytes_be();
-        let mut padded = [0u8; 32];
-        padded[32usize.saturating_sub(be.len())..].copy_from_slice(&be);
-        <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&padded))
-    } else {
-        // Negative: true value is big - N, so Scalar = -(N - big) mod q
-        let abs_val = n - big;
-        let reduced = &abs_val % secp_order;
-        let be = reduced.to_bytes_be();
-        let mut padded = [0u8; 32];
-        padded[32usize.saturating_sub(be.len())..].copy_from_slice(&be);
-        let pos = <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&padded));
-        Scalar::ZERO - pos
-    }
+    super::common::to_scalar_signed(big, n, n_half, secp_order)
 }
 
-/// Return the secp256k1 curve order as 32 big-endian bytes.
+/// Delegates to [`super::common::secp256k1_order_bytes`].
 fn hex_decode_secp_order() -> [u8; 32] {
-    // n = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-    [
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0xFE, 0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36,
-        0x41, 0x41,
-    ]
+    super::common::secp256k1_order_bytes()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
