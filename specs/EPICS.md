@@ -275,6 +275,8 @@ All 11 epics (0 + A-J) are **COMPLETE**. The project has delivered:
 - Enterprise features: RBAC, ABAC, MFA, policy DSL, approval workflows, audit ledger
 - Production architecture: gateway/node split, NATS transport, Vault, KMS stubs
 - 68/68 security findings resolved across 17 CVEs
-- 882 tests + 16 E2E tests, CI fully green
+- 970 tests + 16 E2E tests, CI fully green
 
-Next phase: Sprint 32-36 (deployment readiness, SDK release, external audit).
+**Sprint 32–37 COMPLETE** (post-PR #23): benchmark baseline, mpc-node test coverage, Helm chart, Prometheus metrics, audit preparation (threat model + SBOM + CVE-2025-66016 verification), BIP32 HD wallet derivation, OpenAPI export, SDK quickstart, error code catalog.
+
+Next phase: external audit kickoff + production hardening (observability, SLO, runbooks).
