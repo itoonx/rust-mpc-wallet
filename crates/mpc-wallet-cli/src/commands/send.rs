@@ -17,6 +17,7 @@
 //!   `build_transaction` documents what each chain expects.
 
 use clap::Args;
+use mpc_wallet_chains::bitcoin::rpc_client::BitcoinRpcClient;
 use mpc_wallet_chains::evm::rpc_client::EvmRpcClient;
 use mpc_wallet_chains::provider::{Chain, TransactionParams};
 use mpc_wallet_chains::registry::{ChainRegistry, NetworkEnv};
@@ -25,7 +26,7 @@ use mpc_wallet_chains::rpc::RpcProvider;
 use mpc_wallet_chains::solana::rpc_client::SolanaRpcClient;
 use mpc_wallet_core::key_store::types::KeyGroupId;
 use mpc_wallet_core::key_store::KeyStore;
-use mpc_wallet_core::protocol::{KeyShare, MpcProtocol, MpcSignature};
+use mpc_wallet_core::protocol::{GroupPublicKey, KeyShare, MpcProtocol, MpcSignature};
 use mpc_wallet_core::transport::local::LocalTransportNetwork;
 use mpc_wallet_core::types::{CryptoScheme, PartyId, ThresholdConfig};
 
@@ -163,10 +164,19 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
         if bal == 0 {
             eprintln!("⚠️  Sender has 0 lamports — fund via https://faucet.solana.com first.");
         }
+    } else if matches!(chain, Chain::BitcoinTestnet | Chain::BitcoinMainnet) {
+        let bal = BitcoinRpcClient::new(&rpc_url)
+            .get_balance(&sender)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        eprintln!("✓ On-chain balance of {sender}: {} sats", bal);
+        if bal == 0 {
+            eprintln!("⚠️  Sender has 0 sats — fund via a testnet faucet first.");
+        }
     }
 
     // ── 5. Fetch chain-specific pre-sign data ───────────────────────────────
-    let auto_extra = fetch_presign_extras(chain, &rpc_url, &sender).await?;
+    let auto_extra = fetch_presign_extras(chain, &rpc_url, &sender, &group_pubkey).await?;
     let user_extra = match args.extra.as_deref() {
         Some(s) => Some(
             serde_json::from_str::<serde_json::Value>(s)
@@ -391,6 +401,13 @@ fn default_rpc_url(chain: Chain, network: &NetworkEnv) -> anyhow::Result<String>
             _ => "https://api.testnet.solana.com".into(),
         });
     }
+    // Bitcoin — Blockstream Esplora REST.
+    if matches!(chain, Chain::BitcoinTestnet | Chain::BitcoinMainnet) {
+        return Ok(match (chain, network) {
+            (Chain::BitcoinMainnet, NetworkEnv::Mainnet) => "https://blockstream.info/api".into(),
+            _ => "https://blockstream.info/testnet/api".into(),
+        });
+    }
     Err(anyhow::anyhow!(
         "no default RPC for chain {chain} — pass --rpc-url"
     ))
@@ -402,6 +419,7 @@ async fn fetch_presign_extras(
     chain: Chain,
     rpc_url: &str,
     sender: &str,
+    group_pubkey: &GroupPublicKey,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let evm_chains = [
         Chain::Ethereum,
@@ -449,7 +467,54 @@ async fn fetch_presign_extras(
             "recent_blockhash": blockhash,
         })));
     }
+    if matches!(chain, Chain::BitcoinTestnet | Chain::BitcoinMainnet) {
+        let rpc = BitcoinRpcClient::new(rpc_url);
+        let utxos = rpc
+            .get_utxos(sender)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let total: u64 = utxos.iter().map(|u| u.value).sum();
+        eprintln!("✓ {} UTXO(s) totalling {} sats", utxos.len(), total);
+        let pubkey_hex = compressed_pubkey_hex(group_pubkey)?;
+        // Pass UTXO list as JSON; the tx builder picks the largest one.
+        let utxos_json: Vec<serde_json::Value> = utxos
+            .into_iter()
+            .map(|u| {
+                serde_json::json!({
+                    "txid": u.txid,
+                    "vout": u.vout,
+                    "value": u.value,
+                })
+            })
+            .collect();
+        return Ok(Some(serde_json::json!({
+            "addr_type": "p2wpkh",
+            "pubkey_hex": pubkey_hex,
+            "utxos": utxos_json,
+            "change_address": sender,
+            "fee_rate_sat_per_vb": 2u64,
+        })));
+    }
     Ok(None)
+}
+
+/// Render a `GroupPublicKey` as a 33-byte compressed hex string for chains
+/// (like Bitcoin P2WPKH) that need it in `extras`.
+fn compressed_pubkey_hex(group_pubkey: &GroupPublicKey) -> anyhow::Result<String> {
+    match group_pubkey {
+        GroupPublicKey::Secp256k1(bytes) if bytes.len() == 33 => Ok(hex::encode(bytes)),
+        GroupPublicKey::Secp256k1Uncompressed(bytes) if bytes.len() == 65 => {
+            let parity = if bytes[64] & 1 == 0 { 0x02 } else { 0x03 };
+            let mut out = Vec::with_capacity(33);
+            out.push(parity);
+            out.extend_from_slice(&bytes[1..33]);
+            Ok(hex::encode(out))
+        }
+        other => Err(anyhow::anyhow!(
+            "compressed_pubkey_hex: expected secp256k1 key, got {:?}",
+            std::mem::discriminant(other)
+        )),
+    }
 }
 
 /// Merge auto-fetched extras with user-supplied extras (user wins).

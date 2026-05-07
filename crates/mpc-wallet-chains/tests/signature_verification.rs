@@ -228,7 +228,9 @@ async fn test_ecdsa_different_subsets_all_verify() {
 async fn test_schnorr_sig_verifies_bitcoin_taproot() {
     let shares = keygen(frost_secp256k1, 2, 3).await;
 
-    // Taproot address derivation
+    // BitcoinProvider::derive_address now defaults to P2WPKH (Sprint 40);
+    // Taproot derivation moved to the standalone helper. Test both that
+    // the default is P2WPKH and that the Taproot helper still works.
     assert_address_consistency(&shares, Chain::BitcoinTestnet);
     let registry = ChainRegistry::default_testnet();
     let addr = registry
@@ -237,8 +239,17 @@ async fn test_schnorr_sig_verifies_bitcoin_taproot() {
         .derive_address(&shares[0].group_public_key)
         .unwrap();
     assert!(
-        addr.starts_with("tb1p"),
-        "Taproot testnet must be tb1p, got: {addr}"
+        addr.starts_with("tb1q"),
+        "default Bitcoin testnet address is P2WPKH (tb1q), got: {addr}"
+    );
+    let taproot = mpc_wallet_chains::bitcoin::address::derive_taproot_address(
+        &shares[0].group_public_key,
+        bitcoin::Network::Testnet,
+    )
+    .unwrap();
+    assert!(
+        taproot.starts_with("tb1p"),
+        "Taproot helper must still produce tb1p, got: {taproot}"
     );
 }
 
