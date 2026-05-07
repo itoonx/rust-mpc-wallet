@@ -47,6 +47,14 @@ impl SolanaRpcClient {
             .ok_or_else(|| CoreError::Other(format!("rpc {method}: missing result")))
     }
 
+    /// `getBalance(pubkey)` → lamports.
+    pub async fn get_balance(&self, pubkey: &str) -> Result<u64, CoreError> {
+        let res = self.call("getBalance", json!([pubkey])).await?;
+        res.get("value")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| CoreError::Other("getBalance: missing value".into()))
+    }
+
     /// `getLatestBlockhash` → base58-encoded blockhash.
     pub async fn get_latest_blockhash(&self) -> Result<String, CoreError> {
         let res = self

@@ -348,3 +348,57 @@ pub fn finalize_solana_transaction(
         tx_hash,
     })
 }
+
+/// Decode a Solana wire-format signed transaction and return a one-line summary.
+/// Format: `[1B sig_count] [64B sig] [message...]`.
+pub fn decode_solana_summary(raw_tx: &[u8]) -> Result<String, CoreError> {
+    if raw_tx.len() < 1 + 64 {
+        return Err(CoreError::Other(format!(
+            "raw_tx too short: {} bytes",
+            raw_tx.len()
+        )));
+    }
+    let sig_count = raw_tx[0];
+    let sig_hex = hex::encode(&raw_tx[1..65]);
+    let msg = &raw_tx[65..];
+    let msg_len = msg.len();
+    // Try to extract recipient + lamports for legacy single-transfer messages.
+    Ok(format!(
+        "sig_count={sig_count} message_len={msg_len} sig_first8={}…",
+        &sig_hex[..16]
+    ))
+}
+
+/// Pre-broadcast sanity check: verify the Ed25519 signature against the
+/// signing message and the derived sender pubkey. Aborts before broadcast if
+/// the signature does not validate.
+pub fn verify_solana_signature(
+    sender_base58: &str,
+    sig: &MpcSignature,
+    sign_payload: &[u8],
+) -> Result<(), CoreError> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let MpcSignature::EdDsa { signature } = sig else {
+        return Err(CoreError::InvalidInput(
+            "Solana requires EdDSA signature for verification".into(),
+        ));
+    };
+    if signature.len() != 64 {
+        return Err(CoreError::Crypto(format!(
+            "expected 64-byte EdDSA sig, got {}",
+            signature.len()
+        )));
+    }
+    let pubkey_bytes = decode_base58_32(sender_base58, "sender")?;
+    let vk = VerifyingKey::from_bytes(&pubkey_bytes)
+        .map_err(|e| CoreError::Crypto(format!("invalid sender pubkey: {e}")))?;
+    let sig_array: [u8; 64] = signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| CoreError::Crypto("sig must be 64 bytes".into()))?;
+    let signature = Signature::from_bytes(&sig_array);
+    vk.verify(sign_payload, &signature)
+        .map_err(|e| CoreError::Crypto(format!("Ed25519 verify failed: {e}")))?;
+    Ok(())
+}

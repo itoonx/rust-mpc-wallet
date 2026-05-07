@@ -144,7 +144,7 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
     eprintln!("✓ Sender: {}", sender);
 
-    // ── Pre-flight: chain balance check (EVM) ──────────────────────────────
+    // ── Pre-flight: chain balance check ────────────────────────────────────
     if is_evm_chain(chain) {
         let bal = EvmRpcClient::new(&rpc_url)
             .get_balance(&sender)
@@ -153,6 +153,15 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
         eprintln!("✓ On-chain balance of {sender}: {} wei", bal);
         if bal == 0 {
             eprintln!("⚠️  Sender has 0 balance — fund this address first or the tx will revert.");
+        }
+    } else if chain == Chain::Solana {
+        let bal = SolanaRpcClient::new(&rpc_url)
+            .get_balance(&sender)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        eprintln!("✓ On-chain balance of {sender}: {} lamports", bal);
+        if bal == 0 {
+            eprintln!("⚠️  Sender has 0 lamports — fund via https://faucet.solana.com first.");
         }
     }
 
@@ -213,7 +222,7 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
     let raw_hex = format!("0x{}", hex::encode(&signed.raw_tx));
 
-    // ── Pre-broadcast: verify the signature recovers to the derived sender ──
+    // ── Pre-broadcast: verify the signature against the derived sender ──────
     if is_evm_chain(chain) {
         match mpc_wallet_chains::evm::tx::decode_eip1559_summary(&signed.raw_tx) {
             Ok(summary) => eprintln!("✓ Encoded tx: {}", summary),
@@ -228,6 +237,24 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
             ));
         }
         eprintln!("✓ Signature recovers to sender {} (verified)", sender);
+    } else if chain == Chain::Solana {
+        match mpc_wallet_chains::solana::tx::decode_solana_summary(&signed.raw_tx) {
+            Ok(summary) => eprintln!("✓ Encoded tx: {}", summary),
+            Err(e) => eprintln!("⚠️  could not decode tx for summary: {}", e),
+        }
+        mpc_wallet_chains::solana::tx::verify_solana_signature(
+            &sender,
+            &sig,
+            &unsigned.sign_payload,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Ed25519 SIGNATURE INVALID: {} — the FROST sig does not verify against the wallet's pubkey ({}). Aborting before broadcast.",
+                e,
+                sender,
+            )
+        })?;
+        eprintln!("✓ Ed25519 signature verifies against {}", sender);
     }
 
     let mut data = serde_json::json!({
