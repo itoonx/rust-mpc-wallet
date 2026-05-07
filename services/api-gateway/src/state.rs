@@ -398,6 +398,11 @@ pub struct AppState {
     pub orchestrator: crate::orchestrator::MpcOrchestrator,
     /// Secrets backend type (env or vault) — used for health check status.
     pub secrets_backend: crate::config::SecretsBackend,
+    /// Network environment string ("mainnet" | "testnet" | "devnet"), used
+    /// when resolving RPC endpoints for tx broadcast.
+    pub network: String,
+    /// Optional Infura project ID for EVM RPC broadcast.
+    pub infura_api_key: Option<String>,
 }
 
 impl AppState {
@@ -555,6 +560,8 @@ impl AppState {
             metrics: Arc::new(metrics),
             orchestrator: crate::orchestrator::MpcOrchestrator::new(),
             secrets_backend: config.secrets_backend,
+            network: config.network.clone(),
+            infura_api_key: config.infura_api_key.clone(),
         }
     }
 

@@ -1076,7 +1076,17 @@ async fn distributed_sign_mta(
     transport.wait_ready().await?;
 
     // ── Round 4: Online signing — σ_i = k_i·m + χ_i·r ──────────────────
-    let hash_bytes = sha2::Sha256::digest(message);
+    // ECDSA convention: callers pass a 32-byte prehash that the chain already
+    // computed with its native hash function (keccak256 for EVM, double-SHA256
+    // for Bitcoin, etc.). For shorter inputs we apply SHA-256 for legacy
+    // tests that hand the protocol a raw byte string.
+    let hash_bytes: [u8; 32] = if message.len() == 32 {
+        let mut h = [0u8; 32];
+        h.copy_from_slice(message);
+        h
+    } else {
+        sha2::Sha256::digest(message).into()
+    };
     use k256::elliptic_curve::ops::Reduce;
     use k256::U256;
     let m_scalar =
