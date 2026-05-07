@@ -54,6 +54,9 @@ retro/
 | L-010 | 2026-03-18 | Testing | Low | E2E test ordering matters with shared NATS infrastructure — **MITIGATED** |
 | L-018 | 2026-03-20 | Architecture | Medium | Don't inflate timeouts to work around slow algorithms — **FIXED** |
 | L-019 | 2026-03-20 | Security | Medium | Skip hacks accumulate security debt — **FIXED** |
+| [L-011](lessons/L-011_ecdsa-double-hash-sign.md) | 2026-05-07 | Crypto correctness | Critical | GG20/CGGMP21 sign double-hashed the message — **FIXED** |
+| [L-012](lessons/L-012_chainregistry-network-not-propagated.md) | 2026-05-07 | Configuration | High | ChainRegistry didn't propagate NetworkEnv to EvmProvider — **FIXED** |
+| [L-013](lessons/L-013_value-parsed-as-hex-first.md) | 2026-05-07 | Input parsing | High | build_evm_transaction parsed bare-decimal `value` as hex — **FIXED** |
 
 ---
 
@@ -73,6 +76,7 @@ retro/
 | [SESSION_RETRO_SPRINT15](SESSION_RETRO_SPRINT15.md) | 2026-03-18 | Production readiness (errors, Vault, NATS fix, sig verify, gateway wiring, benchmarks, CI E2E) | 5 phases, +18 tests, 5 bugs found, ~35 benchmarks |
 | [sessions/SESSION_RETRO_S18_S26](sessions/SESSION_RETRO_S18_S26.md) | 2026-03-19~20 | Sprints 18-26 (M1-M4 complete) | 9 sprints, +748 tests, 4 milestones |
 | [sessions/SESSION_RETRO_S28_PAILLIER_PERF](sessions/SESSION_RETRO_S28_PAILLIER_PERF.md) | 2026-03-20 | Sprint 28 Paillier perf fix (glass_pumpkin) | 801 tests, CI 19min→2.5min, all ZK proofs enabled |
+| [sessions/SESSION_RETRO_S38_S39_LIVE_TESTNET](sessions/SESSION_RETRO_S38_S39_LIVE_TESTNET.md) | 2026-05-06~07 | Sprint 38-39: first live MPC tx on Sepolia + Solana devnet | 2 branches, 4 bugs found+fixed, 3 lessons (L-011..013), 930 tests |
 
 ---
 
