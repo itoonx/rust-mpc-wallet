@@ -1,4 +1,6 @@
 pub mod address;
+pub mod rpc_client;
+pub mod segwit_tx;
 pub mod signer;
 pub mod tx;
 
@@ -60,14 +62,34 @@ impl ChainProvider for BitcoinProvider {
     }
 
     fn derive_address(&self, group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
-        address::derive_taproot_address(group_pubkey, self.network)
+        // Default to P2WPKH (native SegWit). Taproot requires BIP-341 key
+        // tweaking that the current FROST-Secp256k1-TR protocol doesn't
+        // implement, so signatures wouldn't verify against a Taproot output
+        // until that's added. Callers wanting Taproot can call
+        // `address::derive_taproot_address` directly.
+        address::derive_p2wpkh_address(group_pubkey, self.network)
     }
 
     async fn build_transaction(
         &self,
         params: TransactionParams,
     ) -> Result<UnsignedTransaction, CoreError> {
-        tx::build_taproot_transaction(self.chain(), self.network, params).await
+        // Route by `addr_type` in extra; default p2wpkh.
+        let addr_type = params
+            .extra
+            .as_ref()
+            .and_then(|e| e.get("addr_type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("p2wpkh");
+        match addr_type {
+            "p2wpkh" => {
+                segwit_tx::build_p2wpkh_transaction(self.chain(), self.network, params).await
+            }
+            "taproot" => tx::build_taproot_transaction(self.chain(), self.network, params).await,
+            other => Err(CoreError::InvalidInput(format!(
+                "unknown bitcoin addr_type '{other}' (expected p2wpkh or taproot)"
+            ))),
+        }
     }
 
     fn finalize_transaction(
@@ -75,7 +97,14 @@ impl ChainProvider for BitcoinProvider {
         unsigned: &UnsignedTransaction,
         sig: &MpcSignature,
     ) -> Result<SignedTransaction, CoreError> {
-        tx::finalize_taproot_transaction(unsigned, sig)
+        // Route by signature type: ECDSA → P2WPKH, Schnorr → Taproot.
+        match sig {
+            MpcSignature::Ecdsa { .. } => segwit_tx::finalize_p2wpkh_transaction(unsigned, sig),
+            MpcSignature::Schnorr { .. } => tx::finalize_taproot_transaction(unsigned, sig),
+            _ => Err(CoreError::InvalidInput(
+                "Bitcoin requires ECDSA (P2WPKH) or Schnorr (Taproot) signature".into(),
+            )),
+        }
     }
 
     async fn broadcast(

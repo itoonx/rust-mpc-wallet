@@ -5,77 +5,63 @@ use mpc_wallet_core::protocol::GroupPublicKey;
 // Bitcoin address derivation tests
 // ============================================================================
 
+// Sprint 40: BitcoinProvider::derive_address now defaults to P2WPKH (`bc1q…` /
+// `tb1q…`). Taproot derivation still exists via `bitcoin::address::derive_taproot_address`
+// but is parked behind ECDSA until FROST-Secp256k1-TR implements BIP-341 key tweaking.
+
 #[test]
-fn test_bitcoin_taproot_address_derivation() {
+fn test_bitcoin_default_address_is_p2wpkh_mainnet() {
     let provider = mpc_wallet_chains::bitcoin::BitcoinProvider::mainnet();
-
-    // A compressed secp256k1 key
     let pubkey_hex = "0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798";
     let pubkey_bytes = hex::decode(pubkey_hex).unwrap();
     let gpk = GroupPublicKey::Secp256k1(pubkey_bytes);
-
     let address = provider.derive_address(&gpk).unwrap();
-    // Should be a bc1p... address (bech32m)
     assert!(
-        address.starts_with("bc1p"),
-        "expected bc1p address, got: {address}"
+        address.starts_with("bc1q"),
+        "expected bc1q P2WPKH address, got: {address}"
     );
 }
 
 #[test]
-fn test_bitcoin_testnet_address() {
+fn test_bitcoin_default_address_is_p2wpkh_testnet() {
     let provider = mpc_wallet_chains::bitcoin::BitcoinProvider::testnet();
-
     let pubkey_hex = "0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798";
     let pubkey_bytes = hex::decode(pubkey_hex).unwrap();
     let gpk = GroupPublicKey::Secp256k1(pubkey_bytes);
-
     let address = provider.derive_address(&gpk).unwrap();
-    // Testnet taproot addresses start with tb1p
     assert!(
-        address.starts_with("tb1p"),
-        "expected tb1p address, got: {address}"
-    );
-}
-
-// ============================================================================
-// Bitcoin testnet / signet address tests (R3b)
-// ============================================================================
-
-#[test]
-fn test_bitcoin_testnet_p2tr_address_prefix() {
-    // BitcoinProvider::testnet() address must start with "tb1p"
-    let provider = mpc_wallet_chains::bitcoin::BitcoinProvider::testnet();
-    let pubkey = GroupPublicKey::Secp256k1([2u8; 33].to_vec());
-    let addr = provider.derive_address(&pubkey).unwrap();
-    assert!(
-        addr.starts_with("tb1p"),
-        "testnet P2TR must start with tb1p, got: {addr}"
+        address.starts_with("tb1q"),
+        "expected tb1q P2WPKH address, got: {address}"
     );
 }
 
 #[test]
-fn test_bitcoin_signet_p2tr_address_prefix() {
-    // BitcoinProvider::signet() address must also start with "tb1p"
+fn test_bitcoin_default_address_is_p2wpkh_signet() {
     let provider = mpc_wallet_chains::bitcoin::BitcoinProvider::signet();
     let pubkey = GroupPublicKey::Secp256k1([2u8; 33].to_vec());
     let addr = provider.derive_address(&pubkey).unwrap();
     assert!(
-        addr.starts_with("tb1p"),
-        "signet P2TR must start with tb1p, got: {addr}"
+        addr.starts_with("tb1q"),
+        "signet default P2WPKH must start with tb1q, got: {addr}"
     );
 }
 
 #[test]
-fn test_bitcoin_mainnet_p2tr_address_prefix() {
-    // Existing mainnet address test — make sure still starts with "bc1p"
-    let provider = mpc_wallet_chains::bitcoin::BitcoinProvider::mainnet();
+fn test_bitcoin_taproot_helper_still_works() {
+    // The Taproot helper is still callable directly even though it's not the default.
     let pubkey = GroupPublicKey::Secp256k1([2u8; 33].to_vec());
-    let addr = provider.derive_address(&pubkey).unwrap();
-    assert!(
-        addr.starts_with("bc1p"),
-        "mainnet P2TR must start with bc1p, got: {addr}"
-    );
+    let mainnet = mpc_wallet_chains::bitcoin::address::derive_taproot_address(
+        &pubkey,
+        bitcoin::Network::Bitcoin,
+    )
+    .unwrap();
+    let testnet = mpc_wallet_chains::bitcoin::address::derive_taproot_address(
+        &pubkey,
+        bitcoin::Network::Testnet,
+    )
+    .unwrap();
+    assert!(mainnet.starts_with("bc1p"), "expected bc1p, got: {mainnet}");
+    assert!(testnet.starts_with("tb1p"), "expected tb1p, got: {testnet}");
 }
 
 #[test]
