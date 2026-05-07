@@ -1,4 +1,5 @@
 pub mod address;
+pub mod rpc_client;
 pub mod signer;
 pub mod tx;
 
@@ -44,38 +45,21 @@ impl EvmProvider {
     /// automatically from the chain variant. Returns `CoreError::InvalidInput`
     /// for non-EVM chains (Bitcoin, Solana, Sui).
     pub fn new(chain: Chain) -> Result<Self, CoreError> {
-        let chain_id = match chain {
-            Chain::Ethereum => 1,
-            Chain::Polygon => 137,
-            Chain::Bsc => 56,
-            Chain::Arbitrum => 42161,
-            Chain::Optimism => 10,
-            Chain::Base => 8453,
-            Chain::Avalanche => 43114,
-            Chain::Linea => 59144,
-            Chain::ZkSync => 324,
-            Chain::Scroll => 534352,
-            Chain::Mantle => 5000,
-            Chain::Blast => 81457,
-            Chain::Zora => 7777777,
-            Chain::Fantom => 250,
-            Chain::Gnosis => 100,
-            Chain::Cronos => 25,
-            Chain::Celo => 42220,
-            Chain::Moonbeam => 1284,
-            Chain::Ronin => 2020,
-            Chain::OpBnb => 204,
-            Chain::Immutable => 13371,
-            Chain::MantaPacific => 169,
-            Chain::Hyperliquid => 999,
-            Chain::Berachain => 80094,
-            Chain::MegaEth => 6342,
-            Chain::Monad => 143,
-            other => {
-                return Err(CoreError::InvalidInput(format!(
-                    "chain '{other}' is not an EVM chain"
-                )))
-            }
+        let chain_id = mainnet_chain_id(chain)?;
+        Ok(Self {
+            chain,
+            chain_id,
+            simulation_config: None,
+        })
+    }
+
+    /// Network-aware constructor. Selects testnet chain_id when env is Testnet/Devnet.
+    pub fn for_network(chain: Chain, env: &crate::registry::NetworkEnv) -> Result<Self, CoreError> {
+        use crate::registry::NetworkEnv;
+        let chain_id = match env {
+            NetworkEnv::Mainnet => mainnet_chain_id(chain)?,
+            NetworkEnv::Testnet | NetworkEnv::Devnet => testnet_chain_id(chain)?,
+            NetworkEnv::Custom(_) => mainnet_chain_id(chain)?,
         };
         Ok(Self {
             chain,
@@ -113,6 +97,58 @@ impl EvmProvider {
         self.simulation_config = Some(config);
         self
     }
+}
+
+/// Mainnet chain IDs for all supported EVM chains.
+fn mainnet_chain_id(chain: Chain) -> Result<u64, CoreError> {
+    Ok(match chain {
+        Chain::Ethereum => 1,
+        Chain::Polygon => 137,
+        Chain::Bsc => 56,
+        Chain::Arbitrum => 42161,
+        Chain::Optimism => 10,
+        Chain::Base => 8453,
+        Chain::Avalanche => 43114,
+        Chain::Linea => 59144,
+        Chain::ZkSync => 324,
+        Chain::Scroll => 534352,
+        Chain::Mantle => 5000,
+        Chain::Blast => 81457,
+        Chain::Zora => 7777777,
+        Chain::Fantom => 250,
+        Chain::Gnosis => 100,
+        Chain::Cronos => 25,
+        Chain::Celo => 42220,
+        Chain::Moonbeam => 1284,
+        Chain::Ronin => 2020,
+        Chain::OpBnb => 204,
+        Chain::Immutable => 13371,
+        Chain::MantaPacific => 169,
+        Chain::Hyperliquid => 999,
+        Chain::Berachain => 80094,
+        Chain::MegaEth => 6342,
+        Chain::Monad => 143,
+        other => {
+            return Err(CoreError::InvalidInput(format!(
+                "chain '{other}' is not an EVM chain"
+            )))
+        }
+    })
+}
+
+/// Testnet chain IDs. Falls back to mainnet for chains without an established testnet mapping.
+fn testnet_chain_id(chain: Chain) -> Result<u64, CoreError> {
+    Ok(match chain {
+        Chain::Ethereum => 11155111, // Sepolia
+        Chain::Polygon => 80002,     // Amoy
+        Chain::Bsc => 97,            // BSC testnet
+        Chain::Arbitrum => 421614,   // Arbitrum Sepolia
+        Chain::Optimism => 11155420, // Optimism Sepolia
+        Chain::Base => 84532,        // Base Sepolia
+        Chain::Avalanche => 43113,   // Fuji
+        Chain::Linea => 59141,       // Linea Sepolia
+        _ => return mainnet_chain_id(chain),
+    })
 }
 
 #[async_trait]

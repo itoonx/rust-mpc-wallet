@@ -110,7 +110,7 @@ impl ChainRegistry {
             | Chain::Hyperliquid
             | Chain::Berachain
             | Chain::MegaEth
-            | Chain::Monad => Box::new(EvmProvider::new(chain)?),
+            | Chain::Monad => Box::new(EvmProvider::for_network(chain, &self.env)?),
             Chain::BitcoinMainnet => {
                 let p = match self.env {
                     NetworkEnv::Testnet | NetworkEnv::Devnet => BitcoinProvider::testnet(),

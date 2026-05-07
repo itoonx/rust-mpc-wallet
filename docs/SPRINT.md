@@ -1,4 +1,16 @@
-# Sprint 1 — 2026-03-15 → 2026-03-29
+# Sprint Log
+
+> **Current state (as of 2026-05-07):** Sprint 37 COMPLETE — PR #23 merged to `main`.
+> 970 tests, 7 production threshold protocols, 68/68 security findings resolved.
+> See `docs/ROADMAP.md` for the live roadmap and next-phase candidates.
+>
+> The content below is the **historical archive** of Sprint 1–N task specs and gate status
+> tables. It is preserved for traceability but is **not** the source of truth for current
+> work. Do not edit historical sprint sections; append a new section if recording new work.
+
+---
+
+# [ARCHIVE] Sprint 1 — 2026-03-15 → 2026-03-29
 
 ## Goal
 **"Production-ready crypto core + all chains correct"**
