@@ -92,7 +92,7 @@ fn frost_secp256k1_factory() -> Box<dyn MpcProtocol> {
 #[tokio::test]
 #[ignore = "E2E: keygen + EVM address derivation + ECDSA sign + verify"]
 async fn test_gg20_evm_full_loop() {
-    use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+    use k256::ecdsa::{Signature, VerifyingKey};
     use sha2::Digest;
 
     let shares = local_keygen(gg20_factory, 2, 3).await;
@@ -107,21 +107,26 @@ async fn test_gg20_evm_full_loop() {
     assert!(address.starts_with("0x"), "ETH address must start with 0x");
     assert_eq!(address.len(), 42, "ETH address must be 42 chars");
 
-    // Sign a tx hash
+    // Sign a 32-byte EVM-style prehash. Per Sprint 38 lesson L-011, GG20 now
+    // treats 32-byte input as a prehash (does NOT re-hash with SHA-256), so
+    // verification must use the prehash directly — not Sha256(tx_hash).
     let tx_hash = sha2::Sha256::digest(b"evm e2e test transaction").to_vec();
+    assert_eq!(tx_hash.len(), 32, "EVM prehash must be 32 bytes");
     let sigs = local_sign(gg20_factory, &shares, &[0, 1], &tx_hash).await;
     let MpcSignature::Ecdsa { r, s, recovery_id } = &sigs[0] else {
         panic!("expected ECDSA signature");
     };
 
-    // Verify cryptographically
+    // Verify cryptographically against the prehash itself (matches the
+    // post-L-011 prehash-as-input convention used by every chain provider).
+    use k256::ecdsa::signature::hazmat::PrehashVerifier;
     let pubkey = k256::PublicKey::from_sec1_bytes(shares[0].group_public_key.as_bytes()).unwrap();
     let vk = VerifyingKey::from(&pubkey);
     let mut sig_bytes = [0u8; 64];
     sig_bytes[..32].copy_from_slice(r);
     sig_bytes[32..].copy_from_slice(s);
-    vk.verify(&tx_hash, &Signature::from_bytes(&sig_bytes.into()).unwrap())
-        .expect("EVM ECDSA signature must verify against group pubkey");
+    vk.verify_prehash(&tx_hash, &Signature::from_bytes(&sig_bytes.into()).unwrap())
+        .expect("EVM ECDSA signature must verify against group pubkey (prehash)");
 
     assert!(
         *recovery_id == 0 || *recovery_id == 1,
@@ -180,27 +185,33 @@ async fn test_frost_ed25519_solana_full_loop() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Bitcoin: FROST Secp256k1 → Taproot address → keygen consistency
+// Bitcoin: FROST Secp256k1 → P2WPKH (default) + Taproot helper
 // ═══════════════════════════════════════════════════════════════════════
+// Sprint 40 (L-014): BitcoinProvider::derive_address now returns P2WPKH
+// (`tb1q…`) since FROST-Secp256k1-TR doesn't yet implement the BIP-341
+// key tweak. Taproot derivation moved to the standalone helper.
 
 #[tokio::test]
-#[ignore = "E2E: keygen + Bitcoin Taproot address derivation"]
+#[ignore = "E2E: keygen + Bitcoin P2WPKH (default) and Taproot helper"]
 async fn test_frost_secp256k1_bitcoin_full_loop() {
     let shares = local_keygen(frost_secp256k1_factory, 2, 3).await;
 
-    // Derive Bitcoin Taproot address (testnet)
+    // Default address derivation = P2WPKH (`tb1q…`)
     let registry = ChainRegistry::default_testnet();
     let provider = registry.provider(Chain::BitcoinTestnet).unwrap();
     let address = provider
         .derive_address(&shares[0].group_public_key)
         .unwrap();
-
     assert!(
-        address.starts_with("tb1p"),
-        "Bitcoin testnet Taproot must start with tb1p, got: {address}"
+        address.starts_with("tb1q"),
+        "Bitcoin testnet default is P2WPKH (tb1q), got: {address}"
     );
 
-    // All parties derive the same address
+    // (Taproot helper coverage lives in chain_bitcoin_integration.rs to avoid
+    //  pulling the `bitcoin` crate into mpc-wallet-core dev-deps just for the
+    //  Network enum.)
+
+    // All parties derive the same default address
     for share in &shares[1..] {
         let addr = provider.derive_address(&share.group_public_key).unwrap();
         assert_eq!(addr, address, "all parties must derive same BTC address");
