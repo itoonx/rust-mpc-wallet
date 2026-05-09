@@ -6,4 +6,7 @@ ignore = [
     "RUSTSEC-2024-0436",  # paste unmaintained — transitive dep via ark-ff/syn-solidity/alloy
     "RUSTSEC-2024-0437",  # protobuf recursion — transitive dep via prometheus 0.13 (no prometheus 0.14 with fix yet)
     "RUSTSEC-2026-0049",  # rustls-webpki CRL distribution point bug — transitive dep via async-nats/rustls; we don't use CRL revocation checking
+    "RUSTSEC-2026-0098",  # rustls-webpki 0.102.8 URI name-constraint — pinned by async-nats 0.38; mTLS uses DNS/IP SANs only (not URI)
+    "RUSTSEC-2026-0099",  # rustls-webpki 0.102.8 wildcard name-constraint — pinned by async-nats 0.38; mTLS leaf certs are not name-constrained
+    "RUSTSEC-2026-0104",  # rustls-webpki 0.102.8 CRL parse panic — pinned by async-nats 0.38; CRL revocation checking unused
 ]
