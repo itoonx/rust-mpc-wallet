@@ -95,7 +95,7 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 31 — All protocols production threshold signing)
+## Current State (as of Sprint 37 — Audit prep + HD wallet + SDK shipped)
 
 ### Auth System (3 methods, Redis-ready)
 
@@ -197,7 +197,7 @@ Gateway (creates proof)    →    MPC Node (verifies before sign)
 
 ### Tests on `main`
 ```
-882 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
+970 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
 cargo fmt        clean
 cargo clippy     clean (0 warnings, -D warnings)
 cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
@@ -230,8 +230,13 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 - **Sprint 29:** COMPLETE — TSSHOCK Fiat-Shamir hardening (CVE-2022-47931/47930), SEC-056 PiAffg EC binding, SEC-058 legacy Paillier removal, CVE Security Report
 - **Sprint 30:** COMPLETE — SEC-054 Paillier guard, SEC-035 K_i abort, SEC-028/029 zeroize, all P1/P2 findings resolved (68/68), FilePreSignatureStore
 - **Sprint 31:** COMPLETE — Chi_i Schnorr PoK for sound identifiable abort, Stark protocol rewrite (starknet-crypto 0.8), Threshold Stark ECDSA (production)
+- **Sprint 32–33:** COMPLETE — Benchmark baseline for all 7 protocols, mpc-node test coverage 0→35, CI benchmark gate, protocol common module
+- **Sprint 34:** COMPLETE — Deployment readiness (mpc-node /health endpoint, Prometheus metrics, Helm chart, Docker compose E2E)
+- **Sprint 35:** COMPLETE — Audit preparation (threat model refresh, security regression suite, CVE-2025-66016 verification, SBOM, audit scope doc)
+- **Sprint 36:** COMPLETE — BIP32 HD wallet derivation for secp256k1 MPC protocols (GG20 + CGGMP21)
+- **Sprint 37:** COMPLETE — OpenAPI spec export (utoipa), SDK quickstart guide, error code catalog
 
-**M1-M4: DONE | All protocols production threshold signing | All 68 security findings RESOLVED | 882 tests | GG20 + CGGMP21 + FROST + Stark ECDSA**
+**M1-M4: DONE | All protocols production threshold signing | All 68 security findings RESOLVED | 970 tests | GG20 + CGGMP21 + FROST + Stark ECDSA + HD derivation**
 
 ### New in Sprint 29
 - CVE-2022-47931 (TSSHOCK alpha-shuffle) FIX: `hash_update_lp()` length-prefixed encoding in all Fiat-Shamir hashes
@@ -251,7 +256,7 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 - Threshold Stark ECDSA: Feldman VSS over Stark EC order, MtA-based pre-signing, 1-round online sign
 - PiLogStarStark + PiAffgStark ZK proofs on Stark curve
 - starknet-curve 0.6 + starknet-types-core 0.2 dependencies
-- 882 tests (16 new Stark threshold + ZK proof tests)
+- 882 tests as of Sprint 31 (16 new Stark threshold + ZK proof tests)
 
 ### New in Sprint 30
 - SEC-054 FIX: Runtime assert production_bits >= 2048 in Paillier keygen

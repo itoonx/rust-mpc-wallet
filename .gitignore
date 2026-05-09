@@ -7,3 +7,7 @@
 infra/local/.env
 infra/local/.keys/
 infra/docker/docker-compose.local.yml
+
+# Local-only E2E wallet inventory (per-developer, not for CI)
+tests/e2e/*.local.json
+tests/e2e/*.local.toml

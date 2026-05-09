@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05 (Sprint 32–37: Audit prep, HD wallet, SDK)
+
+### Added
+
+- BIP32 HD wallet derivation for secp256k1 MPC protocols — GG20 and CGGMP21 (Sprint 36)
+- OpenAPI spec auto-generated from router via `utoipa` → `docs/openapi.json` (Sprint 37)
+- SDK quickstart guide `docs/SDK_QUICKSTART.md` (Sprint 37)
+- Error code catalog `docs/ERROR_CODES.md` (Sprint 37)
+- Helm chart for full stack (gateway, mpc-nodes, NATS, Redis) under `infra/helm/mpc-wallet/` (Sprint 34)
+- mpc-node `/health` endpoint and Prometheus metrics (Sprint 34)
+- Threat model `docs/THREAT_MODEL.md`, audit scope `docs/AUDIT_SCOPE.md`, SBOM `docs/SBOM.txt` (Sprint 35)
+- CVE-2025-66016 verification doc (Sprint 35)
+- Benchmark baseline for all 7 protocols + CI benchmark gate (Sprint 32–33)
+- Protocol common module to share helpers across protocols (Sprint 33)
+- mpc-node test coverage 0 → 35 tests (Sprint 33)
+
+### Changed
+
+- Test count: 882 → 970 (+88 across new HD, SDK, audit-prep, mpc-node tests)
+
 ## [0.3.0] - 2026-03-19 (Sprint 17: Security Hardening)
 
 ### Fixed

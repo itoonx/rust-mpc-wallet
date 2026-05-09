@@ -75,15 +75,15 @@ pub async fn build_evm_transaction(
         .parse()
         .map_err(|e| CoreError::InvalidInput(format!("invalid to address: {e}")))?;
 
-    let value = U256::from_str_radix(params.value.trim_start_matches("0x"), 16)
-        .or_else(|_| {
-            params
-                .value
-                .parse::<u128>()
-                .map(U256::from)
-                .map_err(|e| CoreError::InvalidInput(format!("invalid value: {e}")))
-        })
-        .map_err(|e| CoreError::InvalidInput(format!("invalid value: {e}")))?;
+    // Parse value: hex if "0x" prefix, else decimal. Avoid the previous bug
+    // where bare digits like "1000000000000000" were silently parsed as hex.
+    let value = if let Some(hex) = params.value.strip_prefix("0x") {
+        U256::from_str_radix(hex, 16)
+            .map_err(|e| CoreError::InvalidInput(format!("invalid hex value: {e}")))?
+    } else {
+        U256::from_str_radix(&params.value, 10)
+            .map_err(|e| CoreError::InvalidInput(format!("invalid decimal value: {e}")))?
+    };
 
     let tx = TxEip1559 {
         chain_id,
@@ -187,6 +187,49 @@ pub fn finalize_evm_transaction(
         raw_tx,
         tx_hash,
     })
+}
+
+/// Recover the EIP-55 sender address from a 2718-encoded EIP-1559 envelope.
+/// Used as a pre-broadcast sanity check so a wrong recovery_id never escapes.
+pub fn recover_eip1559_sender(raw_tx: &[u8]) -> Result<String, CoreError> {
+    use alloy::consensus::transaction::SignerRecoverable;
+    use alloy::consensus::TxEnvelope;
+    use alloy::eips::Decodable2718;
+    let envelope = TxEnvelope::decode_2718(&mut &raw_tx[..])
+        .map_err(|e| CoreError::Other(format!("decode 2718: {e}")))?;
+    let signer = envelope
+        .recover_signer()
+        .map_err(|e| CoreError::Crypto(format!("recover_signer: {e}")))?;
+    Ok(signer.to_checksum(None))
+}
+
+/// Decode a 2718-encoded EIP-1559 envelope and return a summary of its fields
+/// (chain_id, nonce, gas_limit, max_fee_per_gas, max_priority_fee_per_gas, value).
+/// Used as a diagnostic to verify what's actually being broadcast.
+pub fn decode_eip1559_summary(raw_tx: &[u8]) -> Result<String, CoreError> {
+    use alloy::consensus::Transaction;
+    use alloy::consensus::TxEnvelope;
+    use alloy::eips::Decodable2718;
+    let envelope = TxEnvelope::decode_2718(&mut &raw_tx[..])
+        .map_err(|e| CoreError::Other(format!("decode 2718: {e}")))?;
+    let tx = match envelope {
+        TxEnvelope::Eip1559(s) => s,
+        other => {
+            return Err(CoreError::Other(format!(
+                "expected EIP-1559 envelope, got {other:?}"
+            )))
+        }
+    };
+    let inner = tx.tx();
+    Ok(format!(
+        "chain_id={} nonce={} gas_limit={} max_fee_per_gas={} max_priority_fee_per_gas={} value={}",
+        inner.chain_id().unwrap_or(0),
+        inner.nonce(),
+        inner.gas_limit(),
+        inner.max_fee_per_gas(),
+        inner.max_priority_fee_per_gas().unwrap_or(0),
+        inner.value(),
+    ))
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

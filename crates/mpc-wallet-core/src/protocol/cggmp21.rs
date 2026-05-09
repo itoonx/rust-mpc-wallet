@@ -1937,7 +1937,15 @@ async fn cggmp21_sign_online_with_store(
     let r_scalar = <Scalar as Reduce<U256>>::reduce_bytes(r_x_field);
 
     // ── Compute message hash as scalar ────────────────────────────────
-    let hash_bytes = Sha256::digest(message);
+    // Callers pass a 32-byte prehash (keccak256 for EVM, etc.). Apply SHA-256
+    // only for legacy non-prehash inputs.
+    let hash_bytes: [u8; 32] = if message.len() == 32 {
+        let mut h = [0u8; 32];
+        h.copy_from_slice(message);
+        h
+    } else {
+        Sha256::digest(message).into()
+    };
     let e_scalar =
         <Scalar as Reduce<U256>>::reduce_bytes(k256::FieldBytes::from_slice(&hash_bytes));
 
@@ -2938,7 +2946,7 @@ mod tests {
 
         let shares = run_keygen(2, 3).await;
         let signers = vec![PartyId(1), PartyId(2)];
-        let message = b"CGGMP21 test message for signing";
+        let message = b"CGGMP21 test message for signing flow"; // != 32 bytes
 
         // Step 1: Pre-sign
         let net_presign = LocalTransportNetwork::new(2);
@@ -3116,7 +3124,7 @@ mod tests {
 
         let shares = run_keygen(2, 3).await;
         let signers = vec![PartyId(1), PartyId(3)]; // Use parties 1 and 3 (not 2)
-        let message = b"verify against group pubkey test";
+        let message = b"verify against group pubkey test message"; // != 32 bytes
 
         // Transport needs PartyId(3), so create with max signer ID
         let max_id = signers.iter().map(|s| s.0).max().unwrap();

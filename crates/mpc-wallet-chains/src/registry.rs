@@ -110,7 +110,7 @@ impl ChainRegistry {
             | Chain::Hyperliquid
             | Chain::Berachain
             | Chain::MegaEth
-            | Chain::Monad => Box::new(EvmProvider::new(chain)?),
+            | Chain::Monad => Box::new(EvmProvider::for_network(chain, &self.env)?),
             Chain::BitcoinMainnet => {
                 let p = match self.env {
                     NetworkEnv::Testnet | NetworkEnv::Devnet => BitcoinProvider::testnet(),
@@ -255,12 +255,14 @@ impl ChainRegistry {
                 vec![CryptoScheme::Gg20Ecdsa, CryptoScheme::Cggmp21Secp256k1]
             }
 
-            // Bitcoin — Taproot uses Schnorr, but legacy would use ECDSA
+            // Bitcoin — default to ECDSA (P2WPKH SegWit, BIP-143). Taproot
+            // (FROST-Secp256k1-TR) is listed but parked behind ECDSA until
+            // BIP-341 key-tweaking is implemented in the FROST protocol.
             Chain::BitcoinMainnet | Chain::BitcoinTestnet => {
                 vec![
-                    CryptoScheme::FrostSecp256k1Tr,
                     CryptoScheme::Gg20Ecdsa,
                     CryptoScheme::Cggmp21Secp256k1,
+                    CryptoScheme::FrostSecp256k1Tr,
                 ]
             }
 

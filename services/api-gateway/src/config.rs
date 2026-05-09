@@ -78,6 +78,14 @@ pub struct AppConfig {
     pub session_encryption_key: Option<String>,
     /// Secrets backend type (env vars or Vault).
     pub secrets_backend: SecretsBackend,
+    /// Optional Infura project ID for EVM RPC. If set, the gateway can
+    /// broadcast EVM transactions via `https://{slug}.infura.io/v3/{id}`.
+    /// Kept as a fallback when `dwellir_api_key` is not set.
+    pub infura_api_key: Option<String>,
+    /// Optional Dwellir API key for multi-chain RPC. Preferred over
+    /// `infura_api_key` when both are present. URL pattern:
+    /// `https://{slug}-rpc.dwellir.com/{key}`.
+    pub dwellir_api_key: Option<String>,
 }
 
 impl AppConfig {
@@ -182,6 +190,8 @@ impl AppConfig {
             secrets_backend: SecretsBackend::parse(
                 &std::env::var("SECRETS_BACKEND").unwrap_or_else(|_| "env".into()),
             ),
+            infura_api_key: std::env::var("INFURA_API_KEY").ok(),
+            dwellir_api_key: std::env::var("DWELLIR_API_KEY").ok(),
         };
         config.validate();
         config
@@ -259,6 +269,8 @@ impl AppConfig {
             redis_url: None,
             session_encryption_key: None,
             secrets_backend: SecretsBackend::Env,
+            infura_api_key: None,
+            dwellir_api_key: None,
         }
     }
 }
