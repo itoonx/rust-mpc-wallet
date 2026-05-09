@@ -1,10 +1,11 @@
 {
-  "name": "sui-ref-vector-script",
+  "name": "ref-vector-scripts",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "One-shot scripts. Currently: sui-ref-vector.mjs captures a deterministic BCS reference vector for TransactionData::V1 used by Rust unit tests.",
+  "description": "One-shot scripts that capture canonical BCS reference vectors used by Rust unit tests (Sui Sprint 41, Aptos Sprint 42).",
   "dependencies": {
+    "@aptos-labs/ts-sdk": "^1.30.0",
     "@mysten/sui": "^1.18.0",
     "@noble/hashes": "^1.5.0"
   }

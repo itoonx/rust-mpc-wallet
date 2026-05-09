@@ -1,12 +1,12 @@
 pub mod address;
+pub mod rpc_client;
 pub mod signer;
 pub mod tx;
+pub mod types;
 
 pub use address::validate_aptos_address;
 
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-
 use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::{GroupPublicKey, MpcSignature};
 
@@ -111,11 +111,34 @@ impl ChainProvider for AptosProvider {
         &self,
         params: TransactionParams,
     ) -> Result<UnsignedTransaction, CoreError> {
-        let pubkey = self.group_pubkey.as_ref().ok_or_else(|| {
-            CoreError::InvalidInput(
-                "AptosProvider requires a GroupPublicKey — use AptosProvider::with_pubkey".into(),
-            )
-        })?;
+        // Pubkey resolution: provider-stored → extras["pubkey_hex"] → error.
+        // Mirrors the Sui pattern so registry-built providers work without
+        // forcing every caller to use `with_pubkey`.
+        let owned;
+        let pubkey: &GroupPublicKey = if let Some(pk) = &self.group_pubkey {
+            pk
+        } else if let Some(hex_str) = params
+            .extra
+            .as_ref()
+            .and_then(|e| e.get("pubkey_hex"))
+            .and_then(|v| v.as_str())
+        {
+            let bytes = hex::decode(hex_str).map_err(|e| {
+                CoreError::InvalidInput(format!("Aptos pubkey_hex invalid hex: {e}"))
+            })?;
+            if bytes.len() != 32 {
+                return Err(CoreError::InvalidInput(format!(
+                    "Aptos pubkey_hex must decode to 32 bytes, got {}",
+                    bytes.len()
+                )));
+            }
+            owned = GroupPublicKey::Ed25519(bytes);
+            &owned
+        } else {
+            return Err(CoreError::InvalidInput(
+                "AptosProvider requires a GroupPublicKey — use `with_pubkey` or pass `pubkey_hex` in extras".into(),
+            ));
+        };
         tx::build_move_transaction(self.chain, params, pubkey).await
     }
 
@@ -132,37 +155,12 @@ impl ChainProvider for AptosProvider {
         signed: &SignedTransaction,
         rpc_url: &str,
     ) -> Result<String, CoreError> {
-        // Aptos REST API: POST /v1/transactions with BCS-encoded signed tx
-        let url = format!("{rpc_url}/v1/transactions");
-        let encoded = BASE64.encode(&signed.raw_tx);
-        let body = serde_json::json!({
-            "sender": signed.tx_hash,
-            "signed_transaction": encoded,
-        });
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
+        // Aptos accepts a BCS-encoded SignedTransaction at POST /v1/transactions
+        // when Content-Type is application/x.aptos.signed_transaction+bcs.
+        // `signed.raw_tx` is exactly that body (RawTransaction BCS ‖ Authenticator BCS).
+        rpc_client::AptosRpcClient::new(rpc_url)
+            .submit(&signed.raw_tx)
             .await
-            .map_err(|e| CoreError::Other(format!("broadcast request failed: {e}")))?;
-        let status = resp.status();
-        let json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| CoreError::Other(format!("broadcast response parse failed: {e}")))?;
-        if !status.is_success() {
-            let msg = json
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown error");
-            return Err(CoreError::Other(format!("Aptos broadcast failed: {msg}")));
-        }
-        json.get("hash")
-            .and_then(|h| h.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| CoreError::Other("missing hash in Aptos response".into()))
     }
 
     async fn simulate_transaction(

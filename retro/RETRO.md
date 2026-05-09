@@ -59,6 +59,7 @@ retro/
 | [L-013](lessons/L-013_value-parsed-as-hex-first.md) | 2026-05-07 | Input parsing | High | build_evm_transaction parsed bare-decimal `value` as hex — **FIXED** |
 | [L-014](lessons/L-014_bitcoin-frost-tr-not-tweak-aware.md) | 2026-05-07 | Crypto correctness | High | FROST-Secp256k1-TR doesn't apply BIP-341 tweak — **WORKAROUND** (P2WPKH+ECDSA default) |
 | [L-015](lessons/L-015_sui-bcs-must-match-upstream-shape.md) | 2026-05-10 | Wire format | High | Sui hand-rolled BCS struct + raw_tx layout must match validator-side decoder — **FIXED** (ref-vector test enforced) |
+| [L-016](lessons/L-016_aptos-double-hash-and-authenticator-order.md) | 2026-05-10 | Wire format | High | Aptos: Ed25519 signs raw `prefix ‖ bcs` (not its SHA3-256 digest), authenticator is pubkey-before-sig with length prefixes — **FIXED** |
 
 ---
 

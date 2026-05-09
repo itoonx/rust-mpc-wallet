@@ -84,11 +84,18 @@ fn test_aptos_validate_address_wrong_length() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_aptos_sign_payload_is_32_bytes() {
+async fn test_aptos_sign_payload_is_prefix_plus_bcs() {
+    // Sprint 42 fix: sign_payload is the raw Ed25519 message
+    // (prefix(32) ‖ BCS(RawTransaction)), NOT a 32-byte SHA3-256 digest.
+    // Pre-hashing here would double-hash through Ed25519's internal SHA-512
+    // and Aptos validators reject with INVALID_SIGNATURE.
     let provider = mpc_wallet_chains::aptos::AptosProvider::with_pubkey(ed25519_pubkey());
     let unsigned = provider.build_transaction(transfer_params()).await.unwrap();
-    assert_eq!(unsigned.sign_payload.len(), 32);
-    assert_ne!(unsigned.sign_payload, vec![0u8; 32]);
+    assert!(
+        unsigned.sign_payload.len() > 32,
+        "sign_payload must contain prefix ‖ bcs_bytes, got {}",
+        unsigned.sign_payload.len()
+    );
     assert_eq!(unsigned.chain, Chain::Aptos);
 }
 
@@ -115,9 +122,23 @@ async fn test_aptos_finalize_correct_format() {
     };
     let signed = provider.finalize_transaction(&unsigned, &sig).unwrap();
     assert_eq!(signed.chain, Chain::Aptos);
-    // raw_tx = bcs_bytes + 98 (0x00 + sig(64) + 0x20 + pubkey(32))
+    // raw_tx = bcs_bytes ‖ Authenticator(99 bytes) where the auth is
+    //   0x00 (variant) ‖ 0x20 (vec len) ‖ pubkey(32) ‖ 0x40 (vec len) ‖ sig(64).
+    // Verified against @aptos-labs/ts-sdk in tests/chain_aptos_integration.rs.
     let bcs_len = unsigned.tx_data.len() - 32;
-    assert_eq!(signed.raw_tx.len(), bcs_len + 98);
+    assert_eq!(signed.raw_tx.len(), bcs_len + 99);
+    assert_eq!(signed.raw_tx[bcs_len], 0x00, "Ed25519 variant tag");
+    assert_eq!(
+        signed.raw_tx[bcs_len + 1],
+        0x20,
+        "vec<u8> len = 32 (pubkey)"
+    );
+    assert_eq!(signed.raw_tx[bcs_len + 34], 0x40, "vec<u8> len = 64 (sig)");
+    assert_eq!(
+        &signed.raw_tx[bcs_len + 35..bcs_len + 99],
+        &[0xBB; 64],
+        "signature bytes"
+    );
 }
 
 #[tokio::test]

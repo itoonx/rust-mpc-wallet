@@ -174,6 +174,15 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
         if bal == 0 {
             eprintln!("⚠️  Sender has 0 sats — fund via a testnet faucet first.");
         }
+    } else if matches!(chain, Chain::Aptos | Chain::Movement) {
+        let bal = mpc_wallet_chains::aptos::rpc_client::AptosRpcClient::new(&rpc_url)
+            .get_balance(&sender)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        eprintln!("✓ On-chain balance of {sender}: {} octas", bal);
+        if bal == 0 {
+            eprintln!("⚠️  Sender has 0 octas — fund via https://aptos.dev/network/faucet first.");
+        }
     } else if chain == Chain::Sui {
         let bal = mpc_wallet_chains::sui::rpc_client::SuiRpcClient::new(&rpc_url)
             .get_balance(&sender)
@@ -281,6 +290,22 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
             unsigned.tx_data.len() - 32
         );
         mpc_wallet_chains::sui::tx::verify_sui_signature(
+            &group_pubkey,
+            &sig,
+            &unsigned.sign_payload,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Ed25519 SIGNATURE INVALID: {e} — FROST sig does not verify against {sender}. Aborting before broadcast."
+            )
+        })?;
+        eprintln!("✓ Ed25519 signature verifies against {}", sender);
+    } else if matches!(chain, Chain::Aptos | Chain::Movement) {
+        eprintln!(
+            "✓ Encoded tx: bcs_len={} sig_len=99 (Ed25519 authenticator)",
+            unsigned.tx_data.len() - 32
+        );
+        mpc_wallet_chains::aptos::tx::verify_aptos_signature(
             &group_pubkey,
             &sig,
             &unsigned.sign_payload,
@@ -461,6 +486,21 @@ fn resolve_default_rpc_url(
             _ => "https://fullnode.testnet.sui.io:443".into(),
         });
     }
+    if matches!(chain, Chain::Aptos | Chain::Movement) {
+        // Aptos public REST endpoints.
+        if chain == Chain::Aptos {
+            return Ok(match network {
+                NetworkEnv::Mainnet => "https://api.mainnet.aptoslabs.com".into(),
+                NetworkEnv::Devnet => "https://api.devnet.aptoslabs.com".into(),
+                _ => "https://api.testnet.aptoslabs.com".into(),
+            });
+        }
+        // Movement public REST.
+        return Ok(match network {
+            NetworkEnv::Mainnet => "https://mainnet.movementnetwork.xyz/v1".into(),
+            _ => "https://testnet.bardock.movementnetwork.xyz/v1".into(),
+        });
+    }
     if matches!(chain, Chain::BitcoinTestnet | Chain::BitcoinMainnet) {
         return Ok(match (chain, network) {
             (Chain::BitcoinMainnet, NetworkEnv::Mainnet) => "https://blockstream.info/api".into(),
@@ -596,6 +636,48 @@ async fn fetch_presign_extras(
             "gas_budget": 10_000_000u64, // 0.01 SUI default; override via --extra
         })));
     }
+    if matches!(chain, Chain::Aptos | Chain::Movement) {
+        use mpc_wallet_chains::aptos::rpc_client::AptosRpcClient;
+        let rpc = AptosRpcClient::new(rpc_url);
+        let account = rpc
+            .get_account(sender)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let chain_id = rpc.get_chain_id().await.map_err(|e| anyhow::anyhow!(e))?;
+        let gas_unit_price = rpc
+            .estimate_gas_price()
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let expiration = now.saturating_add(60); // valid for 60 seconds
+                                                 // Sender's Ed25519 pubkey, hex-encoded for the AptosProvider extras path.
+        let pubkey_hex = match group_pubkey {
+            GroupPublicKey::Ed25519(b) if b.len() == 32 => hex::encode(b),
+            _ => return Err(anyhow::anyhow!("Aptos requires 32-byte Ed25519 group key")),
+        };
+        // Aptos validators reject txs whose `max_gas_amount * gas_unit_price`
+        // is below the per-tx minimum (intrinsic gas ~1500 + signature
+        // verification + script execution). 100_000 gas units is a safe
+        // upper bound for a simple `aptos_account::transfer` — unused gas is
+        // refunded.
+        let max_gas_amount = 100_000u64;
+        eprintln!(
+            "✓ sequence={} chain_id={} gas_price={} octas budget={} exp=now+60s",
+            account.sequence_number.0, chain_id, gas_unit_price, max_gas_amount
+        );
+        return Ok(Some(serde_json::json!({
+            "sender": sender,
+            "pubkey_hex": pubkey_hex,
+            "sequence_number": account.sequence_number.0,
+            "max_gas_amount": max_gas_amount,
+            "gas_unit_price": gas_unit_price,
+            "expiration_timestamp_secs": expiration,
+            "chain_id": chain_id,
+        })));
+    }
     Ok(None)
 }
 
@@ -728,6 +810,14 @@ fn explorer_url(chain: Chain, network: &NetworkEnv, tx_hash: &str) -> Option<Str
         (Chain::Solana, _) => "https://explorer.solana.com/tx/{}?cluster=devnet",
         (Chain::Sui, NetworkEnv::Mainnet) => "https://suiscan.xyz/mainnet/tx/",
         (Chain::Sui, _) => "https://suiscan.xyz/testnet/tx/",
+        (Chain::Aptos, NetworkEnv::Mainnet) => {
+            "https://explorer.aptoslabs.com/txn/{}?network=mainnet"
+        }
+        (Chain::Aptos, NetworkEnv::Devnet) => {
+            "https://explorer.aptoslabs.com/txn/{}?network=devnet"
+        }
+        (Chain::Aptos, _) => "https://explorer.aptoslabs.com/txn/{}?network=testnet",
+        (Chain::Movement, _) => "https://explorer.movementnetwork.xyz/txn/{}?network=testnet",
         (Chain::BitcoinMainnet, _) => "https://mempool.space/tx/",
         (Chain::BitcoinTestnet, _) => "https://mempool.space/testnet/tx/",
         _ => return None,
