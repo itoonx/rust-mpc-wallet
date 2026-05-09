@@ -1,8 +1,19 @@
 //! Dwellir RPC provider preset.
 //!
 //! Dwellir uses a single API key for all supported chains.
-//! HTTPS: `https://{chain}-rpc.dwellir.com/{api_key}`
-//! WSS:   `wss://{chain}-rpc.dwellir.com/{api_key}`
+//! HTTPS: `https://api-{slug}.n.dwellir.com/{api_key}`
+//! WSS:   `wss://api-{slug}.n.dwellir.com/{api_key}`
+//!
+//! Slug convention (verified against Dwellir's live endpoints, May 2026):
+//! - EVM: `{chain}-{network}` — e.g. `ethereum-mainnet`, `ethereum-sepolia`,
+//!   `polygon-amoy`, `arbitrum-sepolia`.
+//! - Substrate / cosmos / specialized: bare chain name (no `-mainnet` suffix) —
+//!   e.g. `polkadot`, `kusama`.
+//! - Aptos / Movement / Solana / Sui: `{chain}-mainnet` for mainnet, `-testnet`
+//!   / `-devnet` for non-mainnet.
+//!
+//! Per-account chain availability varies — a missing endpoint surfaces as a
+//! DNS resolution failure when the URL is requested.
 
 use crate::provider::Chain;
 use crate::registry::NetworkEnv;
@@ -20,55 +31,55 @@ impl DwellirProvider {
         }
     }
 
-    /// Map Chain to Dwellir's subdomain prefix.
+    /// Map Chain to Dwellir's subdomain slug.
     fn chain_slug(chain: Chain, network: &NetworkEnv) -> Option<&'static str> {
         match (chain, network) {
             // EVM L1s
             (Chain::Ethereum, NetworkEnv::Testnet) => Some("ethereum-sepolia"),
-            (Chain::Ethereum, _) => Some("ethereum"),
+            (Chain::Ethereum, _) => Some("ethereum-mainnet"),
             (Chain::Polygon, NetworkEnv::Testnet) => Some("polygon-amoy"),
-            (Chain::Polygon, _) => Some("polygon"),
+            (Chain::Polygon, _) => Some("polygon-mainnet"),
             (Chain::Bsc, NetworkEnv::Testnet) => Some("bsc-testnet"),
-            (Chain::Bsc, _) => Some("bsc"),
+            (Chain::Bsc, _) => Some("bsc-mainnet"),
             // EVM L2s — P0
             (Chain::Arbitrum, NetworkEnv::Testnet) => Some("arbitrum-sepolia"),
-            (Chain::Arbitrum, _) => Some("arbitrum"),
+            (Chain::Arbitrum, _) => Some("arbitrum-mainnet"),
             (Chain::Optimism, NetworkEnv::Testnet) => Some("optimism-sepolia"),
-            (Chain::Optimism, _) => Some("optimism"),
+            (Chain::Optimism, _) => Some("optimism-mainnet"),
             (Chain::Base, NetworkEnv::Testnet) => Some("base-sepolia"),
-            (Chain::Base, _) => Some("base"),
+            (Chain::Base, _) => Some("base-mainnet"),
             // EVM L2s — P1
             (Chain::Avalanche, NetworkEnv::Testnet) => Some("avalanche-fuji"),
-            (Chain::Avalanche, _) => Some("avalanche"),
+            (Chain::Avalanche, _) => Some("avalanche-mainnet"),
             (Chain::Linea, NetworkEnv::Testnet) => Some("linea-sepolia"),
-            (Chain::Linea, _) => Some("linea"),
-            (Chain::ZkSync, _) => Some("zksync"),
-            (Chain::Scroll, _) => Some("scroll"),
+            (Chain::Linea, _) => Some("linea-mainnet"),
+            (Chain::ZkSync, _) => Some("zksync-mainnet"),
+            (Chain::Scroll, _) => Some("scroll-mainnet"),
             // EVM L2s — P2
-            (Chain::Mantle, _) => Some("mantle"),
-            (Chain::Blast, _) => Some("blast"),
-            (Chain::Zora, _) => Some("zora"),
-            (Chain::Fantom, _) => Some("fantom"),
-            (Chain::Gnosis, _) => Some("gnosis"),
+            (Chain::Mantle, _) => Some("mantle-mainnet"),
+            (Chain::Blast, _) => Some("blast-mainnet"),
+            (Chain::Zora, _) => Some("zora-mainnet"),
+            (Chain::Fantom, _) => Some("fantom-mainnet"),
+            (Chain::Gnosis, _) => Some("gnosis-mainnet"),
             // EVM L2s — P3
-            (Chain::Cronos, _) => Some("cronos"),
-            (Chain::Celo, _) => Some("celo"),
+            (Chain::Cronos, _) => Some("cronos-mainnet"),
+            (Chain::Celo, _) => Some("celo-mainnet"),
             (Chain::Moonbeam, _) => Some("moonbeam"),
-            (Chain::Ronin, _) => Some("ronin"),
-            (Chain::OpBnb, _) => Some("opbnb"),
-            (Chain::Immutable, _) => Some("immutable"),
-            (Chain::MantaPacific, _) => Some("manta-pacific"),
+            (Chain::Ronin, _) => Some("ronin-mainnet"),
+            (Chain::OpBnb, _) => Some("opbnb-mainnet"),
+            (Chain::Immutable, _) => Some("immutable-mainnet"),
+            (Chain::MantaPacific, _) => Some("manta-pacific-mainnet"),
             // EVM — Phase 5
-            (Chain::Hyperliquid, _) => Some("hyperliquid"),
-            (Chain::Berachain, _) => Some("berachain"),
-            (Chain::MegaEth, _) => Some("megaeth"),
-            (Chain::Monad, _) => Some("monad"),
+            (Chain::Hyperliquid, _) => Some("hyperliquid-mainnet"),
+            (Chain::Berachain, _) => Some("berachain-mainnet"),
+            (Chain::MegaEth, _) => Some("megaeth-mainnet"),
+            (Chain::Monad, _) => Some("monad-mainnet"),
             // Move chains
             (Chain::Aptos, NetworkEnv::Testnet) => Some("aptos-testnet"),
-            (Chain::Aptos, _) => Some("aptos"),
+            (Chain::Aptos, _) => Some("aptos-mainnet"),
             (Chain::Movement, NetworkEnv::Testnet) => Some("movement-testnet"),
-            (Chain::Movement, _) => Some("movement"),
-            // Substrate / Polkadot
+            (Chain::Movement, _) => Some("movement-mainnet"),
+            // Substrate / Polkadot — bare chain name (no -mainnet suffix)
             (Chain::Polkadot, _) => Some("polkadot"),
             (Chain::Kusama, _) => Some("kusama"),
             (Chain::Astar, _) => Some("astar"),
@@ -76,21 +87,24 @@ impl DwellirProvider {
             (Chain::Phala, _) => Some("phala"),
             (Chain::Interlay, _) => Some("interlay"),
             // Specialized
-            (Chain::Starknet, _) => Some("starknet"),
+            (Chain::Starknet, _) => Some("starknet-mainnet"),
             // Cosmos / IBC
-            (Chain::CosmosHub, _) => Some("cosmos"),
+            (Chain::CosmosHub, _) => Some("cosmoshub"),
             (Chain::Osmosis, _) => Some("osmosis"),
-            (Chain::Celestia, _) => Some("celestia"),
+            (Chain::Celestia, _) => Some("celestia-mainnet"),
             (Chain::Injective, _) => Some("injective"),
-            (Chain::Sei, _) => Some("sei"),
+            (Chain::Sei, _) => Some("sei-mainnet"),
             // Alt L1s
             (Chain::Ton, NetworkEnv::Testnet) => Some("ton-testnet"),
-            (Chain::Ton, _) => Some("ton"),
-            (Chain::Tron, _) => Some("tron"),
+            (Chain::Ton, _) => Some("ton-mainnet"),
+            (Chain::Tron, _) => Some("tron-mainnet"),
             // Non-EVM
-            (Chain::BitcoinMainnet, _) => Some("bitcoin"),
-            (Chain::Solana, _) => Some("solana"),
-            (Chain::Sui, _) => Some("sui"),
+            (Chain::BitcoinMainnet, _) => Some("bitcoin-mainnet"),
+            (Chain::Solana, NetworkEnv::Devnet) => Some("solana-devnet"),
+            (Chain::Solana, NetworkEnv::Testnet) => Some("solana-testnet"),
+            (Chain::Solana, _) => Some("solana-mainnet"),
+            (Chain::Sui, NetworkEnv::Testnet) => Some("sui-testnet"),
+            (Chain::Sui, _) => Some("sui-mainnet"),
             _ => None,
         }
     }
@@ -153,12 +167,12 @@ impl RpcProvider for DwellirProvider {
 
     fn https_endpoint(&self, chain: Chain, network: &NetworkEnv) -> Option<String> {
         let slug = Self::chain_slug(chain, network)?;
-        Some(format!("https://{slug}-rpc.dwellir.com/{}", self.api_key))
+        Some(format!("https://api-{slug}.n.dwellir.com/{}", self.api_key))
     }
 
     fn wss_endpoint(&self, chain: Chain, network: &NetworkEnv) -> Option<String> {
         let slug = Self::chain_slug(chain, network)?;
-        Some(format!("wss://{slug}-rpc.dwellir.com/{}", self.api_key))
+        Some(format!("wss://api-{slug}.n.dwellir.com/{}", self.api_key))
     }
 
     fn api_key_header(&self) -> Option<(&str, &str)> {

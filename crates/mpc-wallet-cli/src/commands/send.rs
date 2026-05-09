@@ -21,6 +21,7 @@ use mpc_wallet_chains::bitcoin::rpc_client::BitcoinRpcClient;
 use mpc_wallet_chains::evm::rpc_client::EvmRpcClient;
 use mpc_wallet_chains::provider::{Chain, TransactionParams};
 use mpc_wallet_chains::registry::{ChainRegistry, NetworkEnv};
+use mpc_wallet_chains::rpc::providers::dwellir::DwellirProvider;
 use mpc_wallet_chains::rpc::providers::infura::InfuraProvider;
 use mpc_wallet_chains::rpc::RpcProvider;
 use mpc_wallet_chains::solana::rpc_client::SolanaRpcClient;
@@ -373,7 +374,27 @@ fn parse_network(s: &str) -> anyhow::Result<NetworkEnv> {
 /// Default RPC URL for chains that have a known public endpoint.
 /// Returns an error for chains where the user must provide `--rpc-url`.
 fn default_rpc_url(chain: Chain, network: &NetworkEnv) -> anyhow::Result<String> {
-    // EVM via Infura (requires INFURA_API_KEY).
+    let dwellir = std::env::var("DWELLIR_API_KEY").ok();
+    let infura = std::env::var("INFURA_API_KEY").ok();
+    resolve_default_rpc_url(chain, network, dwellir.as_deref(), infura.as_deref())
+}
+
+/// Pure resolver — useful for unit tests that need to control which keys are
+/// "set" without poking at process env.
+fn resolve_default_rpc_url(
+    chain: Chain,
+    network: &NetworkEnv,
+    dwellir_key: Option<&str>,
+    infura_key: Option<&str>,
+) -> anyhow::Result<String> {
+    // 1. Dwellir — covers ~43 chains across EVM/Substrate/Cosmos/Move/Solana/Sui.
+    if let Some(key) = dwellir_key {
+        if let Some(url) = DwellirProvider::new(key).https_endpoint(chain, network) {
+            return Ok(url);
+        }
+    }
+
+    // 2. Infura — legacy EVM fallback.
     let evm_chains = [
         Chain::Ethereum,
         Chain::Polygon,
@@ -384,16 +405,14 @@ fn default_rpc_url(chain: Chain, network: &NetworkEnv) -> anyhow::Result<String>
         Chain::Linea,
     ];
     if evm_chains.contains(&chain) {
-        let key = std::env::var("INFURA_API_KEY").map_err(|_| {
-            anyhow::anyhow!("INFURA_API_KEY env var required for EVM chains (or pass --rpc-url)")
-        })?;
-        return InfuraProvider::new(&key)
-            .https_endpoint(chain, network)
-            .ok_or_else(|| {
-                anyhow::anyhow!("Infura does not support chain {chain} on {network:?}")
-            });
+        if let Some(key) = infura_key {
+            if let Some(url) = InfuraProvider::new(key).https_endpoint(chain, network) {
+                return Ok(url);
+            }
+        }
     }
-    // Solana — public endpoints (rate-limited, fine for smoke tests).
+
+    // 3. Public endpoints — Solana RPC + Bitcoin Esplora REST.
     if chain == Chain::Solana {
         return Ok(match network {
             NetworkEnv::Mainnet => "https://api.mainnet-beta.solana.com".into(),
@@ -401,15 +420,15 @@ fn default_rpc_url(chain: Chain, network: &NetworkEnv) -> anyhow::Result<String>
             _ => "https://api.testnet.solana.com".into(),
         });
     }
-    // Bitcoin — Blockstream Esplora REST.
     if matches!(chain, Chain::BitcoinTestnet | Chain::BitcoinMainnet) {
         return Ok(match (chain, network) {
             (Chain::BitcoinMainnet, NetworkEnv::Mainnet) => "https://blockstream.info/api".into(),
             _ => "https://blockstream.info/testnet/api".into(),
         });
     }
+
     Err(anyhow::anyhow!(
-        "no default RPC for chain {chain} — pass --rpc-url"
+        "no default RPC for chain {chain} on {network:?} — set DWELLIR_API_KEY or pass --rpc-url"
     ))
 }
 
@@ -671,14 +690,64 @@ mod tests {
     }
 
     #[test]
-    fn test_default_rpc_solana_devnet() {
-        let url = default_rpc_url(Chain::Solana, &NetworkEnv::Devnet).unwrap();
+    fn test_default_rpc_solana_devnet_no_dwellir() {
+        // Without Dwellir key → falls back to public Solana endpoint.
+        let url = resolve_default_rpc_url(Chain::Solana, &NetworkEnv::Devnet, None, None).unwrap();
         assert!(url.contains("devnet.solana.com"));
     }
 
     #[test]
-    fn test_default_rpc_unsupported_chain() {
-        let r = default_rpc_url(Chain::Sui, &NetworkEnv::Testnet);
+    fn test_default_rpc_solana_devnet_with_dwellir() {
+        // With Dwellir key → Dwellir URL preferred over public.
+        let url =
+            resolve_default_rpc_url(Chain::Solana, &NetworkEnv::Devnet, Some("KEY"), None).unwrap();
+        assert!(url.contains("dwellir.com"));
+        assert!(url.contains("/KEY"));
+    }
+
+    #[test]
+    fn test_default_rpc_evm_dwellir_first() {
+        // Both keys present → Dwellir wins for EVM.
+        let url = resolve_default_rpc_url(
+            Chain::Ethereum,
+            &NetworkEnv::Testnet,
+            Some("DK"),
+            Some("IK"),
+        )
+        .unwrap();
+        assert!(url.contains("dwellir.com"), "got {url}");
+        assert!(url.contains("ethereum-sepolia"));
+    }
+
+    #[test]
+    fn test_default_rpc_evm_falls_back_to_infura() {
+        // Only Infura set → Infura URL.
+        let url =
+            resolve_default_rpc_url(Chain::Ethereum, &NetworkEnv::Testnet, None, Some("PROJ"))
+                .unwrap();
+        assert!(url.contains("infura.io"), "got {url}");
+        assert!(url.contains("sepolia"));
+    }
+
+    #[test]
+    fn test_default_rpc_evm_no_keys_errors() {
+        let r = resolve_default_rpc_url(Chain::Ethereum, &NetworkEnv::Testnet, None, None);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_default_rpc_bitcoin_unchanged() {
+        // Bitcoin always uses Blockstream Esplora regardless of keys.
+        let url =
+            resolve_default_rpc_url(Chain::BitcoinTestnet, &NetworkEnv::Testnet, Some("X"), None)
+                .unwrap();
+        assert!(url.contains("blockstream.info/testnet/api"));
+    }
+
+    #[test]
+    fn test_default_rpc_unsupported_chain_no_dwellir() {
+        // Monero — no provider, no public fallback.
+        let r = resolve_default_rpc_url(Chain::Monero, &NetworkEnv::Mainnet, None, None);
         assert!(r.is_err());
     }
 }

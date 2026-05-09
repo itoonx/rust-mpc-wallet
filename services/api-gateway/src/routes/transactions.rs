@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use mpc_wallet_chains::evm::rpc_client::EvmRpcClient;
 use mpc_wallet_chains::provider::{Chain, TransactionParams};
 use mpc_wallet_chains::registry::NetworkEnv;
+use mpc_wallet_chains::rpc::providers::dwellir::DwellirProvider;
 use mpc_wallet_chains::rpc::providers::infura::InfuraProvider;
 use mpc_wallet_chains::rpc::RpcProvider;
 use mpc_wallet_core::protocol::sign_authorization::{AuthorizationPayload, SignAuthorization};
@@ -52,28 +53,36 @@ fn parse_network(s: &str) -> NetworkEnv {
     }
 }
 
-/// Resolve an EVM RPC URL for the given chain via Infura. Errors if
-/// `INFURA_API_KEY` is not configured or the chain is unsupported.
+/// Resolve an EVM RPC URL. Prefers Dwellir (`DWELLIR_API_KEY`) and falls back
+/// to Infura (`INFURA_API_KEY`) — returns 503 when neither is configured.
 fn resolve_evm_rpc(state: &AppState, chain: Chain) -> Result<String, ApiError> {
-    let key = state.infura_api_key.as_ref().ok_or_else(|| {
-        ApiError::new(
+    let network = parse_network(&state.network);
+
+    if let Some(key) = state.dwellir_api_key.as_ref() {
+        if let Some(url) = DwellirProvider::new(key).https_endpoint(chain, &network) {
+            return Ok(url);
+        }
+    }
+    if let Some(key) = state.infura_api_key.as_ref() {
+        if let Some(url) = InfuraProvider::new(key).https_endpoint(chain, &network) {
+            return Ok(url);
+        }
+    }
+
+    if state.dwellir_api_key.is_none() && state.infura_api_key.is_none() {
+        return Err(ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::InternalError,
-            "INFURA_API_KEY not configured — cannot broadcast EVM tx",
-        )
-    })?;
-    let provider = InfuraProvider::new(key);
-    provider
-        .https_endpoint(chain, &parse_network(&state.network))
-        .ok_or_else(|| {
-            ApiError::bad_request(
-                ErrorCode::InvalidInput,
-                format!(
-                    "Infura does not support chain {chain} on network {}",
-                    state.network
-                ),
-            )
-        })
+            "no EVM RPC configured — set DWELLIR_API_KEY or INFURA_API_KEY",
+        ));
+    }
+    Err(ApiError::bad_request(
+        ErrorCode::InvalidInput,
+        format!(
+            "neither Dwellir nor Infura supports chain {chain} on network {}",
+            state.network
+        ),
+    ))
 }
 
 /// `POST /v1/wallets/:id/transactions` — build + sign + broadcast.

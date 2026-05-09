@@ -401,8 +401,10 @@ pub struct AppState {
     /// Network environment string ("mainnet" | "testnet" | "devnet"), used
     /// when resolving RPC endpoints for tx broadcast.
     pub network: String,
-    /// Optional Infura project ID for EVM RPC broadcast.
+    /// Optional Infura project ID for EVM RPC broadcast (legacy fallback).
     pub infura_api_key: Option<String>,
+    /// Optional Dwellir API key — preferred multi-chain RPC.
+    pub dwellir_api_key: Option<String>,
 }
 
 impl AppState {
@@ -562,6 +564,7 @@ impl AppState {
             secrets_backend: config.secrets_backend,
             network: config.network.clone(),
             infura_api_key: config.infura_api_key.clone(),
+            dwellir_api_key: config.dwellir_api_key.clone(),
         }
     }
 
