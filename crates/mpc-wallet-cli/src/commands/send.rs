@@ -174,6 +174,15 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
         if bal == 0 {
             eprintln!("⚠️  Sender has 0 sats — fund via a testnet faucet first.");
         }
+    } else if chain == Chain::Sui {
+        let bal = mpc_wallet_chains::sui::rpc_client::SuiRpcClient::new(&rpc_url)
+            .get_balance(&sender)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        eprintln!("✓ On-chain balance of {sender}: {} MIST", bal);
+        if bal == 0 {
+            eprintln!("⚠️  Sender has 0 MIST — fund via https://faucet.sui.io/ first.");
+        }
     }
 
     // ── 5. Fetch chain-specific pre-sign data ───────────────────────────────
@@ -266,6 +275,22 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
             )
         })?;
         eprintln!("✓ Ed25519 signature verifies against {}", sender);
+    } else if chain == Chain::Sui {
+        eprintln!(
+            "✓ Encoded tx: bcs_len={} sig_len=97 (Ed25519)",
+            unsigned.tx_data.len() - 32
+        );
+        mpc_wallet_chains::sui::tx::verify_sui_signature(
+            &group_pubkey,
+            &sig,
+            &unsigned.sign_payload,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Ed25519 SIGNATURE INVALID: {e} — FROST sig does not verify against {sender}. Aborting before broadcast."
+            )
+        })?;
+        eprintln!("✓ Ed25519 signature verifies against {}", sender);
     }
 
     let mut data = serde_json::json!({
@@ -336,7 +361,6 @@ async fn load_wallet(
     wallet_id: &str,
     password: Option<&str>,
 ) -> anyhow::Result<(CryptoScheme, ThresholdConfig, Vec<KeyShare>)> {
-    let group_id = KeyGroupId::from_string(wallet_id.to_string());
     let password = match password {
         Some(p) => p.to_string(),
         None => rpassword::prompt_password("Enter wallet password: ")
@@ -347,10 +371,20 @@ async fn load_wallet(
         &password,
     );
     let groups = store.list().await?;
+    // Match by group_id (UUID) first, then fall back to label so users can
+    // pass either `--wallet ea5b726e-…` or `--wallet sui-testnet`.
+    let target = KeyGroupId::from_string(wallet_id.to_string());
     let meta = groups
-        .into_iter()
-        .find(|m| m.group_id == group_id)
-        .ok_or_else(|| anyhow::anyhow!("wallet '{wallet_id}' not found in key store"))?;
+        .iter()
+        .find(|m| m.group_id == target)
+        .or_else(|| groups.iter().find(|m| m.label == wallet_id))
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "wallet '{wallet_id}' not found (matched neither group_id nor label) — run `mpc-wallet list-keys` to see available wallets"
+            )
+        })?;
+    let group_id = meta.group_id.clone();
     eprintln!(
         "✓ Loaded wallet '{}' ({}-of-{} {})",
         meta.label, meta.config.threshold, meta.config.total_parties, meta.scheme
@@ -418,6 +452,13 @@ fn resolve_default_rpc_url(
             NetworkEnv::Mainnet => "https://api.mainnet-beta.solana.com".into(),
             NetworkEnv::Devnet => "https://api.devnet.solana.com".into(),
             _ => "https://api.testnet.solana.com".into(),
+        });
+    }
+    if chain == Chain::Sui {
+        return Ok(match network {
+            NetworkEnv::Mainnet => "https://fullnode.mainnet.sui.io:443".into(),
+            NetworkEnv::Devnet => "https://fullnode.devnet.sui.io:443".into(),
+            _ => "https://fullnode.testnet.sui.io:443".into(),
         });
     }
     if matches!(chain, Chain::BitcoinTestnet | Chain::BitcoinMainnet) {
@@ -512,6 +553,47 @@ async fn fetch_presign_extras(
             "utxos": utxos_json,
             "change_address": sender,
             "fee_rate_sat_per_vb": 2u64,
+        })));
+    }
+    if chain == Chain::Sui {
+        use mpc_wallet_chains::sui::rpc_client::SuiRpcClient;
+        let rpc = SuiRpcClient::new(rpc_url);
+        let coins = rpc
+            .get_owned_coins(sender)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if coins.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Sui sender {sender} owns no SUI coin objects — fund via https://faucet.sui.io/"
+            ));
+        }
+        // Pick the largest-balance coin as gas payment (also where SplitCoins
+        // takes the transfer amount from).
+        let gas_coin = coins
+            .iter()
+            .max_by_key(|c| c.balance.0)
+            .expect("non-empty checked above");
+        let gas_price = rpc
+            .get_reference_gas_price()
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        eprintln!(
+            "✓ gas_coin={} version={} balance={} MIST · ref_price={} MIST/gas",
+            gas_coin.object_id, gas_coin.version.0, gas_coin.balance.0, gas_price
+        );
+        // Pubkey hex for SuiProvider when registry-built (no with_pubkey).
+        let pubkey_hex = match group_pubkey {
+            GroupPublicKey::Ed25519(b) if b.len() == 32 => hex::encode(b),
+            _ => return Err(anyhow::anyhow!("Sui requires 32-byte Ed25519 group key")),
+        };
+        return Ok(Some(serde_json::json!({
+            "sender": sender,
+            "pubkey_hex": pubkey_hex,
+            "gas_payment_object_id": gas_coin.object_id,
+            "gas_payment_version": gas_coin.version.0,
+            "gas_payment_digest": gas_coin.digest,
+            "gas_price": gas_price,
+            "gas_budget": 10_000_000u64, // 0.01 SUI default; override via --extra
         })));
     }
     Ok(None)
@@ -644,7 +726,8 @@ fn explorer_url(chain: Chain, network: &NetworkEnv, tx_hash: &str) -> Option<Str
         (Chain::Avalanche, _) => "https://snowtrace.io/tx/",
         (Chain::Solana, NetworkEnv::Mainnet) => "https://explorer.solana.com/tx/",
         (Chain::Solana, _) => "https://explorer.solana.com/tx/{}?cluster=devnet",
-        (Chain::Sui, _) => "https://suiscan.xyz/mainnet/tx/",
+        (Chain::Sui, NetworkEnv::Mainnet) => "https://suiscan.xyz/mainnet/tx/",
+        (Chain::Sui, _) => "https://suiscan.xyz/testnet/tx/",
         (Chain::BitcoinMainnet, _) => "https://mempool.space/tx/",
         (Chain::BitcoinTestnet, _) => "https://mempool.space/testnet/tx/",
         _ => return None,

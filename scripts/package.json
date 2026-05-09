@@ -1,0 +1,11 @@
+{
+  "name": "sui-ref-vector-script",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "One-shot scripts. Currently: sui-ref-vector.mjs captures a deterministic BCS reference vector for TransactionData::V1 used by Rust unit tests.",
+  "dependencies": {
+    "@mysten/sui": "^1.18.0",
+    "@noble/hashes": "^1.5.0"
+  }
+}

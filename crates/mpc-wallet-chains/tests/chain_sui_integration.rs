@@ -7,21 +7,24 @@ use mpc_wallet_core::protocol::{GroupPublicKey, MpcSignature};
 
 /// Build a minimal valid `TransactionParams` for Sui.
 ///
-/// Sui's `build_sui_transaction` reads:
-///   - `params.extra["sender"]`  → sender address (must be `0x` + 64 hex chars)
-///   - `params.to`               → recipient address (must be `0x` + 64 hex chars)
-///   - `params.value`            → amount (parseable as u64)
-///
-/// Default addresses used by the two-argument overload below are:
-///   sender    = `0x000...0001`
-///   recipient = `0x000...0002`
+/// `build_sui_transaction` now requires the full gas-payment object reference
+/// plus price and budget (Sprint 41). The defaults below are sentinel values
+/// that pass address validation; the BCS round-trip tests don't broadcast so
+/// the gas object doesn't need to be real.
 fn sui_params(to: &str, sender: &str, value: u64) -> TransactionParams {
     TransactionParams {
         to: to.to_string(),
         value: value.to_string(),
         data: None,
         chain_id: None,
-        extra: Some(serde_json::json!({ "sender": sender })),
+        extra: Some(serde_json::json!({
+            "sender": sender,
+            "gas_payment_object_id": "0x3333333333333333333333333333333333333333333333333333333333333333",
+            "gas_payment_version": 42,
+            "gas_payment_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "gas_price": 1000,
+            "gas_budget": 10_000_000,
+        })),
     }
 }
 
@@ -119,33 +122,30 @@ async fn test_sui_finalize_has_correct_signature_format() {
         .finalize_transaction(&unsigned, &mpc_sig)
         .expect("finalize_transaction should succeed");
 
-    // raw_tx is the 97-byte Sui serialized signature directly (BCS migration)
-    // 97 bytes total: flag(1) + ed25519_sig(64) + ed25519_pubkey(32)
-    assert_eq!(
-        signed.raw_tx.len(),
-        97,
-        "Sui serialized signature must be 97 bytes, got {}",
+    // raw_tx layout (Sprint 41): `bcs_bytes ‖ [0x00 ‖ sig(64) ‖ pubkey(32)]`.
+    // The trailing 97 bytes are the Sui serialized signature; the prefix is
+    // the BCS-encoded TransactionData consumed by `sui_executeTransactionBlock`.
+    assert!(
+        signed.raw_tx.len() > 97,
+        "raw_tx must contain BCS body before the 97-byte signature, got {}",
         signed.raw_tx.len()
     );
+    let sig_offset = signed.raw_tx.len() - 97;
+    let sig_part = &signed.raw_tx[sig_offset..];
 
-    // Byte 0: Ed25519 scheme flag = 0x00
+    // Byte 0 of sig: Ed25519 scheme flag = 0x00
+    assert_eq!(sig_part[0], 0x00, "sig byte 0 must be Ed25519 flag 0x00");
+    // sig[1..65] = 64-byte EdDSA signature
     assert_eq!(
-        signed.raw_tx[0], 0x00,
-        "first byte must be Ed25519 flag 0x00"
-    );
-
-    // Bytes 1..65: the 64-byte EdDSA signature
-    assert_eq!(
-        &signed.raw_tx[1..65],
+        &sig_part[1..65],
         &[3u8; 64],
-        "bytes 1..65 must be the EdDSA signature"
+        "sig bytes 1..65 must be the EdDSA signature"
     );
-
-    // Bytes 65..97: the 32-byte Ed25519 public key
+    // sig[65..97] = 32-byte Ed25519 public key
     assert_eq!(
-        &signed.raw_tx[65..97],
+        &sig_part[65..97],
         pubkey_bytes.as_slice(),
-        "bytes 65..97 must be the Ed25519 public key"
+        "sig bytes 65..97 must be the Ed25519 public key"
     );
 }
 
@@ -267,8 +267,18 @@ async fn test_sui_build_with_sender_validates_address() {
         extra: None,
     };
     let valid_sender = "0x0000000000000000000000000000000000000000000000000000000000000001";
+    // Inject gas extras since build_transaction_with_sender will delegate to
+    // build_transaction which now requires them.
+    let mut params_with_gas = params.clone();
+    params_with_gas.extra = Some(serde_json::json!({
+        "gas_payment_object_id": "0x3333333333333333333333333333333333333333333333333333333333333333",
+        "gas_payment_version": 42,
+        "gas_payment_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "gas_price": 1000,
+        "gas_budget": 10_000_000,
+    }));
     let result = provider
-        .build_transaction_with_sender(params.clone(), valid_sender)
+        .build_transaction_with_sender(params_with_gas, valid_sender)
         .await;
     assert!(result.is_ok(), "valid sender must succeed: {:?}", result);
     let bad_sender = "not-a-valid-address";
@@ -435,9 +445,14 @@ async fn test_sui_bcs_sign_payload_is_32_bytes() {
         value: "1000000".to_string(),
         data: None,
         chain_id: None,
-        extra: Some(
-            serde_json::json!({"sender": "0x0000000000000000000000000000000000000000000000000000000000000001"}),
-        ),
+        extra: Some(serde_json::json!({
+            "sender": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "gas_payment_object_id": "0x3333333333333333333333333333333333333333333333333333333333333333",
+            "gas_payment_version": 42,
+            "gas_payment_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "gas_price": 1000,
+            "gas_budget": 10_000_000,
+        })),
     };
     let unsigned = provider.build_transaction(params).await.unwrap();
     assert_eq!(
@@ -465,9 +480,14 @@ async fn test_sui_bcs_tx_data_contains_bcs_plus_pubkey() {
         value: "500".to_string(),
         data: None,
         chain_id: None,
-        extra: Some(
-            serde_json::json!({"sender": "0x0000000000000000000000000000000000000000000000000000000000000001"}),
-        ),
+        extra: Some(serde_json::json!({
+            "sender": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "gas_payment_object_id": "0x3333333333333333333333333333333333333333333333333333333333333333",
+            "gas_payment_version": 42,
+            "gas_payment_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "gas_price": 1000,
+            "gas_budget": 10_000_000,
+        })),
     };
     let unsigned = provider.build_transaction(params).await.unwrap();
     // tx_data must be at least 32 bytes longer than the BCS payload alone
@@ -561,25 +581,36 @@ async fn test_sui_bcs_finalize_97_byte_signature() {
         value: "1000".to_string(),
         data: None,
         chain_id: None,
-        extra: Some(
-            serde_json::json!({"sender": "0x0000000000000000000000000000000000000000000000000000000000000001"}),
-        ),
+        extra: Some(serde_json::json!({
+            "sender": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "gas_payment_object_id": "0x3333333333333333333333333333333333333333333333333333333333333333",
+            "gas_payment_version": 42,
+            "gas_payment_digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "gas_price": 1000,
+            "gas_budget": 10_000_000,
+        })),
     };
     let unsigned = provider.build_transaction(params).await.unwrap();
     let sig = MpcSignature::EdDsa {
         signature: [0xCCu8; 64],
     };
     let signed = provider.finalize_transaction(&unsigned, &sig).unwrap();
-    assert_eq!(signed.raw_tx.len(), 97, "raw_tx must be 97 bytes");
-    assert_eq!(signed.raw_tx[0], 0x00, "byte 0 must be Ed25519 flag 0x00");
+    // raw_tx = bcs_bytes ‖ [flag ‖ sig ‖ pubkey] — see finalize_sui_transaction.
+    assert!(
+        signed.raw_tx.len() > 97,
+        "raw_tx must contain BCS body + 97-byte sig"
+    );
+    let sig_offset = signed.raw_tx.len() - 97;
+    let sig_part = &signed.raw_tx[sig_offset..];
+    assert_eq!(sig_part[0], 0x00, "sig byte 0 must be Ed25519 flag 0x00");
     assert_eq!(
-        &signed.raw_tx[1..65],
+        &sig_part[1..65],
         &[0xCCu8; 64],
-        "bytes 1..65 must be the signature"
+        "sig bytes 1..65 must be the signature"
     );
     assert_eq!(
-        &signed.raw_tx[65..97],
+        &sig_part[65..97],
         &[0xBBu8; 32],
-        "bytes 65..97 must be the pubkey"
+        "sig bytes 65..97 must be the pubkey"
     );
 }

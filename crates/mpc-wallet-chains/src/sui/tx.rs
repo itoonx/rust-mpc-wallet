@@ -1,24 +1,17 @@
 // Sui transaction serialization using BCS encoding.
 //
-// This module implements:
-//   1. `SuiTransferPayload` — minimal BCS-serializable struct for a Sui coin transfer.
-//   2. `build_sui_transaction` — encodes the payload with BCS, computes the Blake2b-256
-//      intent-wrapped signing payload, and stores `bcs_bytes || pubkey(32)` in `tx_data`.
-//   3. `finalize_sui_transaction` — extracts the pubkey suffix from `tx_data` and builds
-//      the Sui serialized-signature: [0x00 | sig(64) | pubkey(32)] = 97 bytes.
+// Builds a real `TransactionData::V1` (see `sui::types`) for a SUI coin
+// transfer using the canonical SplitCoins+TransferObjects PTB pattern. The
+// BCS bytes are byte-for-byte compatible with @mysten/sui SDK output —
+// verified by the `bcs_matches_mysten_sdk_reference` test.
 //
-// Sui signature wire format: [0x00] || signature(64 bytes) || pubkey(32 bytes)
-//   flag 0x00 = Ed25519
-//
-// NOTE: Current BCS payload covers coin transfer. Full `sui-sdk` TransactionData
-// (gas payment, epoch, validator fields) is a future enhancement.
-
-use bcs;
-use serde::{Deserialize, Serialize};
+// Sign payload: `Blake2b-256(SUI_INTENT_PREFIX ‖ bcs_bytes)`.
+// Wire format:  `[0x00] ‖ sig(64) ‖ pubkey(32) = 97 bytes` (0x00 = Ed25519).
 
 use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::{GroupPublicKey, MpcSignature};
 
+use super::types::{ObjectRef, TransactionData};
 use crate::provider::{Chain, SignedTransaction, TransactionParams, UnsignedTransaction};
 
 /// Validate a Sui address string.
@@ -38,73 +31,133 @@ pub fn validate_sui_address(addr: &str) -> Result<[u8; 32], CoreError> {
     Ok(bytes.try_into().unwrap()) // safe: we checked len == 64 hex = 32 bytes
 }
 
-/// Minimal representation of a Sui coin transfer for BCS encoding.
-/// This is a simplified (but structurally correct) subset of Sui's TransactionData.
-///
-/// NOTE: Minimal BCS payload for coin transfer. Full sui-sdk TransactionData
-/// (gas payment, epoch, validator fields) is a future enhancement.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SuiTransferPayload {
-    /// Sender address as 32 bytes
-    pub sender: [u8; 32],
-    /// Recipient address as 32 bytes
-    pub recipient: [u8; 32],
-    /// Amount in MIST (1 SUI = 1_000_000_000 MIST)
-    pub amount: u64,
-    /// Recent object digest / reference epoch (32 bytes, zeros if not available)
-    pub reference: [u8; 32],
-}
-
-/// Sui intent prefix for transaction signing: [intent_scope=0, version=0, app_id=0]
+/// Sui intent prefix for transaction signing: `[intent_scope=0, version=0, app_id=0]`.
 const SUI_INTENT_PREFIX: [u8; 3] = [0, 0, 0];
 
-/// Build an unsigned Sui transaction using BCS encoding.
+/// Verify a Sui Ed25519 MPC signature against the wallet's group public key.
+/// Used as a pre-broadcast invariant by the CLI: catches a bad sig before
+/// burning gas. Mirrors `solana::tx::verify_solana_signature`.
+pub fn verify_sui_signature(
+    group_pubkey: &GroupPublicKey,
+    sig: &MpcSignature,
+    sign_payload: &[u8],
+) -> Result<(), CoreError> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let pubkey_bytes: [u8; 32] = match group_pubkey {
+        GroupPublicKey::Ed25519(b) if b.len() == 32 => {
+            let mut a = [0u8; 32];
+            a.copy_from_slice(b);
+            a
+        }
+        _ => {
+            return Err(CoreError::InvalidInput(
+                "Sui requires 32-byte Ed25519 group key".into(),
+            ))
+        }
+    };
+    let MpcSignature::EdDsa { signature } = sig else {
+        return Err(CoreError::InvalidInput(
+            "Sui requires EdDsa signature".into(),
+        ));
+    };
+    let sig_arr: [u8; 64] = signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| CoreError::Crypto("Sui sig must be 64 bytes".into()))?;
+    let vk = VerifyingKey::from_bytes(&pubkey_bytes)
+        .map_err(|e| CoreError::Crypto(format!("invalid Sui pubkey: {e}")))?;
+    let ed_sig = Signature::from_bytes(&sig_arr);
+    vk.verify(sign_payload, &ed_sig)
+        .map_err(|e| CoreError::Crypto(format!("Sui Ed25519 verify failed: {e}")))?;
+    Ok(())
+}
+
+/// Sui object digests are 32-byte Blake2b outputs serialised by base58.
+fn parse_object_digest(s: &str) -> Result<Vec<u8>, CoreError> {
+    let raw = bs58::decode(s)
+        .into_vec()
+        .map_err(|e| CoreError::InvalidInput(format!("invalid base58 digest: {e}")))?;
+    if raw.len() != 32 {
+        return Err(CoreError::InvalidInput(format!(
+            "Sui object digest must decode to 32 bytes, got {}",
+            raw.len()
+        )));
+    }
+    Ok(raw)
+}
+
+/// Build an unsigned Sui transaction using a real `TransactionData::V1`.
 ///
-/// Encodes a `SuiTransferPayload` with BCS, computes:
-///   `sign_payload = Blake2b-256(SUI_INTENT_PREFIX || bcs_bytes)`
+/// Required `params.extra` keys:
+/// - `sender`               — `0x` + 64 hex (32 bytes)
+/// - `gas_payment_object_id` — `0x` + 64 hex (32 bytes), the SUI coin to use for gas
+/// - `gas_payment_version`  — u64
+/// - `gas_payment_digest`   — base58 string decoding to 32 bytes
+/// - `gas_price`            — u64 (MIST per gas unit)
+/// - `gas_budget`           — u64 (MIST)
 ///
-/// Stores `bcs_bytes || pubkey(32)` in `tx_data` so that `finalize_sui_transaction`
-/// can recover the Ed25519 public key without an extra parameter not present in the
-/// `ChainProvider` trait.
+/// Encodes the canonical `transferSui` PTB (SplitCoins(GasCoin, [amount]) →
+/// TransferObjects([split], recipient)) and computes
+/// `sign_payload = Blake2b-256(SUI_INTENT_PREFIX ‖ bcs(TransactionData))`.
 ///
-/// # Errors
-/// - `CoreError::InvalidInput` — missing/invalid sender or recipient address, or non-Ed25519 key
-/// - `CoreError::Protocol` — BCS encoding failure
+/// `tx_data` carries `bcs_bytes ‖ pubkey(32)` so `finalize_sui_transaction`
+/// can pack the wire-format signature without extra parameters.
 pub async fn build_sui_transaction(
     params: TransactionParams,
     group_pubkey: &GroupPublicKey,
 ) -> Result<UnsignedTransaction, CoreError> {
-    // 1. Extract and validate sender from extra["sender"] — fail fast
-    let sender_hex = params
+    let extra = params
         .extra
         .as_ref()
-        .and_then(|e| e["sender"].as_str())
-        .ok_or_else(|| CoreError::InvalidInput("Sui: missing sender in extra".to_string()))?;
-    let sender_bytes = validate_sui_address(sender_hex)?;
+        .ok_or_else(|| CoreError::InvalidInput("Sui send requires extra params".to_string()))?;
 
-    // 2. Validate and decode recipient
-    let recipient_bytes = validate_sui_address(&params.to)?;
-
-    // 3. Parse amount
+    // ── Sender / recipient ────────────────────────────────────────────────
+    let sender_hex = extra["sender"]
+        .as_str()
+        .ok_or_else(|| CoreError::InvalidInput("Sui: missing 'sender' in extra".to_string()))?;
+    let sender = validate_sui_address(sender_hex)?;
+    let recipient = validate_sui_address(&params.to)?;
     let amount: u64 = params
         .value
         .parse()
         .map_err(|_| CoreError::InvalidInput(format!("invalid amount: {}", params.value)))?;
 
-    // 4. Build payload struct
-    let payload = SuiTransferPayload {
-        sender: sender_bytes,
-        recipient: recipient_bytes,
+    // ── Gas payment object ref ────────────────────────────────────────────
+    let gas_object_id_hex = extra["gas_payment_object_id"].as_str().ok_or_else(|| {
+        CoreError::InvalidInput("Sui: missing 'gas_payment_object_id' in extra".to_string())
+    })?;
+    let gas_object_id = validate_sui_address(gas_object_id_hex)?;
+    let gas_version = extra["gas_payment_version"].as_u64().ok_or_else(|| {
+        CoreError::InvalidInput("Sui: missing 'gas_payment_version' (u64) in extra".to_string())
+    })?;
+    let gas_digest_b58 = extra["gas_payment_digest"].as_str().ok_or_else(|| {
+        CoreError::InvalidInput("Sui: missing 'gas_payment_digest' (base58) in extra".to_string())
+    })?;
+    let gas_digest = parse_object_digest(gas_digest_b58)?;
+    let gas_price = extra["gas_price"]
+        .as_u64()
+        .ok_or_else(|| CoreError::InvalidInput("Sui: missing 'gas_price' (u64) in extra".into()))?;
+    let gas_budget = extra["gas_budget"].as_u64().ok_or_else(|| {
+        CoreError::InvalidInput("Sui: missing 'gas_budget' (u64) in extra".into())
+    })?;
+
+    // ── Build TransactionData::V1 + BCS encode ────────────────────────────
+    let tx = TransactionData::new_transfer_sui(
+        sender,
+        recipient,
         amount,
-        reference: [0u8; 32], // placeholder — real object reference from RPC in production
-    };
+        ObjectRef {
+            object_id: gas_object_id,
+            version: gas_version,
+            digest: gas_digest,
+        },
+        gas_price,
+        gas_budget,
+    );
+    let bcs_bytes =
+        bcs::to_bytes(&tx).map_err(|e| CoreError::Protocol(format!("BCS encoding failed: {e}")))?;
 
-    // 5. BCS-encode the payload
-    let bcs_bytes = bcs::to_bytes(&payload)
-        .map_err(|e| CoreError::Protocol(format!("BCS encoding failed: {e}")))?;
-
-    // 6. Compute sign_payload: Blake2b-256(intent_prefix || bcs_bytes)
-    //    Sui intent prefix for transaction: [0, 0, 0]
+    // ── sign_payload = Blake2b-256(intent ‖ bcs) ─────────────────────────
     let sign_payload = {
         use blake2::{Blake2b, Digest};
         type Blake2b256 = Blake2b<blake2::digest::consts::U32>;
@@ -114,27 +167,21 @@ pub async fn build_sui_transaction(
         hasher.finalize().to_vec()
     };
 
-    // 7. Validate Ed25519 public key
+    // ── Validate group pubkey, pack into tx_data ──────────────────────────
     let pubkey_bytes = match group_pubkey {
-        GroupPublicKey::Ed25519(ref b) => {
-            if b.len() != 32 {
-                return Err(CoreError::InvalidInput(
-                    "Ed25519 pubkey must be 32 bytes".to_string(),
-                ));
-            }
+        GroupPublicKey::Ed25519(b) if b.len() == 32 => {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(b);
             arr
         }
-        _ => {
+        GroupPublicKey::Ed25519(_) => {
             return Err(CoreError::InvalidInput(
-                "Sui requires Ed25519 key".to_string(),
+                "Ed25519 pubkey must be 32 bytes".into(),
             ))
         }
+        _ => return Err(CoreError::InvalidInput("Sui requires Ed25519 key".into())),
     };
 
-    // 8. Store: tx_data = bcs_bytes || pubkey(32)
-    //    The pubkey suffix allows finalize_sui_transaction to recover it without JSON.
     let mut tx_data = bcs_bytes;
     tx_data.extend_from_slice(&pubkey_bytes);
 
@@ -171,27 +218,29 @@ pub fn finalize_sui_transaction(
         }
     };
 
-    // tx_data = bcs_bytes || pubkey(32)
-    // Pubkey is always the last 32 bytes
+    // tx_data layout (set by build_sui_transaction): `bcs_bytes ‖ pubkey(32)`.
     if unsigned.tx_data.len() < 32 {
         return Err(CoreError::Protocol("tx_data too short".to_string()));
     }
-    let (_, pubkey_bytes) = unsigned.tx_data.split_at(unsigned.tx_data.len() - 32);
+    let (bcs_bytes, pubkey_bytes) = unsigned.tx_data.split_at(unsigned.tx_data.len() - 32);
     let mut pubkey_arr = [0u8; 32];
     pubkey_arr.copy_from_slice(pubkey_bytes);
 
-    // Build Sui signature: [0x00 | sig(64) | pubkey(32)] = 97 bytes
-    let mut raw_sig = Vec::with_capacity(97);
-    raw_sig.push(0x00u8); // Ed25519 flag
-    raw_sig.extend_from_slice(&sig_bytes);
-    raw_sig.extend_from_slice(&pubkey_arr);
+    // raw_tx layout (consumed by SuiProvider::broadcast): `bcs_bytes ‖ [0x00 ‖ sig(64) ‖ pubkey(32)]`.
+    // The broadcast splits at len-97 to recover the BCS body and the 97-byte
+    // serialized signature for `sui_executeTransactionBlock`.
+    let mut raw_tx = Vec::with_capacity(bcs_bytes.len() + 97);
+    raw_tx.extend_from_slice(bcs_bytes);
+    raw_tx.push(0x00u8); // Ed25519 flag
+    raw_tx.extend_from_slice(&sig_bytes);
+    raw_tx.extend_from_slice(&pubkey_arr);
 
-    // tx_hash = hex of the Blake2b-256 sign_payload (the intent-wrapped digest)
+    // tx_hash = hex of the Blake2b-256 sign_payload (the intent-wrapped digest).
     let tx_hash = hex::encode(&unsigned.sign_payload);
 
     Ok(SignedTransaction {
         chain: Chain::Sui,
-        raw_tx: raw_sig,
+        raw_tx,
         tx_hash,
     })
 }

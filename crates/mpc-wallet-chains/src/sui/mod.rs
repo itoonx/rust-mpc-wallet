@@ -1,6 +1,8 @@
 pub mod address;
+pub mod rpc_client;
 pub mod signer;
 pub mod tx;
+pub mod types;
 
 pub use tx::validate_sui_address;
 
@@ -124,11 +126,35 @@ impl ChainProvider for SuiProvider {
         &self,
         params: TransactionParams,
     ) -> Result<UnsignedTransaction, CoreError> {
-        let pubkey = self.group_pubkey.as_ref().ok_or_else(|| {
-            CoreError::InvalidInput(
-                "SuiProvider requires a GroupPublicKey — use SuiProvider::with_pubkey".into(),
-            )
-        })?;
+        // Pubkey resolution order:
+        //   1. self.group_pubkey  (set via `SuiProvider::with_pubkey`)
+        //   2. extras["pubkey_hex"]  (33 or 32-byte hex; CLI auto-fills for Sui)
+        // Either path lets the registry-built provider work without forcing
+        // every caller to use `with_pubkey`.
+        let owned;
+        let pubkey: &GroupPublicKey = if let Some(pk) = &self.group_pubkey {
+            pk
+        } else if let Some(hex_str) = params
+            .extra
+            .as_ref()
+            .and_then(|e| e.get("pubkey_hex"))
+            .and_then(|v| v.as_str())
+        {
+            let bytes = hex::decode(hex_str)
+                .map_err(|e| CoreError::InvalidInput(format!("Sui pubkey_hex invalid hex: {e}")))?;
+            if bytes.len() != 32 {
+                return Err(CoreError::InvalidInput(format!(
+                    "Sui pubkey_hex must decode to 32 bytes (Ed25519), got {}",
+                    bytes.len()
+                )));
+            }
+            owned = GroupPublicKey::Ed25519(bytes);
+            &owned
+        } else {
+            return Err(CoreError::InvalidInput(
+                "SuiProvider requires a GroupPublicKey — use `with_pubkey` or pass `pubkey_hex` (32-byte Ed25519 hex) in extras".into(),
+            ));
+        };
         tx::build_sui_transaction(params, pubkey).await
     }
 
