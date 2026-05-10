@@ -1,6 +1,9 @@
 pub mod address;
+pub mod ata;
+pub mod instruction;
 pub mod rpc_client;
 pub mod signer;
+pub mod spl;
 pub mod tx;
 
 use async_trait::async_trait;
