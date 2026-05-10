@@ -1,7 +1,9 @@
 # Sprint Log
 
-> **Current state (as of 2026-05-07):** Sprint 37 COMPLETE — PR #23 merged to `main`.
-> 970 tests, 7 production threshold protocols, 68/68 security findings resolved.
+> **Current state (as of 2026-05-10):** Sprint 43 COMPLETE — merged to `main`.
+> 941 tests, 7 production threshold protocols, 68/68 security findings resolved,
+> 6 chains with live testnet MPC broadcast coverage (Sepolia, Solana devnet,
+> Bitcoin testnet, Sui testnet, Aptos testnet, TRON Shasta).
 > See `docs/ROADMAP.md` for the live roadmap and next-phase candidates.
 >
 > The content below is the **historical archive** of Sprint 1–N task specs and gate status
@@ -1645,3 +1647,30 @@ fn _assert_share_data_zeroize_on_drop() {
 **SEC-004 status:** RESOLVED (root fix applied — `share_data` is now `Zeroizing<Vec<u8>>`).
 **SEC-015 status:** RESOLVED (manual `Debug` impl redacts `share_data` → `"[REDACTED]"`).
 **FR-B5, FR-D1/D2, FR-H3:** all delivered.
+
+---
+
+## Sprint 38–43 Gate Status (2026-04-28 → 2026-05-10 — ALL MERGED)
+
+Live testnet MPC broadcast push: end-to-end signing from real shares to real testnet RPCs.
+
+| Sprint | Theme | Owner | R6 Verdict | Merged | Live tx / Result |
+|--------|-------|-------|------------|--------|------------------|
+| 38 | Sepolia live MPC (GG20) | R3 | APPROVED | ✓ | First live Ethereum testnet MPC tx; lessons L-011, L-012, L-013 |
+| 39 | Solana devnet live MPC (FROST-Ed25519) | R3c | APPROVED | ✓ | First live Solana devnet MPC tx |
+| 40 | Bitcoin testnet live MPC (P2WPKH + GG20) | R3b | APPROVED | ✓ | First live Bitcoin testnet MPC tx; L-014 (FROST-TR Taproot tweak parked) |
+| 41 | Sui testnet live MPC (FROST-Ed25519) | R3d | APPROVED | ✓ | First live Sui testnet MPC tx via `TransactionData::V1`; L-015 |
+| 42 | Aptos testnet live MPC (FROST-Ed25519) | R3 | APPROVED | ✓ | First live Aptos testnet MPC tx via `RawTransaction`; L-016 |
+| 43 | TRON Shasta live MPC (GG20) | R3 | APPROVED | ✓ | TRON Shasta tx `632a52ef4129f52e03d950cd7552202a964c126d6a251ccb6b0a6467f04b9ce2` from `TGbSVxCm4yConwQyQQifV5We2Zmany8SFS`; L-017 |
+
+**Sprint 38–43 result:** 941 tests pass, fmt + clippy clean.
+**Security:** No new findings. All 68 prior findings remain RESOLVED.
+
+### Sprint 43 highlights (TRON Shasta)
+- Hand-rolled Protobuf encoder for TRON `Transaction.raw` (`TransferContract`).
+- Reference vector via tronweb (`scripts/tron-ref-vector.mjs`) — byte-equal match.
+- `TronRpcClient` with `get_now_block`, `get_balance`, `broadcast` (full tronweb-shape body).
+- `send.rs` Tron arm: balance preflight, `fetch_presign_extras`, signature recovery
+  verification, explorer URL.
+- L-017 retro: TRON broadcast body shape + TonGrid swagger reflection trap +
+  `fee_limit` omission for transfers + `v = 27 + parity` recovery byte.

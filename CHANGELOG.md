@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-10 (Sprint 38–43: Live testnet MPC broadcasts on 6 chains)
+
+### Added
+
+- **Sprint 38** — First live Sepolia MPC broadcast (GG20 ECDSA over real Ethereum testnet)
+- **Sprint 39** — First live Solana devnet MPC broadcast (FROST-Ed25519, real signed transaction)
+- **Sprint 40** — First live Bitcoin testnet broadcast (P2WPKH + GG20 ECDSA)
+- **Sprint 41** — First live Sui testnet broadcast (FROST-Ed25519, real `TransactionData::V1`)
+- **Sprint 42** — First live Aptos testnet broadcast (FROST-Ed25519, real `RawTransaction`)
+- **Sprint 43** — First live TRON Shasta MPC broadcast (GG20 ECDSA, hand-rolled protobuf `Transaction.raw`)
+- TRON: hand-rolled Protobuf encoder for `Transaction.raw` (`TransferContract`), validated
+  byte-equal against tronweb reference vector (`scripts/tron-ref-vector.mjs`)
+- TRON: `TronRpcClient` with `get_now_block`, `get_balance`, and tronweb-shape `broadcast`
+- TRON: `send.rs` Tron arm — balance preflight, `fetch_presign_extras`, sig recovery
+  verification, explorer URL output
+- Persisted funded testnet wallets under `~/.mpc-wallet/testnet/`; CLI `--wallet <name>`
+  to reuse share sets across E2E runs (L-013)
+- New retro lessons L-011..L-017 covering live-broadcast quirks per chain
+
+### Fixed
+
+- Aptos: BCS field order in `RawTransaction`, missing `RAW_TRANSACTION_SALT` domain
+  prefix on signing message, minimum gas floor enforcement (L-016)
+- Sui: BCS variant tag for `TransactionData::V1` was missing in hand-rolled encoder (L-015)
+- TRON: omit `fee_limit` for plain `TransferContract`, encode `v` as `27 + parity` (L-017)
+
+### Changed
+
+- Bitcoin live path uses GG20 ECDSA + P2WPKH; FROST-Taproot tweak parked behind
+  feature flag pending BIP-341 even-Y handling at keygen time (L-014)
+- Test count: 970 → 941 (test reorganization across chain integration suites)
+
+### Security
+
+- No new findings. All 68 prior findings remain RESOLVED.
+
 ## [0.4.0] - 2026-05 (Sprint 32–37: Audit prep, HD wallet, SDK)
 
 ### Added
@@ -147,7 +183,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SEC-015: Debug leaks share bytes → manual Debug with `[REDACTED]`
 - SEC-016: Bitcoin unwrap → proper error propagation
 
-[Unreleased]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/itoonx/vaultex-mpc-rust/releases/tag/v0.1.0
