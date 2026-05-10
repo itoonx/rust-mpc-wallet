@@ -62,6 +62,7 @@ retro/
 | [L-016](lessons/L-016_aptos-double-hash-and-authenticator-order.md) | 2026-05-10 | Wire format | High | Aptos: Ed25519 signs raw `prefix ‖ bcs` (not its SHA3-256 digest), authenticator is pubkey-before-sig with length prefixes — **FIXED** |
 | [L-017](lessons/L-017_tron-broadcast-body-shape-and-swagger-reflection.md) | 2026-05-10 | Wire format / API | High | TRON broadcast needs structured `raw_data` JSON alongside `raw_data_hex`; TransferContract omits `fee_limit`; v=27+parity; TronGrid hides errors behind swagger reflection — **FIXED** |
 | [L-018](lessons/L-018_evm-gas-limit-must-be-dynamic.md) | 2026-05-10 | RPC integration | Medium | EVM gas_limit must come from `eth_estimateGas`, not hardcoded EOA default — applies to all per-tx exec caps (Sui/Aptos/TRON/Solana too) — **FIXED** |
+| [L-019](lessons/L-019_aptos-address-short-form-tolerance.md) | 2026-05-10 | Address parsing | Low | Aptos has two address conventions — strict 64-char for derived, short-form (`0xa`, `0x1`) for framework constants; need both parsers applied to the right spots — **FIXED** |
 
 ---
 

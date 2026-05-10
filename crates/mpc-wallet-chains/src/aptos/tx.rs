@@ -66,6 +66,24 @@ fn aptos_signing_prefix() -> Vec<u8> {
     hasher.finalize().to_vec()
 }
 
+/// Parse an Aptos address with **tolerant** short-form support — `0x1`,
+/// `0xa`, `0xbae...` all valid. Aptos's framework constants (e.g. APT-FA
+/// metadata at `@0xa`) are commonly written this way; only canonically-
+/// derived addresses (like our wallet sender) round-trip through the
+/// strict 64-hex-char form. Used for FA metadata + Move type-tag addresses.
+fn parse_aptos_address_padded(s: &str) -> Result<[u8; 32], CoreError> {
+    let hex_part = s.strip_prefix("0x").unwrap_or(s);
+    if hex_part.is_empty() || hex_part.len() > 64 {
+        return Err(CoreError::InvalidInput(format!(
+            "Aptos address `{s}` must be 1..=64 hex chars after 0x"
+        )));
+    }
+    let padded = format!("{:0>64}", hex_part);
+    let bytes = hex::decode(&padded)
+        .map_err(|e| CoreError::InvalidInput(format!("Aptos address `{s}` invalid hex: {e}")))?;
+    Ok(bytes.try_into().unwrap()) // safe: padded to 64 hex = 32 bytes
+}
+
 /// Build an unsigned Aptos transaction using BCS encoding.
 ///
 /// Reads `sender`, `sequence_number`, `max_gas_amount`, `gas_unit_price`,
@@ -156,11 +174,24 @@ pub async fn build_move_transaction(
             )
         }
         crate::token::TokenIdentifier::Aptos {
-            flavor: crate::token::AptosTokenKind::FungibleAsset { .. },
+            flavor: crate::token::AptosTokenKind::FungibleAsset { metadata },
         } => {
-            return Err(CoreError::InvalidInput(
-                "Aptos Fungible Asset transfers ship in Sprint 47 — use aptos-coin for now".into(),
-            ));
+            // FA metadata addresses are commonly short-form (e.g. `0xa` for
+            // canonical APT-as-FA). Sender/recipient still go through the
+            // strict 64-hex-char validator since we always derive those from
+            // a 32-byte pubkey hash; metadata gets the tolerant left-pad.
+            let metadata_bytes = parse_aptos_address_padded(&metadata)?;
+            RawTransaction::new_fungible_asset_transfer(
+                sender_bytes,
+                sequence_number,
+                metadata_bytes,
+                recipient_bytes,
+                amount,
+                max_gas_amount,
+                gas_unit_price,
+                expiration_timestamp_secs,
+                chain_id,
+            )
         }
         other => {
             return Err(CoreError::InvalidInput(format!(
