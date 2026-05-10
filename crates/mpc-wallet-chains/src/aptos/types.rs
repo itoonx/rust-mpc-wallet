@@ -132,6 +132,45 @@ impl EntryFunction {
         }
     }
 
+    /// Build `0x1::primary_fungible_store::transfer<T>(metadata, recipient, amount)`
+    /// for the Aptos Fungible Asset standard (newer than Coin — replaces it
+    /// going forward; native APT and most production tokens have migrated).
+    ///
+    /// `metadata` is the on-chain `Object<Metadata>` address — a 32-byte
+    /// account address that uniquely identifies the FA. Unlike Coin, where
+    /// the token identity lives in the type system (`Coin<USDC>`), FA
+    /// puts it in the **data** (the metadata Object address). The single
+    /// `ty_arg` is always `0x1::fungible_asset::Metadata` — the canonical
+    /// type of the metadata Object that `T: key` resolves to.
+    pub fn primary_fungible_store_transfer(
+        metadata: AccountAddress,
+        recipient: AccountAddress,
+        amount: u64,
+    ) -> Self {
+        let mut module_address = [0u8; 32];
+        module_address[31] = 0x01;
+        let mut metadata_type_addr = [0u8; 32];
+        metadata_type_addr[31] = 0x01;
+        Self {
+            module: ModuleId {
+                address: module_address,
+                name: "primary_fungible_store".to_string(),
+            },
+            function: "transfer".to_string(),
+            ty_args: vec![TypeTag::Struct(Box::new(StructTag {
+                address: metadata_type_addr,
+                module: "fungible_asset".to_string(),
+                name: "Metadata".to_string(),
+                type_args: vec![],
+            }))],
+            args: vec![
+                bcs::to_bytes(&metadata).expect("BCS encode metadata is infallible"),
+                bcs::to_bytes(&recipient).expect("BCS encode recipient is infallible"),
+                bcs::to_bytes(&amount).expect("BCS encode amount is infallible"),
+            ],
+        }
+    }
+
     /// Build `0x1::coin::transfer<T>(recipient, amount)` for an arbitrary
     /// `T = StructTag`. `T` must satisfy the `Coin<T>` newtype requirement
     /// — for native APT, `T = 0x1::aptos_coin::AptosCoin`. The function
@@ -202,6 +241,35 @@ impl RawTransaction {
             payload: TransactionPayload::EntryFunction(EntryFunction::aptos_account_transfer(
                 recipient, amount,
             )),
+            max_gas_amount,
+            gas_unit_price,
+            expiration_timestamp_secs,
+            chain_id,
+        }
+    }
+
+    /// Build a `RawTransaction` for `0x1::primary_fungible_store::transfer`
+    /// — Aptos Fungible Asset standard (Sprint 47). `metadata` is the FA's
+    /// on-chain Object<Metadata> address; the type arg is always
+    /// `0x1::fungible_asset::Metadata`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_fungible_asset_transfer(
+        sender: AccountAddress,
+        sequence_number: u64,
+        metadata: AccountAddress,
+        recipient: AccountAddress,
+        amount: u64,
+        max_gas_amount: u64,
+        gas_unit_price: u64,
+        expiration_timestamp_secs: u64,
+        chain_id: u8,
+    ) -> Self {
+        Self {
+            sender,
+            sequence_number,
+            payload: TransactionPayload::EntryFunction(
+                EntryFunction::primary_fungible_store_transfer(metadata, recipient, amount),
+            ),
             max_gas_amount,
             gas_unit_price,
             expiration_timestamp_secs,
@@ -280,6 +348,40 @@ mod tests {
             "Coin<T> BCS bytes diverge from @aptos-labs/ts-sdk reference vector"
         );
         assert_eq!(bytes.len(), 211);
+    }
+
+    /// Reference vector captured via `node scripts/aptos-fa-ref-vector.mjs`.
+    /// Same outer fields (sender/recipient/sequence/gas/expiration/chain_id)
+    /// as the Coin tests, but payload is `0x1::primary_fungible_store::
+    /// transfer<0x1::fungible_asset::Metadata>(metadata=0x33×32, recipient,
+    /// amount)`. 265 bytes — 54 longer than Coin because of the longer
+    /// module name + extra metadata arg.
+    const REF_BCS_HEX_FA: &str = "11111111111111111111111111111111111111111111111111111111111111110700000000000000020000000000000000000000000000000000000000000000000000000000000001167072696d6172795f66756e6769626c655f73746f7265087472616e73666572010700000000000000000000000000000000000000000000000000000000000000010e66756e6769626c655f6173736574084d65746164617461000320333333333333333333333333333333333333333333333333333333333333333320222222222222222222222222222222222222222222222222222222222222222208a086010000000000d0070000000000006400000000000000ffe776481700000002";
+
+    #[test]
+    fn bcs_matches_aptos_sdk_fa_reference() {
+        let sender: AccountAddress = [0x11; 32];
+        let recipient: AccountAddress = [0x22; 32];
+        let metadata: AccountAddress = [0x33; 32];
+
+        let tx = RawTransaction::new_fungible_asset_transfer(
+            sender,
+            7,
+            metadata,
+            recipient,
+            100_000,
+            2000,
+            100,
+            99_999_999_999,
+            2,
+        );
+        let bytes = bcs::to_bytes(&tx).expect("BCS encode");
+        let actual = hex::encode(&bytes);
+        assert_eq!(
+            actual, REF_BCS_HEX_FA,
+            "FA BCS bytes diverge from @aptos-labs/ts-sdk reference vector"
+        );
+        assert_eq!(bytes.len(), 265);
     }
 
     #[test]

@@ -156,11 +156,21 @@ pub async fn build_move_transaction(
             )
         }
         crate::token::TokenIdentifier::Aptos {
-            flavor: crate::token::AptosTokenKind::FungibleAsset { .. },
+            flavor: crate::token::AptosTokenKind::FungibleAsset { metadata },
         } => {
-            return Err(CoreError::InvalidInput(
-                "Aptos Fungible Asset transfers ship in Sprint 47 — use aptos-coin for now".into(),
-            ));
+            // Parse the FA metadata Object<Metadata> address (32-byte hex).
+            let metadata_bytes = validate_aptos_address(&metadata)?;
+            RawTransaction::new_fungible_asset_transfer(
+                sender_bytes,
+                sequence_number,
+                metadata_bytes,
+                recipient_bytes,
+                amount,
+                max_gas_amount,
+                gas_unit_price,
+                expiration_timestamp_secs,
+                chain_id,
+            )
         }
         other => {
             return Err(CoreError::InvalidInput(format!(
