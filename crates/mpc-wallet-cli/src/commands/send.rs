@@ -244,7 +244,16 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
     }
 
     // ── 5. Fetch chain-specific pre-sign data ───────────────────────────────
-    let auto_extra = fetch_presign_extras(chain, &rpc_url, &sender, &group_pubkey).await?;
+    let auto_extra = fetch_presign_extras(
+        chain,
+        &rpc_url,
+        &sender,
+        &group_pubkey,
+        token_json.as_ref(),
+        &args.to,
+        &args.value,
+    )
+    .await?;
     let user_extra = match args.extra.as_deref() {
         Some(s) => Some(
             serde_json::from_str::<serde_json::Value>(s)
@@ -596,11 +605,20 @@ fn resolve_default_rpc_url(
 
 /// Fetch chain-specific pre-sign data and return it as JSON to merge into `extra`.
 /// Returns `None` for chains with no auto-fetch logic.
+///
+/// `recipient` and `value_str` are the user-supplied `--to` / `--value`. They're
+/// only consumed by the EVM arm for `eth_estimateGas` against the real
+/// destination (matters for ERC-20 since gas depends on whether the recipient
+/// already has a non-zero token balance — first-touch storage write is ~5x
+/// cheaper than overwriting).
 async fn fetch_presign_extras(
     chain: Chain,
     rpc_url: &str,
     sender: &str,
     group_pubkey: &GroupPublicKey,
+    token_spec: Option<&serde_json::Value>,
+    recipient: &str,
+    value_str: &str,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let evm_chains = [
         Chain::Ethereum,
@@ -613,6 +631,7 @@ async fn fetch_presign_extras(
         Chain::Linea,
     ];
     if evm_chains.contains(&chain) {
+        use mpc_wallet_chains::evm::erc20;
         let rpc = EvmRpcClient::new(rpc_url);
         let chain_id = rpc.get_chain_id().await.map_err(|e| anyhow::anyhow!(e))?;
         let nonce = rpc
@@ -623,15 +642,52 @@ async fn fetch_presign_extras(
             .suggest_eip1559_fees()
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
+
+        // Determine effective tx (to, value, data) per token spec, then
+        // estimate gas. For native tx, defaults to a 21k floor (intrinsic
+        // gas of an EOA→EOA transfer); estimate fails fast if the call
+        // would revert pre-broadcast, surfacing the issue before MPC sign.
+        let (est_to, est_value_hex, est_data_hex, fallback_gas) = match token_spec
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str())
+        {
+            Some("evm") => {
+                let contract = token_spec
+                    .and_then(|v| v.get("contract"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("token.contract missing"))?;
+                let calldata =
+                    erc20::encode_transfer(recipient, value_str).map_err(|e| anyhow::anyhow!(e))?;
+                (
+                    contract.to_string(),
+                    "0x0".to_string(),
+                    format!("0x{}", hex::encode(calldata)),
+                    100_000u64,
+                )
+            }
+            _ => {
+                // Native ETH transfer.
+                let value_hex = value_str_to_hex(value_str)?;
+                (recipient.to_string(), value_hex, String::new(), 21_000u64)
+            }
+        };
+
+        let estimated = rpc
+            .estimate_gas(sender, &est_to, &est_data_hex, &est_value_hex)
+            .await
+            .unwrap_or(fallback_gas);
+        // 25% safety margin — covers gas refund variance + state changes
+        // between estimate and broadcast.
+        let gas_limit = estimated.saturating_mul(125) / 100;
+        let gas_limit = gas_limit.max(fallback_gas);
+
         eprintln!(
-            "✓ chain_id={chain_id} nonce={nonce} max_fee={} gwei priority={} gwei",
-            max_fee / 1_000_000_000,
-            max_priority / 1_000_000_000
+            "✓ chain_id={chain_id} nonce={nonce} fees: max_fee={max_fee} wei priority={max_priority} wei · gas_limit={gas_limit} (estimated {estimated}, +25% margin)",
         );
         return Ok(Some(serde_json::json!({
             "chain_id": chain_id,
             "nonce": nonce,
-            "gas_limit": 21_000u64,
+            "gas_limit": gas_limit,
             "max_fee_per_gas": max_fee as u64,
             "max_priority_fee_per_gas": max_priority as u64,
         })));
@@ -900,6 +956,18 @@ fn redact_key(url: &str) -> String {
         }
     }
     url.to_string()
+}
+
+/// Convert a value string ("0x..." hex or bare decimal) into 0x-prefixed hex.
+fn value_str_to_hex(s: &str) -> anyhow::Result<String> {
+    if s.starts_with("0x") {
+        return Ok(s.to_string());
+    }
+    // Decimal — convert to hex via u128 (fits all reasonable wei values).
+    let v: u128 = s
+        .parse()
+        .map_err(|e| anyhow::anyhow!("value not decimal u128: {e}"))?;
+    Ok(format!("0x{:x}", v))
 }
 
 /// Translate `--token <shorthand>` (or `--token-json <json>`) into the canonical
