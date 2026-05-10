@@ -1113,13 +1113,9 @@ fn explorer_url(chain: Chain, network: &NetworkEnv, tx_hash: &str) -> Option<Str
         (Chain::Solana, _) => "https://explorer.solana.com/tx/{}?cluster=devnet",
         (Chain::Sui, NetworkEnv::Mainnet) => "https://suiscan.xyz/mainnet/tx/",
         (Chain::Sui, _) => "https://suiscan.xyz/testnet/tx/",
-        (Chain::Aptos, NetworkEnv::Mainnet) => {
-            "https://explorer.aptoslabs.com/txn/{}?network=mainnet"
-        }
-        (Chain::Aptos, NetworkEnv::Devnet) => {
-            "https://explorer.aptoslabs.com/txn/{}?network=devnet"
-        }
-        (Chain::Aptos, _) => "https://explorer.aptoslabs.com/txn/{}?network=testnet",
+        (Chain::Aptos, NetworkEnv::Mainnet) => "https://aptoscan.com/transaction/",
+        (Chain::Aptos, NetworkEnv::Devnet) => "https://devnet.aptoscan.com/transaction/",
+        (Chain::Aptos, _) => "https://testnet.aptoscan.com/transaction/",
         (Chain::Movement, _) => "https://explorer.movementnetwork.xyz/txn/{}?network=testnet",
         (Chain::BitcoinMainnet, _) => "https://mempool.space/tx/",
         (Chain::BitcoinTestnet, _) => "https://mempool.space/testnet/tx/",
