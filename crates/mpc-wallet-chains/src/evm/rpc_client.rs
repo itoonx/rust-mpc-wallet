@@ -57,6 +57,18 @@ impl EvmRpcClient {
             .ok_or_else(|| CoreError::Other(format!("rpc {method}: missing result")))
     }
 
+    /// `eth_call({to, data}, "latest")` → returns the raw hex result string.
+    /// Used for read-only calls into smart contracts (e.g. ERC-20 `balanceOf`,
+    /// `decimals`, `symbol`). The data must already be 0x-prefixed hex.
+    pub async fn eth_call(&self, to: &str, data: &str) -> Result<String, CoreError> {
+        let res = self
+            .call("eth_call", json!([{"to": to, "data": data}, "latest"]))
+            .await?;
+        res.as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| CoreError::Other("eth_call: result not a string".into()))
+    }
+
     /// `eth_getBalance(address, "latest")` → balance in wei.
     pub async fn get_balance(&self, address: &str) -> Result<u128, CoreError> {
         let res = self

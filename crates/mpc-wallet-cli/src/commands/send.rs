@@ -94,6 +94,24 @@ pub struct SendArgs {
     /// Password for the encrypted key store (only with --wallet). Prompts if omitted.
     #[arg(long)]
     pub password: Option<String>,
+
+    /// Token to transfer instead of the chain's native token. Shorthand syntax:
+    ///
+    /// - `native` (default) — chain's native gas token
+    /// - `erc20:0x...` — EVM ERC-20 (Sprint 45)
+    /// - `spl:<mint>:<decimals>` / `spl-2022:<mint>:<decimals>` — Solana SPL (Sprint 49)
+    /// - `sui-coin:<type-tag>` — Sui Coin<T> (Sprint 46)
+    /// - `aptos-coin:<type-tag>` / `aptos-fa:<metadata-addr>` — Aptos (Sprints 46/47)
+    /// - `trc20:T...` — TRON TRC-20 (Sprint 48)
+    ///
+    /// Use `--token-json '<full json>'` for the canonical wire form.
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Canonical token spec as JSON (escape hatch when shorthand isn't enough).
+    /// Mutually exclusive with --token. See docs/TOKEN_TRANSFER_DESIGN.md.
+    #[arg(long, conflicts_with = "token")]
+    pub token_json: Option<String>,
 }
 
 pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
@@ -146,15 +164,37 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
     eprintln!("✓ Sender: {}", sender);
 
+    // ── Resolve token spec (shorthand → canonical JSON) ─────────────────────
+    let token_json = parse_token_spec(args.token.as_deref(), args.token_json.as_deref())?;
+    if let Some(ref tj) = token_json {
+        eprintln!("✓ Token spec: {}", tj);
+    }
+
     // ── Pre-flight: chain balance check ────────────────────────────────────
     if is_evm_chain(chain) {
-        let bal = EvmRpcClient::new(&rpc_url)
+        let rpc = EvmRpcClient::new(&rpc_url);
+        // Always print native balance — needed for gas regardless of token transfer.
+        let native_bal = rpc
             .get_balance(&sender)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        eprintln!("✓ On-chain balance of {sender}: {} wei", bal);
-        if bal == 0 {
-            eprintln!("⚠️  Sender has 0 balance — fund this address first or the tx will revert.");
+        eprintln!("✓ On-chain native balance of {sender}: {} wei", native_bal);
+        if native_bal == 0 {
+            eprintln!("⚠️  Sender has 0 native balance — needed for gas; fund first.");
+        }
+        // For ERC-20 transfers, also check the token balance.
+        if let Some(serde_json::Value::Object(t)) = &token_json {
+            if t.get("kind").and_then(|v| v.as_str()) == Some("evm") {
+                if let Some(contract) = t.get("contract").and_then(|v| v.as_str()) {
+                    let token_bal = erc20_balance_of(&rpc, contract, &sender).await?;
+                    eprintln!("✓ Token balance of {sender} on {contract}: {token_bal}");
+                    if token_bal == "0" {
+                        eprintln!(
+                            "⚠️  Sender has 0 token balance — fund the token before transferring."
+                        );
+                    }
+                }
+            }
         }
     } else if chain == Chain::Solana {
         let bal = SolanaRpcClient::new(&rpc_url)
@@ -216,6 +256,18 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
     if let Some(gl) = args.gas_limit {
         if let Some(serde_json::Value::Object(ref mut o)) = extra {
             o.insert("gas_limit".into(), serde_json::json!(gl));
+        }
+    }
+    // Inject the token spec into extras (where each chain provider reads it).
+    if let Some(token_value) = token_json.clone() {
+        match extra {
+            Some(serde_json::Value::Object(ref mut o)) => {
+                o.insert("token".into(), token_value);
+            }
+            None => {
+                extra = Some(serde_json::json!({ "token": token_value }));
+            }
+            Some(_) => {} // shouldn't happen — extras are always objects
         }
     }
     let extra = extra; // freeze
@@ -848,6 +900,90 @@ fn redact_key(url: &str) -> String {
         }
     }
     url.to_string()
+}
+
+/// Translate `--token <shorthand>` (or `--token-json <json>`) into the canonical
+/// JSON `TokenIdentifier` shape that chain providers parse. Returns `None` for
+/// the implicit native case (no flag set, or shorthand "native").
+fn parse_token_spec(
+    shorthand: Option<&str>,
+    json: Option<&str>,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    if let Some(j) = json {
+        let v: serde_json::Value =
+            serde_json::from_str(j).map_err(|e| anyhow::anyhow!("invalid --token-json: {e}"))?;
+        return Ok(Some(v));
+    }
+    let Some(s) = shorthand else {
+        return Ok(None);
+    };
+    if s == "native" {
+        return Ok(None);
+    }
+    let (prefix, rest) = s.split_once(':').ok_or_else(|| {
+        anyhow::anyhow!("--token shorthand must be 'native' or '<kind>:<args>', got '{s}'")
+    })?;
+    let v = match prefix {
+        "erc20" => serde_json::json!({
+            "kind": "evm", "contract": rest, "standard": "erc20",
+        }),
+        "erc721" | "erc1155" => {
+            return Err(anyhow::anyhow!(
+                "--token {prefix}: NFT support deferred; see docs/TOKEN_TRANSFER_DESIGN.md §7"
+            ));
+        }
+        "spl" | "spl-2022" => {
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() != 2 {
+                return Err(anyhow::anyhow!(
+                    "--token spl shorthand: '{prefix}:<mint>:<decimals>'"
+                ));
+            }
+            let decimals: u8 = parts[1]
+                .parse()
+                .map_err(|e| anyhow::anyhow!("--token spl decimals must be u8: {e}"))?;
+            let program = if prefix == "spl-2022" {
+                "token2022"
+            } else {
+                "spl_token"
+            };
+            serde_json::json!({
+                "kind": "spl", "mint": parts[0], "program": program, "decimals": decimals,
+            })
+        }
+        "sui-coin" => serde_json::json!({ "kind": "sui", "type_tag": rest }),
+        "aptos-coin" => serde_json::json!({
+            "kind": "aptos", "flavor": { "type": "coin", "type_tag": rest },
+        }),
+        "aptos-fa" => serde_json::json!({
+            "kind": "aptos", "flavor": { "type": "fungible_asset", "metadata": rest },
+        }),
+        "trc20" => serde_json::json!({ "kind": "tron", "contract": rest }),
+        other => {
+            return Err(anyhow::anyhow!(
+                "--token: unknown shorthand prefix '{other}'"
+            ))
+        }
+    };
+    Ok(Some(v))
+}
+
+/// Query an ERC-20 contract's `balanceOf(holder)` via `eth_call`. Returns the
+/// balance as a decimal string (uint256 — could exceed u64).
+async fn erc20_balance_of(
+    rpc: &EvmRpcClient,
+    contract: &str,
+    holder: &str,
+) -> anyhow::Result<String> {
+    use mpc_wallet_chains::evm::erc20;
+    let calldata = erc20::encode_balance_of(holder).map_err(|e| anyhow::anyhow!(e))?;
+    let result_hex = rpc
+        .eth_call(contract, &format!("0x{}", hex::encode(calldata)))
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let bytes = hex::decode(result_hex.trim_start_matches("0x"))
+        .map_err(|e| anyhow::anyhow!("balanceOf returned non-hex: {e}"))?;
+    erc20::decode_uint256_decimal(&bytes).map_err(|e| anyhow::anyhow!(e))
 }
 
 fn explorer_url(chain: Chain, network: &NetworkEnv, tx_hash: &str) -> Option<String> {
