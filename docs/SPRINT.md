@@ -1,10 +1,13 @@
 # Sprint Log
 
-> **Current state (as of 2026-05-10):** Sprint 45 COMPLETE — merged to `main`.
-> 951 tests, 7 production threshold protocols, 68/68 security findings resolved,
+> **Current state (as of 2026-05-10):** Sprint 46 COMPLETE — merged to `main`.
+> 956 tests, 7 production threshold protocols, 68/68 security findings resolved,
 > 6 chains with live testnet MPC broadcast coverage (Sepolia, Solana devnet,
-> Bitcoin testnet, Sui testnet, Aptos testnet, TRON Shasta), plus first
-> cross-chain token transfer support (EVM ERC-20, live USDC-Sepolia broadcast).
+> Bitcoin testnet, Sui testnet, Aptos testnet, TRON Shasta), plus cross-chain
+> token transfer support: EVM ERC-20 (live USDC-Sepolia), Aptos legacy
+> `0x1::coin::transfer<T>` (live `<AptosCoin>` testnet broadcast), and Sui
+> `Coin<T>` PTB (code-complete, byte-equal to `@mysten/sui`; live deferred
+> until non-SUI testnet token funded).
 > See `docs/ROADMAP.md` for the live roadmap and next-phase candidates.
 >
 > The content below is the **historical archive** of Sprint 1–N task specs and gate status
@@ -1704,7 +1707,28 @@ Cross-chain token transfer foundation: schema design + first live ERC-20 broadca
 | Chain | Status | Sprint |
 |-------|--------|--------|
 | EVM ERC-20 | LIVE (USDC-Sepolia) | 45 |
-| Sui Coin objects | PLANNED | 46 |
-| Aptos coin/FA | PLANNED | 47 |
+| Sui `Coin<T>` (PTB SplitCoins+TransferObjects) | CODE-COMPLETE (296-byte BCS matches `@mysten/sui`; live pending non-SUI testnet token) | 46 |
+| Aptos legacy `0x1::coin::transfer<T>` | LIVE (testnet `0x72c2e3b5…`, `<AptosCoin>` path) | 46 |
+| Aptos Fungible Asset (`primary_fungible_store`) | PLANNED | 47 |
 | TRON TRC-20 | PLANNED | 48 |
 | Solana SPL | PLANNED | 49 |
+
+---
+
+## Sprint 46 Gate Status (2026-05-10 — ALL MERGED)
+
+Second token-transfer sprint: Sui `Coin<T>` + Aptos legacy `0x1::coin::transfer<T>`.
+
+| Sprint | Theme | Owner | R6 Verdict | Merged | Result |
+|--------|-------|-------|------------|--------|--------|
+| 46 | Sui `Coin<T>` PTB transfer | R3d | APPROVED | ✓ | `ProgrammableTransaction::transfer_coin` (Object input as `SplitCoins` source instead of GasCoin); wire format omits T (validator infers from on-chain object type); `SuiRpcClient::get_owned_coins` now takes `coin_type` filter; 296-byte BCS byte-equal to `@mysten/sui`. Live deferred (non-SUI testnet token funding pending). |
+| 46 | Aptos legacy `0x1::coin::transfer<T>` | R3 | APPROVED | ✓ | `EntryFunction::coin_transfer` + `RawTransaction::new_coin_transfer` + `StructTag::parse` helper; 211-byte BCS byte-equal to `@aptos-labs/ts-sdk`; live testnet tx `0x72c2e3b599d55a0df9d15d55e7b77022f2163e9120acc3ca9d60c8c7adbe7892` (`<AptosCoin>` native APT path). |
+
+**Sprint 46 result:** 956 tests pass (was 951; +5 — 1 Sui Coin ref vector + 1 Aptos Coin ref vector + 3 `StructTag::parse` tests), fmt + clippy clean.
+**Security:** No new findings. All 68 prior findings remain RESOLVED.
+**Lessons:** None new — both work landed first try, leveraging L-015 (Sui hand-rolled BCS shape), L-016 (Aptos auth/signing-message order), and L-018 (dynamic gas/fee).
+
+### Sprint 46 highlights
+- Sui PTB shape: source coin is now an `Input::Object` (object_ref) into `SplitCoins`, not the implicit `GasCoin`; transferred amount is a `pure u64` input; recipient is a `pure address` input. Type parameter `T` is **not** in the wire format.
+- Aptos `EntryFunction` path uses `module_id = 0x1::coin`, `function = transfer`, generic args = `[StructTag(T)]`, args = BCS(`recipient`, `amount`). `StructTag::parse("0x1::aptos_coin::AptosCoin")` constructs the type tag from the canonical string form.
+- CLI shorthand `--token sui-coin:0x...::module::Type` and `--token aptos-coin:0x...::module::Type` flow unchanged through the `TokenIdentifier` schema introduced in Sprint 44.
