@@ -95,7 +95,7 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 37 — Audit prep + HD wallet + SDK shipped)
+## Current State (as of Sprint 43 — Live testnet broadcasts on 6 chains)
 
 ### Auth System (3 methods, Redis-ready)
 
@@ -197,7 +197,7 @@ Gateway (creates proof)    →    MPC Node (verifies before sign)
 
 ### Tests on `main`
 ```
-970 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
+941 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
 cargo fmt        clean
 cargo clippy     clean (0 warnings, -D warnings)
 cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
@@ -235,8 +235,30 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 - **Sprint 35:** COMPLETE — Audit preparation (threat model refresh, security regression suite, CVE-2025-66016 verification, SBOM, audit scope doc)
 - **Sprint 36:** COMPLETE — BIP32 HD wallet derivation for secp256k1 MPC protocols (GG20 + CGGMP21)
 - **Sprint 37:** COMPLETE — OpenAPI spec export (utoipa), SDK quickstart guide, error code catalog
+- **Sprint 38:** COMPLETE — First live Sepolia MPC broadcast (GG20 ECDSA over real Ethereum testnet); L-011, L-012, L-013
+- **Sprint 39:** COMPLETE — First live Solana devnet MPC broadcast (FROST-Ed25519, real signed transaction)
+- **Sprint 40:** COMPLETE — First live Bitcoin testnet broadcast (P2WPKH + GG20 ECDSA); L-014 (FROST-TR Taproot tweak parked)
+- **Sprint 41:** COMPLETE — First live Sui testnet broadcast (FROST-Ed25519, real `TransactionData::V1`); L-015 (Sui hand-rolled BCS shape)
+- **Sprint 42:** COMPLETE — First live Aptos testnet broadcast (FROST-Ed25519, real `RawTransaction`); L-016 (auth order + signing message + min gas)
+- **Sprint 43:** COMPLETE — First live TRON Shasta MPC broadcast (GG20 ECDSA, hand-rolled protobuf `Transaction.raw`); L-017
 
-**M1-M4: DONE | All protocols production threshold signing | All 68 security findings RESOLVED | 970 tests | GG20 + CGGMP21 + FROST + Stark ECDSA + HD derivation**
+**M1-M4: DONE | All protocols production threshold signing | All 68 security findings RESOLVED | 941 tests | GG20 + CGGMP21 + FROST + Stark ECDSA + HD derivation**
+
+### Live Testnet Broadcast Coverage (Sprint 38–43)
+
+Six chains have completed end-to-end live MPC sends from real key shares to real testnet RPCs:
+
+| Chain | Network | Protocol | Sprint |
+|-------|---------|----------|--------|
+| Ethereum | Sepolia | GG20 ECDSA | 38 |
+| Solana | Devnet | FROST-Ed25519 | 39 |
+| Bitcoin | Testnet (P2WPKH) | GG20 ECDSA | 40 |
+| Sui | Testnet | FROST-Ed25519 | 41 |
+| Aptos | Testnet | FROST-Ed25519 | 42 |
+| TRON | Shasta | GG20 ECDSA | 43 |
+
+Sprint 43 reference TRON tx: `632a52ef4129f52e03d950cd7552202a964c126d6a251ccb6b0a6467f04b9ce2`
+from `TGbSVxCm4yConwQyQQifV5We2Zmany8SFS`.
 
 ### New in Sprint 29
 - CVE-2022-47931 (TSSHOCK alpha-shuffle) FIX: `hash_update_lp()` length-prefixed encoding in all Fiat-Shamir hashes

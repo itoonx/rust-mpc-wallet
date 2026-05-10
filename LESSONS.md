@@ -799,3 +799,134 @@ Sprint 29 deep audit confirmed: SEC-055 has ped_lhs != ped_rhs check at line 897
 **Root Cause:** The CGGMP21 architecture cleanly separates Paillier-domain operations (MtA, range proofs) from curve-domain operations (point commitments, Schnorr proofs). This separation made it possible to add a new curve in ~1900 lines without touching the ~2000 lines of Paillier infrastructure.
 
 **Lesson:** When adding new curves to a threshold ECDSA implementation, focus effort on the EC-binding proofs (PiLogStar, PiAffg, Schnorr) and Shamir/Lagrange over the new field. The Paillier layer is reusable as-is.
+
+---
+
+## L-011: Live Sepolia MPC — JSON-RPC quirks vs simulated providers (Sprint 38)
+
+**Date:** 2026-04-29
+**Category:** Bug
+**Severity:** MEDIUM
+
+**What happened:**
+First live Sepolia MPC broadcast failed in subtle ways that simulated EVM tests never caught: chain-id encoding edge cases, `eth_estimateGas` returning under the floor, and signed-tx serialization needing strict EIP-1559 ordering.
+
+**Fix / Resolution:**
+Added a real Sepolia preflight (balance + gas + nonce) and validated against a live RPC. Locked EIP-1559 field ordering in tx encoder; added a min-gas floor.
+
+**Takeaway:**
+> Simulated EVM providers are good for unit tests but cannot substitute for one real testnet broadcast.
+> Every chain integration must end with a "live tx" gate before being declared done.
+
+---
+
+## L-012: GG20 recovery_id parity must match low-S normalization (Sprint 38)
+
+**Date:** 2026-04-29
+**Category:** Crypto
+**Severity:** MEDIUM
+
+**What happened:**
+EVM verification accepted our signature locally but Sepolia rejected it as `from = 0x0…` — the recovered sender address didn't match. Root cause: when low-S normalization flips `s -> n - s`, the `v` parity bit must also flip.
+
+**Fix / Resolution:**
+Already covered by SEC-012 fix in EVM tx builder (`recovery_id ^= 1` when normalizing). Added regression test covering high-S → low-S → recovered address equality on a live Sepolia signature.
+
+**Takeaway:**
+> Whenever you canonicalize an ECDSA signature, the recovery byte travels with `s` — flip both or neither.
+> The only test that catches this is "did the network accept it?".
+
+---
+
+## L-013: Funded testnet wallets must be persisted, not re-keygen'd (Sprint 38)
+
+**Date:** 2026-04-29
+**Category:** Workflow
+**Severity:** LOW
+
+**What happened:**
+Each fresh keygen produces a new MPC group with a new address — meaning the previous testnet faucet drip is stranded. Re-running E2E tests burned faucet credits and left dust everywhere.
+
+**Fix / Resolution:**
+Persist funded testnet groups under `~/.mpc-wallet/testnet/`; CLI gained `--wallet <name>` to reuse an existing share set. E2E tests reuse the persisted wallet, never fresh keygen.
+
+**Takeaway:**
+> Funded test addresses are a precious resource. Treat the share set as long-lived state, not test scaffolding.
+
+---
+
+## L-014: FROST-Taproot tweak parked — use GG20 + P2WPKH for Bitcoin testnet (Sprint 40)
+
+**Date:** 2026-05-02
+**Category:** Architecture
+**Severity:** MEDIUM
+
+**What happened:**
+First plan was FROST-secp256k1 + Taproot (P2TR) for the live Bitcoin testnet send. The BIP-341 even-Y tweak interaction with the FROST group key forced an `x_only` adjustment that didn't survive a clean signer-subset rotation in our prototype.
+
+**Fix / Resolution:**
+Shipped the live Bitcoin send with **GG20 ECDSA + P2WPKH** (segwit v0) instead. FROST-TR Taproot path is parked behind a feature flag with a clear TODO: implement the BIP-341 tweak inside the FROST keygen so the group key already has even-Y before signing.
+
+**Takeaway:**
+> Taproot's even-Y constraint is not a sign-time fix-up — it must be baked into key generation.
+> Don't ship a crypto path you can't prove on paper. Ship the boring one (P2WPKH) and park the elegant one.
+
+---
+
+## L-015: Sui hand-rolled BCS shape was wrong for `TransactionData::V1` (Sprint 41)
+
+**Date:** 2026-05-04
+**Category:** Bug
+**Severity:** MEDIUM
+
+**What happened:**
+Sui testnet rejected our signed transaction with an opaque deserialization error. Sui's `TransactionData` is an enum with `V1` as the first variant — BCS encodes the variant tag as a single byte, then the inner struct. Our hand-rolled encoder was emitting the inner struct directly without the variant tag.
+
+**Fix / Resolution:**
+Compared byte-by-byte against a `sui-sdk` reference vector; added the missing leading variant tag. Wrote a round-trip test that decodes our bytes via `bcs` crate against the Sui type definition.
+
+**Takeaway:**
+> Hand-rolled serializers for enum-tagged formats (BCS, protobuf, BORSH) MUST be validated against
+> a reference encoder of the exact same struct, not just shape-similar ones.
+> "It compiles" tells you nothing about wire compatibility.
+
+---
+
+## L-016: Aptos auth order, signing message prefix, and minimum gas (Sprint 42)
+
+**Date:** 2026-05-06
+**Category:** Bug
+**Severity:** MEDIUM
+
+**What happened:**
+Three independent bugs combined to make the first Aptos broadcast fail:
+1. `RawTransaction` BCS field order was off (sender/sequence/payload/max-gas-amount/gas-unit-price/expiry/chain-id is strict).
+2. Signing message must be prefixed with the `RAW_TRANSACTION_SALT = sha3-256("APTOS::RawTransaction")` domain tag — we were signing the raw BCS.
+3. Aptos enforces a minimum gas amount per transaction; our estimator returned a value below the floor and the node rejected it.
+
+**Fix / Resolution:**
+Pinned the BCS field order to match the Move spec; added the domain-separation salt to the pre-sign hash; clamped gas estimate to `max(estimated, network_min_gas)`.
+
+**Takeaway:**
+> Every chain has its own "small print" trio: field order, domain separation, gas floor.
+> Read the canonical client SDK source — not the docs — for any new chain.
+
+---
+
+## L-017: TRON broadcast body shape + tronweb swagger reflection trap (Sprint 43)
+
+**Date:** 2026-05-10
+**Category:** Bug
+**Severity:** MEDIUM
+
+**What happened:**
+Live TRON Shasta broadcast (`POST /wallet/broadcasttransaction`) returned `Invalid transaction` until the request body matched the exact shape `tronweb` produces. The TonGrid / TronGrid swagger UI suggests a flat `{ "transaction": "<hex>" }` shape — that is reflection-only and the node actually wants a `tronweb`-shaped JSON object with `txID`, `raw_data` (object), `raw_data_hex`, `signature`, and `visible` fields. Two more side bugs:
+- `fee_limit` must be **omitted** for plain TRX `TransferContract` (it's only meaningful for `TriggerSmartContract`); including a `0` value caused rejection.
+- ECDSA `v` byte must be `27 + parity` (Ethereum-style), not the bare 0/1 recovery_id, for TRON to accept the signature.
+
+**Fix / Resolution:**
+Hand-rolled the protobuf encoder for `Transaction.raw` (TransferContract) and validated byte-equal against a tronweb reference vector (`scripts/tron-ref-vector.mjs`). `TronRpcClient::broadcast` now sends the full tronweb-shape body. Live tx confirmed: `632a52ef4129f52e03d950cd7552202a964c126d6a251ccb6b0a6467f04b9ce2` from `TGbSVxCm4yConwQyQQifV5We2Zmany8SFS`.
+
+**Takeaway:**
+> The swagger UI of any chain's public node is a lie until proven otherwise — capture a real client request and diff against it.
+> For TRON specifically: omit `fee_limit` for transfers, encode `v` as `27 + parity`, and send the full tronweb body shape, not the swagger-suggested flat hex.
