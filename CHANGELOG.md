@@ -7,6 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-05-10 (Sprint 49: Solana SPL Token — TOKEN SUITE COMPLETE)
+
+This release closes out the Sprint 44–49 cross-chain token transfer series.
+With Solana SPL Token live on devnet, **all 6 in-scope chains now have
+production-grade token transfer support** under a single `TokenIdentifier`
+enum and zero changes to the `ChainProvider` trait.
+
+### Added
+
+- **Solana SPL Token transfer** — first MPC SPL Token broadcast (live devnet
+  USDC self-transfer signed by FROST-Ed25519 2-of-3).
+- `crates/mpc-wallet-chains/src/solana/instruction.rs` (~150 LOC) — generic
+  `Instruction` + `AccountMeta` + `build_message`. Implements the canonical
+  4-bucket account ordering (writable+signer / readonly+signer /
+  writable+nonsigner / readonly+nonsigner) and program-id-before-accounts
+  traversal that matches `@solana/web3.js` `CompiledKeys`. Supports both
+  legacy and v0 messages (with Address Lookup Table inputs).
+- `crates/mpc-wallet-chains/src/solana/ata.rs` (~155 LOC) — pure-Rust ATA
+  derivation: `find_program_address` (PDA via SHA-256 + on-curve check using
+  `ed25519-dalek`) and `derive_ata`. Constants `TOKEN_PROGRAM_ID`,
+  `TOKEN_2022_PROGRAM_ID`, `ASSOCIATED_TOKEN_PROGRAM_ID` are base58-verified
+  by tests. No `solana-sdk` dependency added.
+- `crates/mpc-wallet-chains/src/solana/spl.rs` (~110 LOC) —
+  `create_ata_idempotent` (Associated Token Program discriminator 1) and
+  `transfer_checked` (SPL Token discriminator 12 with amount LE u64 +
+  decimals u8).
+- `system_transfer_instruction` helper — native SOL now uses the same
+  generic instruction model as SPL.
+- Reference-vector test `chain_solana_integration::spl_message_matches_spl_token_sdk_reference`:
+  320-byte legacy message byte-equal to `@solana/spl-token`
+  `compileToLegacyMessage`. Locks account ordering, `TransferChecked`
+  discriminator, amount/decimals encoding.
+- Live Solana devnet tx
+  `4556JgY7Z6Cc1ucQckBHqAXfSWpgiksA1KT96tB4ZcdKMHsjRL3LDYu9YgiFaRZj2cawLpAiDsXn8FLrHweSfHRw`
+  (devnet USDC, 0.1 to self).
+
+### Changed
+
+- **`solana/tx.rs` refactor:** deleted ~120 LOC of hardcoded
+  `build_message_bytes` and `build_message_bytes_v0`. Native SOL, native v0,
+  and SPL build flows now share one instruction-based code path.
+- SPL build flow always emits `[CreateATAIdempotent, TransferChecked]` so
+  the missing-recipient-ATA case auto-resolves at the cost of ~0.002 SOL
+  rent — matching Phantom / `@solana/spl-token` first-tx UX defaults.
+- Test count: **958 → 967** (`+9` — 5 ATA tests, 1 instruction roundtrip,
+  2 SPL build/decode, 1 SPL `@solana/spl-token` reference vector).
+- Token Transfer Coverage: Solana SPL promoted from `PLANNED` to `LIVE`.
+
+### Token Suite Milestone (Sprints 44–49)
+
+Single `TokenIdentifier` enum, zero changes to `ChainProvider`,
+~1700 LOC across 5 sprints. Schema validated on all 6 in-scope chains:
+
+| Chain  | Standard            | Sprint | Status                          |
+|--------|---------------------|--------|---------------------------------|
+| EVM    | ERC-20              | 45     | LIVE (USDC-Sepolia)             |
+| Sui    | `Coin<T>`           | 46     | code-complete (live deferred)   |
+| Aptos  | `coin::transfer<T>` | 46     | LIVE (`<AptosCoin>` testnet)    |
+| Aptos  | Fungible Asset      | 47     | LIVE (native APT via FA)        |
+| TRON   | TRC-20              | 48     | LIVE (Shasta USDT)              |
+| Solana | SPL Token           | 49     | LIVE (devnet USDC, FROST 2-of-3)|
+
+Bitcoin out of scope; NFTs deferred (schema reserves room).
+
+### Notes
+
+- No new retro lessons — the refactor consolidated three previously separate
+  Solana code paths (legacy native, v0 native, SPL) behind one generic
+  instruction model with no regressions.
+
 ## [0.9.0] - 2026-05-10 (Sprint 48: TRON TRC-20 token transfer)
 
 ### Added

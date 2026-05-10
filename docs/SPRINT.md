@@ -1,13 +1,14 @@
 # Sprint Log
 
-> **Current state (as of 2026-05-10):** Sprint 48 COMPLETE — merged to `main`. 958 tests passing.
-> 956 tests, 7 production threshold protocols, 68/68 security findings resolved,
+> **Current state (as of 2026-05-10):** Sprint 49 COMPLETE — merged to `dev` and `main`. 967 tests passing.
+> 7 production threshold protocols, 68/68 security findings resolved,
 > 6 chains with live testnet MPC broadcast coverage (Sepolia, Solana devnet,
-> Bitcoin testnet, Sui testnet, Aptos testnet, TRON Shasta), plus cross-chain
-> token transfer support: EVM ERC-20 (live USDC-Sepolia), Aptos legacy
-> `0x1::coin::transfer<T>` (live `<AptosCoin>` testnet broadcast), and Sui
-> `Coin<T>` PTB (code-complete, byte-equal to `@mysten/sui`; live deferred
-> until non-SUI testnet token funded).
+> Bitcoin testnet, Sui testnet, Aptos testnet, TRON Shasta).
+> **TOKEN SUITE COMPLETE** across all in-scope chains: EVM ERC-20 (live USDC-Sepolia),
+> Aptos legacy `0x1::coin::transfer<T>` (live `<AptosCoin>`), Aptos Fungible Asset
+> (live native APT via FA), TRON TRC-20 (live Shasta USDT), Solana SPL Token
+> (live devnet USDC via FROST-Ed25519 2-of-3), and Sui `Coin<T>` PTB (code-complete,
+> byte-equal to `@mysten/sui`; live deferred until non-SUI testnet token funded).
 > See `docs/ROADMAP.md` for the live roadmap and next-phase candidates.
 >
 > The content below is the **historical archive** of Sprint 1–N task specs and gate status
@@ -1771,3 +1772,46 @@ TRON TRC-20 token transfer — `TriggerSmartContract` (ContractType=31) + ABI ca
 - TRC-20 vs native TRON: TVM contract calls **require** `fee_limit` in the raw protobuf (default 100 TRX = 100_000_000 sun); native transfers must **omit** it (per L-017). CLI dispatches by contract type to pick the right path.
 - Calldata layout: 68 bytes total — selector `0xa9059cbb` (4) + recipient (32, padded hash160 with `0x41` TRON prefix dropped) + amount (32, big-endian).
 - Live Shasta tx `0x54a73460ea78e5558ce78471e72600c68cc88a428dd76f2a47aa7a5e527fc296`: 0.0001 USDT (community testnet `TG3XXyExBkPp9nzdajDZsozEu4BkaSJozs`) self-transfer with GG20 ECDSA signature, byte-equal to tronweb reference (211 bytes).
+
+---
+
+## Sprint 49 Gate Status (2026-05-10 — ALL MERGED) — TOKEN SUITE COMPLETE
+
+Solana SPL Token transfer + generic instruction refactor — final entry of the Sprint 44–49 token-transfer series.
+
+| Sprint | Theme | Owner | R6 Verdict | Merged | Result |
+|--------|-------|-------|------------|--------|--------|
+| 49 | Solana SPL Token + generic `Instruction` refactor | R3+R4 | APPROVED | ✓ | New `solana/instruction.rs` (~150 LOC): generic `Instruction` + `AccountMeta` + `build_message` (4-bucket account ordering: writable+signer / readonly+signer / writable+nonsigner / readonly+nonsigner; program-id-before-accounts traversal matching `@solana/web3.js` `CompiledKeys`; v0/legacy versioning + ALT). New `solana/ata.rs` (~155 LOC): `find_program_address` (PDA via SHA-256 + on-curve check via `ed25519-dalek`), `derive_ata`, `TOKEN_PROGRAM_ID` / `TOKEN_2022_PROGRAM_ID` / `ASSOCIATED_TOKEN_PROGRAM_ID` constants base58-verified by tests. New `solana/spl.rs` (~110 LOC): `create_ata_idempotent` (discriminator 1) + `transfer_checked` (discriminator 12, amount LE u64 + decimals u8). `solana/tx.rs` refactored: deleted ~120 LOC of hardcoded `build_message_bytes`/`build_message_bytes_v0`; native SOL routes through the same instruction-based path as SPL via `system_transfer_instruction`. SPL build flow always emits `[CreateATAIdempotent, TransferChecked]` so missing-recipient-ATA case auto-resolves (~0.002 SOL rent). 320-byte SPL message byte-equal to `@solana/spl-token` `compileToLegacyMessage` reference, pinned in `chain_solana_integration::spl_message_matches_spl_token_sdk_reference`. Live Solana devnet tx `4556JgY7Z6Cc1ucQckBHqAXfSWpgiksA1KT96tB4ZcdKMHsjRL3LDYu9YgiFaRZj2cawLpAiDsXn8FLrHweSfHRw` (devnet USDC, 0.1 to self via FROST-Ed25519 2-of-3). |
+
+**Sprint 49 result:** 967 tests pass (was 958; +9 — 5 ATA tests + 1 instruction roundtrip + 2 SPL build/decode + 1 SPL `@solana/spl-token` reference vector), fmt + clippy clean.
+**Security:** No new findings. All 68 prior findings remain RESOLVED.
+**Lessons:** None — refactor consolidated three previously separate code paths (legacy native, v0 native, SPL) behind one generic instruction model without regressions.
+
+### Sprint 49 highlights
+- Generic `Instruction` + `AccountMeta` model retires hand-rolled message builders. Native SOL and SPL now share one code path; ALT/v0 support is a flag on the same builder.
+- ATA derivation lives in pure Rust: SHA-256-based `find_program_address` with on-curve check (via `ed25519-dalek` decompression). No `solana-sdk` dependency added.
+- SPL build always prepends `CreateATAIdempotent` (discriminator 1) so unknown-recipient-ATA case is self-healing — first-tx UX matches Phantom / `@solana/spl-token` defaults at the cost of ~0.002 SOL rent.
+- Reference vector `spl_message_matches_spl_token_sdk_reference`: 320-byte legacy message byte-equal to `@solana/spl-token` `compileToLegacyMessage`, locking the account ordering + `TransferChecked` discriminator/amount/decimals layout.
+- Live devnet tx `4556JgY7…`: 0.1 devnet USDC self-transfer signed by FROST-Ed25519 2-of-3 — the first MPC SPL Token broadcast.
+
+---
+
+## Token Suite Retrospective (Sprints 44–49)
+
+Five sprints of work (44 = design, 45–49 = per-chain implementation) shipped a single
+unified cross-chain token transfer model. **Single `TokenIdentifier` enum at the chain-crate
+level; zero changes to the `ChainProvider` trait; ~1700 LOC across the 6 in-scope chains.**
+Bitcoin out of scope; NFTs deferred (schema reserves room).
+
+| Chain  | Standard                                            | Sprint | Status                                                                  |
+|--------|-----------------------------------------------------|--------|-------------------------------------------------------------------------|
+| EVM    | ERC-20                                              | 45     | LIVE (USDC-Sepolia `0x23ab51bd…`)                                       |
+| Sui    | `Coin<T>` (PTB SplitCoins+TransferObjects)          | 46     | code-complete, BCS byte-equal to `@mysten/sui` (live deferred)          |
+| Aptos  | legacy `0x1::coin::transfer<T>`                     | 46     | LIVE (testnet `0x72c2e3b5…`, `<AptosCoin>`)                             |
+| Aptos  | Fungible Asset (`0x1::primary_fungible_store::transfer`) | 47 | LIVE (testnet `0xb3a41e33…`, native APT via FA at metadata `0xa`)       |
+| TRON   | TRC-20 (`TriggerSmartContract` + `transfer`)        | 48     | LIVE (Shasta `0x54a73460…`, USDT, fee_limit 100 TRX)                    |
+| Solana | SPL Token (`CreateATAIdempotent` + `TransferChecked`) | 49   | LIVE (devnet `4556JgY7…`, USDC, FROST-Ed25519 2-of-3)                   |
+
+**Schema validated on all 6 in-scope chains.** Cross-chain reference-vector tests
+(EVM ABI, Sui BCS, Aptos BCS legacy + FA, TRON tronweb protobuf, Solana
+`@solana/spl-token`) pin every wire format to the canonical SDK output, byte-for-byte.
