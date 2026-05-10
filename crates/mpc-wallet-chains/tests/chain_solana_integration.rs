@@ -109,7 +109,7 @@ async fn test_solana_message_structure_num_required_sigs() {
         value: "1000".to_string(),
         data: None,
         chain_id: None,
-        extra: Some(serde_json::json!({"from": "11111111111111111111111111111111"})),
+        extra: Some(serde_json::json!({"from": "5m19MH9tCAhxjWeQJNAXxAzY5Je6BWnKT8HeAmGCKbzW"})),
     };
     let unsigned = provider.build_transaction(params).await.unwrap();
     let msg = &unsigned.sign_payload;
@@ -128,8 +128,8 @@ async fn test_solana_message_structure_num_required_sigs() {
 #[tokio::test]
 async fn test_solana_message_structure_account_keys_offset() {
     let provider = mpc_wallet_chains::solana::SolanaProvider::new();
-    // "11111111111111111111111111111111" decodes to [0u8; 32]
-    let from_addr = "11111111111111111111111111111111";
+    // Use a real-looking pubkey to avoid colliding with system program (all-zeros).
+    let from_addr = "5m19MH9tCAhxjWeQJNAXxAzY5Je6BWnKT8HeAmGCKbzW";
     let params = TransactionParams {
         to: "11111111111111111111111111111112".to_string(),
         value: "1000".to_string(),
@@ -159,7 +159,7 @@ async fn test_solana_message_structure_three_accounts_present() {
         value: "1000".to_string(),
         data: None,
         chain_id: None,
-        extra: Some(serde_json::json!({"from": "11111111111111111111111111111111"})),
+        extra: Some(serde_json::json!({"from": "5m19MH9tCAhxjWeQJNAXxAzY5Je6BWnKT8HeAmGCKbzW"})),
     };
     let unsigned = provider.build_transaction(params).await.unwrap();
     let msg = &unsigned.sign_payload;
@@ -227,7 +227,7 @@ async fn test_solana_tx_hash_is_base58_full_signature() {
         value: "1000".to_string(),
         data: None,
         chain_id: None,
-        extra: Some(serde_json::json!({"from": "11111111111111111111111111111111"})),
+        extra: Some(serde_json::json!({"from": "5m19MH9tCAhxjWeQJNAXxAzY5Je6BWnKT8HeAmGCKbzW"})),
     };
     let unsigned = provider.build_transaction(params).await.unwrap();
 
@@ -263,7 +263,7 @@ async fn test_solana_zero_lamports_transaction() {
         value: "0".to_string(),
         data: None,
         chain_id: None,
-        extra: Some(serde_json::json!({"from": "11111111111111111111111111111111"})),
+        extra: Some(serde_json::json!({"from": "5m19MH9tCAhxjWeQJNAXxAzY5Je6BWnKT8HeAmGCKbzW"})),
     };
     // Zero lamports is a valid on-chain value — SDK must not reject it
     let result = provider.build_transaction(params).await;
@@ -373,7 +373,7 @@ async fn test_solana_sec017_no_pubkey_skips_validation() {
         value: "1000".to_string(),
         data: None,
         chain_id: None,
-        extra: Some(serde_json::json!({"from": "11111111111111111111111111111111"})),
+        extra: Some(serde_json::json!({"from": "5m19MH9tCAhxjWeQJNAXxAzY5Je6BWnKT8HeAmGCKbzW"})),
     };
 
     let result = provider.build_transaction(params).await;
@@ -501,4 +501,41 @@ async fn test_solana_simulation_high_value() {
         .unwrap();
     assert!(r.risk_flags.contains(&"high_value".to_string()));
     assert!(r.risk_score >= 50);
+}
+
+// ============================================================================
+// SPL Token transfer reference vector (Sprint 49)
+// ============================================================================
+
+/// Reference vector captured via `node scripts/solana-spl-ref-vector.mjs`.
+/// Inputs: fee_payer=5m19MH..., recipient=BNeRq5..., mint=4zMMC9... (devnet
+/// USDC), amount=100_000, decimals=6, blockhash=all-zeros. Asserts our
+/// instruction-based builder produces byte-identical output to
+/// @solana/spl-token + @solana/web3.js compileToLegacyMessage.
+#[tokio::test]
+async fn spl_message_matches_spl_token_sdk_reference() {
+    let provider = mpc_wallet_chains::solana::SolanaProvider::new();
+    let params = TransactionParams {
+        to: "BNeRq5pyyqnbPQVpWfNmbTKGyaWoUf6mNvGCo15D5VjA".to_string(),
+        value: "100000".to_string(),
+        data: None,
+        chain_id: None,
+        extra: Some(serde_json::json!({
+            "from": "5m19MH9tCAhxjWeQJNAXxAzY5Je6BWnKT8HeAmGCKbzW",
+            "recent_blockhash": "11111111111111111111111111111111",
+            "token": {
+                "kind": "spl",
+                "mint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+                "program": "spl_token",
+                "decimals": 6
+            }
+        })),
+    };
+    let unsigned = provider.build_transaction(params).await.unwrap();
+    let expected_hex = "0100050846b4775101ba65e855e5492ca727f9de28b3450c4d7f201a5c0a7ee36a41792f461d8936936829683f1e451748ee9c5471723b6aba28f1ab822ef8f2b3b90d060f29d1ee2ddbbcdacd2992cdbfb8a37d89eb3d66f3fa8e693b1d84467865cee78c97258f4e2489f1bb3d1029148e0d830b5a1399daff1084048e7bd8dbe9f8599a2062e64b3a7d4f784cdfeb999a82164ba5acc9033cbeb5c09da2edb0e0255d3b442cb3912157f13a933d0134282d032b5ffecd01a2dbf1b7790608df002ea7000000000000000000000000000000000000000000000000000000000000000006ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf5857eff00a9000000000000000000000000000000000000000000000000000000000000000002030600010405060701010704020501000a0ca08601000000000006";
+    assert_eq!(
+        hex::encode(&unsigned.sign_payload),
+        expected_hex,
+        "SPL message bytes diverge from @solana/spl-token reference"
+    );
 }

@@ -2,6 +2,12 @@ use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::MpcSignature;
 
 use crate::provider::{Chain, SignedTransaction, TransactionParams, UnsignedTransaction};
+use crate::solana::ata::{derive_ata, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID};
+use crate::solana::instruction::{
+    build_message, AccountMeta, Instruction, MessageVersion as IxMessageVersion,
+};
+use crate::solana::spl;
+use crate::token::{SplProgram, TokenIdentifier};
 
 /// Solana transaction message version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,148 +32,10 @@ pub struct AddressLookupTable {
     pub readonly_indices: Vec<u8>,
 }
 
-/// Encode a value as Solana compact-u16.
-/// For values < 128 this is a single byte.
-fn encode_compact_u16(val: u16) -> Vec<u8> {
-    if val < 0x80 {
-        vec![val as u8]
-    } else {
-        // Two-byte encoding for 128..=16383
-        let low = (val & 0x7f) as u8 | 0x80;
-        let high = (val >> 7) as u8;
-        vec![low, high]
-    }
-}
-
-/// Build the Solana message bytes for a simple SOL transfer (legacy v0).
-///
-/// Layout:
-///   [1]   num_required_signatures  = 1
-///   [1]   num_readonly_signed      = 0
-///   [1]   num_readonly_unsigned    = 1  (system program)
-///   [cu16] num_account_keys        = 3
-///   [32]  account_key_0  (from / signer)
-///   [32]  account_key_1  (to)
-///   [32]  account_key_2  (system program, all-zeros)
-///   [32]  recent_blockhash
-///   [cu16] num_instructions        = 1
-///     [1]   program_id_index       = 2
-///     [cu16] num_accounts          = 2
-///       [1] account_idx_0          = 0 (from)
-///       [1] account_idx_1          = 1 (to)
-///     [cu16] instruction_data_len  = 12
-///     [4]   instruction_type       = [2,0,0,0]  (SystemInstruction::Transfer)
-///     [8]   lamports               (little-endian u64)
-fn build_message_bytes(
-    from_bytes: &[u8; 32],
-    to_bytes: &[u8; 32],
-    lamports: u64,
-    recent_blockhash: &[u8; 32],
-) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(200);
-
-    // Header
-    msg.push(1u8); // num_required_signatures
-    msg.push(0u8); // num_readonly_signed
-    msg.push(1u8); // num_readonly_unsigned (system program)
-
-    // Account keys: 3 accounts
-    msg.extend_from_slice(&encode_compact_u16(3));
-    msg.extend_from_slice(from_bytes);
-    msg.extend_from_slice(to_bytes);
-    msg.extend_from_slice(&[0u8; 32]); // system program (11111111...1 = all zeros)
-
-    // Recent blockhash
-    msg.extend_from_slice(recent_blockhash);
-
-    // Instructions: 1 instruction
-    msg.extend_from_slice(&encode_compact_u16(1));
-
-    // Instruction: SystemProgram::Transfer
-    msg.push(2u8); // program_id_index = 2 (system program)
-
-    // Account indices: 2 accounts
-    msg.extend_from_slice(&encode_compact_u16(2));
-    msg.push(0u8); // from (index 0)
-    msg.push(1u8); // to (index 1)
-
-    // Instruction data: 12 bytes
-    msg.extend_from_slice(&encode_compact_u16(12));
-    msg.extend_from_slice(&[2u8, 0u8, 0u8, 0u8]); // SystemInstruction::Transfer = 2
-    msg.extend_from_slice(&lamports.to_le_bytes()); // 8 bytes, little-endian
-
-    msg
-}
-
-/// Build v0 versioned message bytes for a SOL transfer with optional ALTs.
-///
-/// v0 format:
-///   [1]     version prefix = 0x80 (bit 7 set = versioned, bits 0-6 = version 0)
-///   [1]     num_required_signatures
-///   [1]     num_readonly_signed
-///   [1]     num_readonly_unsigned
-///   [cu16]  num_account_keys (static accounts only)
-///   [32×N]  account_keys
-///   [32]    recent_blockhash
-///   [cu16]  num_instructions
-///   [...]   instructions (same format as legacy)
-///   [cu16]  num_address_table_lookups
-///   per table:
-///     [32]    table address
-///     [cu16]  num_writable_indices
-///     [u8×N]  writable_indices
-///     [cu16]  num_readonly_indices
-///     [u8×N]  readonly_indices
-fn build_message_bytes_v0(
-    from_bytes: &[u8; 32],
-    to_bytes: &[u8; 32],
-    lamports: u64,
-    recent_blockhash: &[u8; 32],
-    lookup_tables: &[AddressLookupTable],
-) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(256);
-
-    // Version prefix: 0x80 = versioned message, version 0
-    msg.push(0x80);
-
-    // Header (same as legacy for simple SOL transfer)
-    msg.push(1u8); // num_required_signatures
-    msg.push(0u8); // num_readonly_signed
-    msg.push(1u8); // num_readonly_unsigned (system program)
-
-    // Static account keys: 3 accounts (same as legacy)
-    msg.extend_from_slice(&encode_compact_u16(3));
-    msg.extend_from_slice(from_bytes);
-    msg.extend_from_slice(to_bytes);
-    msg.extend_from_slice(&[0u8; 32]); // system program
-
-    // Recent blockhash
-    msg.extend_from_slice(recent_blockhash);
-
-    // Instructions: 1 instruction (same as legacy)
-    msg.extend_from_slice(&encode_compact_u16(1));
-    msg.push(2u8); // program_id_index = 2
-    msg.extend_from_slice(&encode_compact_u16(2));
-    msg.push(0u8); // from
-    msg.push(1u8); // to
-    msg.extend_from_slice(&encode_compact_u16(12));
-    msg.extend_from_slice(&[2u8, 0u8, 0u8, 0u8]); // Transfer
-    msg.extend_from_slice(&lamports.to_le_bytes());
-
-    // Address table lookups
-    msg.extend_from_slice(&encode_compact_u16(lookup_tables.len() as u16));
-    for alt in lookup_tables {
-        msg.extend_from_slice(&alt.address);
-        // Writable indices
-        msg.extend_from_slice(&encode_compact_u16(alt.writable_indices.len() as u16));
-        msg.extend_from_slice(&alt.writable_indices);
-        // Readonly indices
-        msg.extend_from_slice(&encode_compact_u16(alt.readonly_indices.len() as u16));
-        msg.extend_from_slice(&alt.readonly_indices);
-    }
-
-    msg
-}
+// Removed in Sprint 49: hardcoded `build_message_bytes` / `build_message_bytes_v0`
+// encoders. Native SOL transfer now flows through `instruction::build_message`
+// via `system_transfer_instruction` below — keeps account-ordering rules in
+// one place and lets SPL token transfers reuse the same path.
 
 /// Parse address lookup tables from JSON value.
 fn parse_lookup_tables(
@@ -212,6 +80,22 @@ fn parse_lookup_tables(
     }
 
     Ok(tables)
+}
+
+/// Build the system program `Transfer` instruction (lamports between two
+/// accounts). System program ID = all-zeros (32 bytes).
+fn system_transfer_instruction(from: [u8; 32], to: [u8; 32], lamports: u64) -> Instruction {
+    let mut data = Vec::with_capacity(12);
+    data.extend_from_slice(&[2u8, 0, 0, 0]); // SystemInstruction::Transfer = 2 (u32 LE)
+    data.extend_from_slice(&lamports.to_le_bytes());
+    Instruction {
+        program_id: [0u8; 32],
+        accounts: vec![
+            AccountMeta::writable(from, true),
+            AccountMeta::writable(to, false),
+        ],
+        data,
+    }
 }
 
 /// Decode a base58 string into exactly 32 bytes.
@@ -265,28 +149,76 @@ pub async fn build_solana_transaction(
     };
 
     // Determine version
-    let version = params
+    let version_str = params
         .extra
         .as_ref()
         .and_then(|e| e.get("version"))
         .and_then(|v| v.as_str());
-
-    // Build binary message
-    let message_bytes = match version {
-        Some("v0") => {
-            // Parse lookup tables if present
-            let lookup_tables =
-                parse_lookup_tables(params.extra.as_ref().and_then(|e| e.get("lookup_tables")))?;
-            build_message_bytes_v0(
-                &from_bytes,
-                &to_bytes,
-                lamports,
-                &recent_blockhash,
-                &lookup_tables,
-            )
-        }
-        _ => build_message_bytes(&from_bytes, &to_bytes, lamports, &recent_blockhash),
+    let ix_version = match version_str {
+        Some("v0") => IxMessageVersion::V0,
+        _ => IxMessageVersion::Legacy,
     };
+    let lookup_tables = if ix_version == IxMessageVersion::V0 {
+        parse_lookup_tables(params.extra.as_ref().and_then(|e| e.get("lookup_tables")))?
+    } else {
+        Vec::new()
+    };
+
+    // Token-aware instruction list. Native = single SystemProgram::Transfer.
+    // SPL = optional CreateATAIdempotent (recipient ATA) + TransferChecked.
+    let token =
+        TokenIdentifier::from_extra(params.extra.as_ref()).map_err(CoreError::InvalidInput)?;
+    let instructions = match token {
+        TokenIdentifier::Native => {
+            vec![system_transfer_instruction(from_bytes, to_bytes, lamports)]
+        }
+        TokenIdentifier::Spl {
+            mint,
+            program,
+            decimals,
+        } => {
+            let mint_bytes = decode_base58_32(&mint, "mint")?;
+            let token_program = match program {
+                SplProgram::SplToken => TOKEN_PROGRAM_ID,
+                SplProgram::Token2022 => TOKEN_2022_PROGRAM_ID,
+            };
+            let source_ata = derive_ata(&from_bytes, &mint_bytes, &token_program);
+            let dest_ata = derive_ata(&to_bytes, &mint_bytes, &token_program);
+            vec![
+                // Always include create-ATA-idempotent — no-op if recipient
+                // already has an ATA, costs sender ~0.002 SOL rent otherwise.
+                spl::create_ata_idempotent(
+                    from_bytes,
+                    dest_ata,
+                    to_bytes,
+                    mint_bytes,
+                    token_program,
+                ),
+                spl::transfer_checked(
+                    source_ata,
+                    mint_bytes,
+                    dest_ata,
+                    from_bytes,
+                    lamports, // for SPL, `value` is the token amount in smallest unit
+                    decimals,
+                    token_program,
+                ),
+            ]
+        }
+        other => {
+            return Err(CoreError::InvalidInput(format!(
+                "Solana build_transaction got non-Solana token spec: {other:?}"
+            )));
+        }
+    };
+
+    let message_bytes = build_message(
+        from_bytes,
+        &instructions,
+        &recent_blockhash,
+        ix_version,
+        &lookup_tables,
+    );
 
     // tx_data carries the hex-encoded message plus metadata for finalize
     let tx_data_json = serde_json::json!({
