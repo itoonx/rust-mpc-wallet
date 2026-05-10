@@ -121,18 +121,53 @@ pub async fn build_move_transaction(
         .unwrap_or(u64::MAX);
     let chain_id = extra.and_then(|e| e["chain_id"].as_u64()).unwrap_or(1) as u8;
 
-    // 5. Build the canonical RawTransaction wrapping
-    //    0x1::aptos_account::transfer(recipient, amount).
-    let raw_tx = RawTransaction::new_transfer(
-        sender_bytes,
-        sequence_number,
-        recipient_bytes,
-        amount,
-        max_gas_amount,
-        gas_unit_price,
-        expiration_timestamp_secs,
-        chain_id,
-    );
+    // 5. Token-aware RawTransaction build:
+    //    Native APT → 0x1::aptos_account::transfer(recipient, amount).
+    //    Coin<T>    → 0x1::coin::transfer<T>(recipient, amount).
+    //    Fungible Asset comes in Sprint 47.
+    let token = crate::token::TokenIdentifier::from_extra(params.extra.as_ref())
+        .map_err(CoreError::InvalidInput)?;
+    let raw_tx = match token {
+        crate::token::TokenIdentifier::Native => RawTransaction::new_transfer(
+            sender_bytes,
+            sequence_number,
+            recipient_bytes,
+            amount,
+            max_gas_amount,
+            gas_unit_price,
+            expiration_timestamp_secs,
+            chain_id,
+        ),
+        crate::token::TokenIdentifier::Aptos {
+            flavor: crate::token::AptosTokenKind::Coin { type_tag },
+        } => {
+            let coin_type = crate::aptos::types::StructTag::parse(&type_tag)
+                .map_err(CoreError::InvalidInput)?;
+            RawTransaction::new_coin_transfer(
+                sender_bytes,
+                sequence_number,
+                coin_type,
+                recipient_bytes,
+                amount,
+                max_gas_amount,
+                gas_unit_price,
+                expiration_timestamp_secs,
+                chain_id,
+            )
+        }
+        crate::token::TokenIdentifier::Aptos {
+            flavor: crate::token::AptosTokenKind::FungibleAsset { .. },
+        } => {
+            return Err(CoreError::InvalidInput(
+                "Aptos Fungible Asset transfers ship in Sprint 47 — use aptos-coin for now".into(),
+            ));
+        }
+        other => {
+            return Err(CoreError::InvalidInput(format!(
+                "Aptos build_transaction got non-Aptos token spec: {other:?}"
+            )));
+        }
+    };
 
     // 6. BCS encode
     let bcs_bytes =

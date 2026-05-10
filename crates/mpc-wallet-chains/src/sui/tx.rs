@@ -141,19 +141,60 @@ pub async fn build_sui_transaction(
         CoreError::InvalidInput("Sui: missing 'gas_budget' (u64) in extra".into())
     })?;
 
-    // ── Build TransactionData::V1 + BCS encode ────────────────────────────
-    let tx = TransactionData::new_transfer_sui(
-        sender,
-        recipient,
-        amount,
-        ObjectRef {
-            object_id: gas_object_id,
-            version: gas_version,
-            digest: gas_digest,
-        },
-        gas_price,
-        gas_budget,
-    );
+    // ── Token-aware build: native SUI (transfer_sui) vs Coin<T> (transfer_coin) ──
+    let token = crate::token::TokenIdentifier::from_extra(params.extra.as_ref())
+        .map_err(CoreError::InvalidInput)?;
+    let gas_ref = ObjectRef {
+        object_id: gas_object_id,
+        version: gas_version,
+        digest: gas_digest,
+    };
+    let tx = match token {
+        crate::token::TokenIdentifier::Native => TransactionData::new_transfer_sui(
+            sender, recipient, amount, gas_ref, gas_price, gas_budget,
+        ),
+        crate::token::TokenIdentifier::Sui { type_tag } => {
+            // Source Coin<T> object reference — caller supplies via extras.
+            // The wire format doesn't encode T (validator infers from object's
+            // on-chain type), but we still log it for the operator.
+            tracing::debug!("Sui Coin<{}> transfer", type_tag);
+            let coin_object_id_hex = extra["coin_payment_object_id"].as_str().ok_or_else(|| {
+                CoreError::InvalidInput(
+                    "Sui Coin<T>: missing 'coin_payment_object_id' in extra".into(),
+                )
+            })?;
+            let coin_object_id = validate_sui_address(coin_object_id_hex)?;
+            let coin_version = extra["coin_payment_version"].as_u64().ok_or_else(|| {
+                CoreError::InvalidInput(
+                    "Sui Coin<T>: missing 'coin_payment_version' (u64) in extra".into(),
+                )
+            })?;
+            let coin_digest_b58 = extra["coin_payment_digest"].as_str().ok_or_else(|| {
+                CoreError::InvalidInput(
+                    "Sui Coin<T>: missing 'coin_payment_digest' (base58) in extra".into(),
+                )
+            })?;
+            let coin_digest = parse_object_digest(coin_digest_b58)?;
+            TransactionData::new_transfer_coin(
+                sender,
+                recipient,
+                amount,
+                ObjectRef {
+                    object_id: coin_object_id,
+                    version: coin_version,
+                    digest: coin_digest,
+                },
+                gas_ref,
+                gas_price,
+                gas_budget,
+            )
+        }
+        other => {
+            return Err(CoreError::InvalidInput(format!(
+                "Sui build_transaction got non-Sui token spec: {other:?}"
+            )));
+        }
+    };
     let bcs_bytes =
         bcs::to_bytes(&tx).map_err(|e| CoreError::Protocol(format!("BCS encoding failed: {e}")))?;
 

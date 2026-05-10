@@ -192,6 +192,31 @@ impl ProgrammableTransaction {
             ],
         }
     }
+
+    /// Build a generic `Coin<T>` transfer PTB. Same shape as `transfer_sui`
+    /// but the split source is a separately-owned `Object(coin_ref)` instead
+    /// of `GasCoin`. The type `T` is **not** encoded in the wire format —
+    /// the validator infers it from the object's on-chain type at execution
+    /// time. So `transfer_coin` doesn't need a `TypeTag` parameter.
+    ///
+    ///   inputs:  [Object(coin_ref), Pure(amount), Pure(recipient)]
+    ///   cmds:    [SplitCoins(Input(0), [Input(1)]),
+    ///             TransferObjects([NestedResult(0,0)], Input(2))]
+    pub fn transfer_coin(coin_ref: ObjectRef, amount: u64, recipient: SuiAddress) -> Self {
+        let amount_bcs = bcs::to_bytes(&amount).expect("u64 BCS encode is infallible");
+        let recipient_bcs = bcs::to_bytes(&recipient).expect("[u8;32] BCS encode is infallible");
+        Self {
+            inputs: vec![
+                CallArg::Object(ObjectArg::ImmOrOwnedObject(coin_ref)),
+                CallArg::Pure(amount_bcs),
+                CallArg::Pure(recipient_bcs),
+            ],
+            commands: vec![
+                Command::SplitCoins(Argument::Input(0), vec![Argument::Input(1)]),
+                Command::TransferObjects(vec![Argument::NestedResult(0, 0)], Argument::Input(2)),
+            ],
+        }
+    }
 }
 
 impl TransactionData {
@@ -207,6 +232,35 @@ impl TransactionData {
         TransactionData::V1(TransactionDataV1 {
             kind: TransactionKind::ProgrammableTransaction(ProgrammableTransaction::transfer_sui(
                 amount, recipient,
+            )),
+            sender,
+            gas_data: GasData {
+                payment: vec![gas_payment],
+                owner: sender,
+                price: gas_price,
+                budget: gas_budget,
+            },
+            expiration: TransactionExpiration::None,
+        })
+    }
+
+    /// Build a `TransactionData::V1` for a generic `Coin<T>` transfer.
+    /// `coin_ref` is a separately-owned source coin (must be Coin<T> for the
+    /// target type T); gas is paid by `gas_payment` (a SUI coin). T is implicit
+    /// in the object's on-chain type — not in the wire bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_transfer_coin(
+        sender: SuiAddress,
+        recipient: SuiAddress,
+        amount: u64,
+        coin_ref: ObjectRef,
+        gas_payment: ObjectRef,
+        gas_price: u64,
+        gas_budget: u64,
+    ) -> Self {
+        TransactionData::V1(TransactionDataV1 {
+            kind: TransactionKind::ProgrammableTransaction(ProgrammableTransaction::transfer_coin(
+                coin_ref, amount, recipient,
             )),
             sender,
             gas_data: GasData {
@@ -267,6 +321,52 @@ mod tests {
             "BCS bytes diverge from @mysten/sui SDK reference vector"
         );
         assert_eq!(bytes.len(), 219, "expected 219-byte canonical TransferSui");
+    }
+
+    /// Reference vector captured via `node scripts/sui-coin-ref-vector.mjs`.
+    /// Inputs: sender=0x11×32, recipient=0x22×32, amount=100_000,
+    /// coin_object=0x55×32 version=7, gas_object=0x33×32 version=42,
+    /// shared digest=base58("A"×44), gas_price=1000, gas_budget=10_000_000.
+    /// Differs from the SUI ref vector in: extra Object input for the source
+    /// coin, SplitCoins source = Input(0) instead of GasCoin, Input indices
+    /// shifted by +1.
+    const REF_BCS_HEX_COIN: &str = "000003010055555555555555555555555555555555555555555555555555555555555555550700000000000000208811c3b52fc29a3f25ba593ce7f39b5ee628922e2e60354406be2af286bca1af0008a086010000000000002022222222222222222222222222222222222222222222222222222222222222220202010000010101000101030000000001020011111111111111111111111111111111111111111111111111111111111111110133333333333333333333333333333333333333333333333333333333333333332a00000000000000208811c3b52fc29a3f25ba593ce7f39b5ee628922e2e60354406be2af286bca1af1111111111111111111111111111111111111111111111111111111111111111e803000000000000809698000000000000";
+
+    #[test]
+    fn bcs_matches_mysten_sdk_coin_reference() {
+        let sender: SuiAddress = [0x11; 32];
+        let recipient: SuiAddress = [0x22; 32];
+        let coin_object: ObjectId = [0x55; 32];
+        let gas_object: ObjectId = [0x33; 32];
+
+        let digest: ObjectDigest = bs58::decode("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            .into_vec()
+            .unwrap();
+
+        let tx = TransactionData::new_transfer_coin(
+            sender,
+            recipient,
+            100_000,
+            ObjectRef {
+                object_id: coin_object,
+                version: 7,
+                digest: digest.clone(),
+            },
+            ObjectRef {
+                object_id: gas_object,
+                version: 42,
+                digest,
+            },
+            1000,
+            10_000_000,
+        );
+
+        let bytes = bcs::to_bytes(&tx).expect("BCS encode");
+        let actual = hex::encode(&bytes);
+        assert_eq!(
+            actual, REF_BCS_HEX_COIN,
+            "Coin<T> BCS bytes diverge from @mysten/sui SDK reference vector"
+        );
     }
 
     #[test]

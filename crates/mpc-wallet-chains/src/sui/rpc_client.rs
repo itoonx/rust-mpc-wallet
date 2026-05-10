@@ -90,12 +90,17 @@ impl SuiRpcClient {
             .map_err(|e| CoreError::Other(format!("suix_getBalance parse: {e}")))
     }
 
-    /// `suix_getCoins(owner, coinType="0x2::sui::SUI")` — first page of owned
-    /// SUI coin objects (~50). Enough for the "pick the largest" gas-payment
-    /// strategy used by the CLI.
-    pub async fn get_owned_coins(&self, owner: &str) -> Result<Vec<CoinObject>, CoreError> {
+    /// `suix_getCoins(owner, coinType=…)` — first page of owned coin objects
+    /// of the given type (~50 results). For native SUI, pass
+    /// `"0x2::sui::SUI"`. For tokens, pass the canonical type tag like
+    /// `"0xa1ec…::usdc::USDC"`.
+    pub async fn get_owned_coins(
+        &self,
+        owner: &str,
+        coin_type: &str,
+    ) -> Result<Vec<CoinObject>, CoreError> {
         let res = self
-            .call("suix_getCoins", json!([owner, "0x2::sui::SUI", null, null]))
+            .call("suix_getCoins", json!([owner, coin_type, null, null]))
             .await?;
         let data = res
             .get("data")
