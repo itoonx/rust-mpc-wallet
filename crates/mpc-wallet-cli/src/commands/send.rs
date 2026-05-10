@@ -192,6 +192,15 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
         if bal == 0 {
             eprintln!("⚠️  Sender has 0 MIST — fund via https://faucet.sui.io/ first.");
         }
+    } else if chain == Chain::Tron {
+        let bal = mpc_wallet_chains::tron::rpc_client::TronRpcClient::new(&rpc_url)
+            .get_balance(&sender)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        eprintln!("✓ On-chain balance of {sender}: {} sun", bal);
+        if bal == 0 {
+            eprintln!("⚠️  Sender has 0 sun — fund via https://shasta.tronex.io or https://www.trongrid.io/shasta first.");
+        }
     }
 
     // ── 5. Fetch chain-specific pre-sign data ───────────────────────────────
@@ -316,6 +325,20 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
             )
         })?;
         eprintln!("✓ Ed25519 signature verifies against {}", sender);
+    } else if chain == Chain::Tron {
+        eprintln!(
+            "✓ Encoded tx: raw_len={} sig_len=65 (ECDSA r|s|v)",
+            unsigned.tx_data.len()
+        );
+        let recovered =
+            mpc_wallet_chains::tron::tx::recover_tron_sender(&unsigned.sign_payload, &sig)
+                .map_err(|e| anyhow::anyhow!("TRON sig recovery: {e}"))?;
+        if recovered != sender {
+            return Err(anyhow::anyhow!(
+                "TRON RECOVERY MISMATCH: signature recovers to {recovered} but wallet derives to {sender}.\nThe MPC signature isn't over the right hash, or the recovery_id is wrong. Aborting before broadcast."
+            ));
+        }
+        eprintln!("✓ Signature recovers to sender {} (verified)", sender);
     }
 
     let mut data = serde_json::json!({
@@ -507,6 +530,12 @@ fn resolve_default_rpc_url(
             _ => "https://blockstream.info/testnet/api".into(),
         });
     }
+    if chain == Chain::Tron {
+        return Ok(match network {
+            NetworkEnv::Mainnet => "https://api.trongrid.io".into(),
+            _ => "https://api.shasta.trongrid.io".into(),
+        });
+    }
 
     Err(anyhow::anyhow!(
         "no default RPC for chain {chain} on {network:?} — set DWELLIR_API_KEY or pass --rpc-url"
@@ -678,6 +707,35 @@ async fn fetch_presign_extras(
             "chain_id": chain_id,
         })));
     }
+    if chain == Chain::Tron {
+        use mpc_wallet_chains::tron::rpc_client::TronRpcClient;
+        let rpc = TronRpcClient::new(rpc_url);
+        let block_ref = rpc.get_now_block().await.map_err(|e| anyhow::anyhow!(e))?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let expiration = now_ms.saturating_add(60_000); // 60-second window
+        let owner_hex = hex::encode(
+            mpc_wallet_chains::tron::tx::decode_tron_address(sender)
+                .map_err(|e| anyhow::anyhow!(e))?,
+        );
+        eprintln!(
+            "✓ block=ref_block_bytes:0x{} hash:0x{} exp=now+60s (fee_limit omitted — TransferContract)",
+            hex::encode(block_ref.ref_block_bytes),
+            hex::encode(block_ref.ref_block_hash),
+        );
+        // Native TransferContract: NO fee_limit (smart-contract-only field).
+        // Including it produces a non-canonical raw_data_hex that fails
+        // TronGrid's raw_data_hex ↔ raw_data JSON cross-check.
+        return Ok(Some(serde_json::json!({
+            "owner_address": owner_hex,
+            "ref_block_bytes": hex::encode(block_ref.ref_block_bytes),
+            "ref_block_hash": hex::encode(block_ref.ref_block_hash),
+            "timestamp": now_ms,
+            "expiration": expiration,
+        })));
+    }
     Ok(None)
 }
 
@@ -820,6 +878,8 @@ fn explorer_url(chain: Chain, network: &NetworkEnv, tx_hash: &str) -> Option<Str
         (Chain::Movement, _) => "https://explorer.movementnetwork.xyz/txn/{}?network=testnet",
         (Chain::BitcoinMainnet, _) => "https://mempool.space/tx/",
         (Chain::BitcoinTestnet, _) => "https://mempool.space/testnet/tx/",
+        (Chain::Tron, NetworkEnv::Mainnet) => "https://tronscan.org/#/transaction/",
+        (Chain::Tron, _) => "https://shasta.tronscan.org/#/transaction/",
         _ => return None,
     };
     if base.contains("{}") {

@@ -4,6 +4,8 @@
 //! Transaction format is Protobuf-based.
 
 pub mod address;
+pub mod proto;
+pub mod rpc_client;
 pub mod tx;
 
 use async_trait::async_trait;
@@ -61,33 +63,17 @@ impl ChainProvider for TronProvider {
         signed: &SignedTransaction,
         rpc_url: &str,
     ) -> Result<String, CoreError> {
-        let raw_hex = hex::encode(&signed.raw_tx);
-        let url = format!("{rpc_url}/wallet/broadcasttransaction");
-        let body = serde_json::json!({
-            "raw_data_hex": raw_hex,
-        });
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| CoreError::Other(format!("broadcast request failed: {e}")))?;
-        let json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| CoreError::Other(format!("broadcast response parse failed: {e}")))?;
-        if json.get("result").and_then(|r| r.as_bool()) != Some(true) {
-            let msg = json
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown error");
-            return Err(CoreError::Other(format!("TRON broadcast failed: {msg}")));
+        if signed.raw_tx.len() < tx::TRON_SIG_LEN {
+            return Err(CoreError::Other(format!(
+                "TRON signed tx too short: {} bytes",
+                signed.raw_tx.len()
+            )));
         }
-        json.get("txid")
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| CoreError::Other("missing txid in TRON response".into()))
+        let split = signed.raw_tx.len() - tx::TRON_SIG_LEN;
+        let (raw_data, sig) = signed.raw_tx.split_at(split);
+        rpc_client::TronRpcClient::new(rpc_url)
+            .broadcast(raw_data, sig)
+            .await
     }
 
     async fn simulate_transaction(

@@ -131,7 +131,13 @@ async fn test_tron_with_cggmp21_signature() {
         value: "1000000".to_string(),
         data: None,
         chain_id: None,
-        extra: Some(serde_json::json!({"owner_address": "41"})),
+        extra: Some(serde_json::json!({
+            "owner_address": "411111111111111111111111111111111111111111",
+            "ref_block_bytes": "0001",
+            "ref_block_hash": "0102030405060708",
+            "expiration": 1_700_000_060_000i64,
+            "timestamp": 1_700_000_000_000i64,
+        })),
     };
     let unsigned = provider.build_transaction(params).await.unwrap();
     let sig = cggmp21_ecdsa_signature();
