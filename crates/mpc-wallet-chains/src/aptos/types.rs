@@ -131,6 +131,56 @@ impl EntryFunction {
             ],
         }
     }
+
+    /// Build `0x1::coin::transfer<T>(recipient, amount)` for an arbitrary
+    /// `T = StructTag`. `T` must satisfy the `Coin<T>` newtype requirement
+    /// — for native APT, `T = 0x1::aptos_coin::AptosCoin`. The function
+    /// signature is the same as `aptos_account::transfer` (recipient, amount)
+    /// so the args slot is identical; only `ty_args` and the module differ.
+    pub fn coin_transfer(coin_type: StructTag, recipient: AccountAddress, amount: u64) -> Self {
+        let mut module_address = [0u8; 32];
+        module_address[31] = 0x01;
+        Self {
+            module: ModuleId {
+                address: module_address,
+                name: "coin".to_string(),
+            },
+            function: "transfer".to_string(),
+            ty_args: vec![TypeTag::Struct(Box::new(coin_type))],
+            args: vec![
+                bcs::to_bytes(&recipient).expect("BCS encode AccountAddress is infallible"),
+                bcs::to_bytes(&amount).expect("BCS encode u64 is infallible"),
+            ],
+        }
+    }
+}
+
+impl StructTag {
+    /// Parse a Move struct tag of the form `0x<addr>::<module>::<name>`.
+    /// The address is hex-decoded and zero-padded to 32 bytes (Aptos accepts
+    /// short forms like `0x1`). Generic parameters (`<T,U>`) are NOT parsed —
+    /// pass an empty `type_args` vec and add nesting later if a use case
+    /// emerges (e.g. `Coin<Coin<X>>` is not a real Move pattern).
+    pub fn parse(tag: &str) -> Result<Self, String> {
+        let parts: Vec<&str> = tag.splitn(3, "::").collect();
+        if parts.len() != 3 {
+            return Err(format!("expected `<addr>::<module>::<name>`, got `{tag}`"));
+        }
+        let addr_str = parts[0].trim_start_matches("0x");
+        if addr_str.is_empty() || addr_str.len() > 64 {
+            return Err(format!("address `{}` invalid length", parts[0]));
+        }
+        let padded = format!("{:0>64}", addr_str);
+        let bytes = hex::decode(&padded).map_err(|e| format!("address hex: {e}"))?;
+        let mut address = [0u8; 32];
+        address.copy_from_slice(&bytes);
+        Ok(Self {
+            address,
+            module: parts[1].to_string(),
+            name: parts[2].to_string(),
+            type_args: vec![],
+        })
+    }
 }
 
 impl RawTransaction {
@@ -158,6 +208,34 @@ impl RawTransaction {
             chain_id,
         }
     }
+
+    /// Build a `RawTransaction` for `0x1::coin::transfer<T>` — works for any
+    /// Coin standard token (legacy, pre-Fungible-Asset). `coin_type` is the
+    /// `T` of `Coin<T>`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_coin_transfer(
+        sender: AccountAddress,
+        sequence_number: u64,
+        coin_type: StructTag,
+        recipient: AccountAddress,
+        amount: u64,
+        max_gas_amount: u64,
+        gas_unit_price: u64,
+        expiration_timestamp_secs: u64,
+        chain_id: u8,
+    ) -> Self {
+        Self {
+            sender,
+            sequence_number,
+            payload: TransactionPayload::EntryFunction(EntryFunction::coin_transfer(
+                coin_type, recipient, amount,
+            )),
+            max_gas_amount,
+            gas_unit_price,
+            expiration_timestamp_secs,
+            chain_id,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -169,6 +247,66 @@ mod tests {
     /// sequence=7, max_gas=2000, gas_price=100, expiration=99_999_999_999,
     /// chain_id=2 (testnet).
     const REF_BCS_HEX: &str = "111111111111111111111111111111111111111111111111111111111111111107000000000000000200000000000000000000000000000000000000000000000000000000000000010d6170746f735f6163636f756e74087472616e73666572000220222222222222222222222222222222222222222222222222222222222222222208a086010000000000d0070000000000006400000000000000ffe776481700000002";
+
+    /// Reference vector captured via `node scripts/aptos-coin-ref-vector.mjs`.
+    /// Same inputs as `bcs_matches_aptos_sdk_reference` (sender/recipient/
+    /// sequence/gas/expiration/chain_id) but the payload calls
+    /// `0x1::coin::transfer<0x1::aptos_coin::AptosCoin>(recipient, amount)`
+    /// instead of `0x1::aptos_account::transfer`. 211 bytes — 46 longer than
+    /// native because of the extra type arg encoding.
+    const REF_BCS_HEX_COIN: &str = "1111111111111111111111111111111111111111111111111111111111111111070000000000000002000000000000000000000000000000000000000000000000000000000000000104636f696e087472616e73666572010700000000000000000000000000000000000000000000000000000000000000010a6170746f735f636f696e094170746f73436f696e000220222222222222222222222222222222222222222222222222222222222222222208a086010000000000d0070000000000006400000000000000ffe776481700000002";
+
+    #[test]
+    fn bcs_matches_aptos_sdk_coin_reference() {
+        let sender: AccountAddress = [0x11; 32];
+        let recipient: AccountAddress = [0x22; 32];
+        let coin_type = StructTag::parse("0x1::aptos_coin::AptosCoin").unwrap();
+
+        let tx = RawTransaction::new_coin_transfer(
+            sender,
+            7,
+            coin_type,
+            recipient,
+            100_000,
+            2000,
+            100,
+            99_999_999_999,
+            2,
+        );
+        let bytes = bcs::to_bytes(&tx).expect("BCS encode");
+        let actual = hex::encode(&bytes);
+        assert_eq!(
+            actual, REF_BCS_HEX_COIN,
+            "Coin<T> BCS bytes diverge from @aptos-labs/ts-sdk reference vector"
+        );
+        assert_eq!(bytes.len(), 211);
+    }
+
+    #[test]
+    fn struct_tag_parse_short_address() {
+        let tag = StructTag::parse("0x1::coin::CoinStore").unwrap();
+        assert_eq!(tag.address[31], 0x01);
+        assert!(tag.address[..31].iter().all(|&b| b == 0));
+        assert_eq!(tag.module, "coin");
+        assert_eq!(tag.name, "CoinStore");
+        assert!(tag.type_args.is_empty());
+    }
+
+    #[test]
+    fn struct_tag_parse_full_address() {
+        let tag = StructTag::parse(
+            "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b::usdc::USDC",
+        )
+        .unwrap();
+        assert_eq!(tag.module, "usdc");
+        assert_eq!(tag.name, "USDC");
+    }
+
+    #[test]
+    fn struct_tag_parse_rejects_malformed() {
+        assert!(StructTag::parse("0x1::coin").is_err());
+        assert!(StructTag::parse("notatag").is_err());
+    }
 
     #[test]
     fn bcs_matches_aptos_sdk_reference() {
