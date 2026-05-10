@@ -95,7 +95,7 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 48 — TRON TRC-20 token transfer)
+## Current State (as of Sprint 49 — TOKEN SUITE COMPLETE)
 
 ### Auth System (3 methods, Redis-ready)
 
@@ -197,7 +197,7 @@ Gateway (creates proof)    →    MPC Node (verifies before sign)
 
 ### Tests on `main`
 ```
-958 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
+967 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
 cargo fmt        clean
 cargo clippy     clean (0 warnings, -D warnings)
 cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
@@ -246,8 +246,9 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 - **Sprint 46:** COMPLETE — Sui `Coin<T>` PTB transfer (Object input as `SplitCoins` source, T inferred on-chain — 296-byte BCS matches `@mysten/sui`) + Aptos legacy `0x1::coin::transfer<T>` entry function (211-byte BCS matches `@aptos-labs/ts-sdk`); CLI `--token sui-coin:...` / `--token aptos-coin:...`; live Aptos testnet tx `0x72c2e3b599d55a0df9d15d55e7b77022f2163e9120acc3ca9d60c8c7adbe7892` (`0x1::coin::transfer<AptosCoin>`); Sui live deferred (non-SUI testnet token funding pending); no new lessons (leveraged L-015/L-016/L-018)
 - **Sprint 47:** COMPLETE — Aptos Fungible Asset standard (`0x1::primary_fungible_store::transfer`): `EntryFunction::primary_fungible_store_transfer` + `RawTransaction::new_fungible_asset_transfer`; type arg always `0x1::fungible_asset::Metadata`, args = `[Object<Metadata>, recipient, amount]` — Metadata Object's runtime address replaces `Coin<T>`'s type-system identity (different identity model); `parse_aptos_address_padded` for short-form framework constants like `0xa` (sender/recipient still strict 64-char); 265-byte BCS byte-equal to `@aptos-labs/ts-sdk` reference vector; live Aptos testnet tx `0xb3a41e3339db31111b8613442d895ffe2fc15615bd8624a821d52bc72b8f76f8` (native APT routed through FA at canonical metadata `0xa`); L-019
 - **Sprint 48:** COMPLETE — TRON TRC-20 token transfer (`TriggerSmartContract`, ContractType=31): protobuf `encode_trigger_smart_contract`/`encode_any_trigger`/`encode_contract_envelope` (generalizes prior contract wrapper), constants `CONTRACT_TYPE_TRANSFER=1` + `CONTRACT_TYPE_TRIGGER_SMART_CONTRACT=31`; `build_trc20_transfer_raw_data` one-shot helper with **mandatory `fee_limit`** (TVM calls require it — opposite of L-017's native-transfer omission); `decode_contract_to_json` dispatches by contract type to produce broadcast JSON; `encode_trc20_transfer_calldata` emits 68-byte selector `0xa9059cbb` + 32-byte recipient (hash160, drops `0x41` prefix) + 32-byte amount; `build_tron_transaction` dispatches `TokenIdentifier::Tron` to TRC-20 path with `fee_limit` defaulting to 100 TRX; CLI presign branches by contract type (TRC-20 auto-injects `fee_limit=100_000_000` sun, native still omits per L-017); 211-byte BCS-equivalent byte-equal to tronweb reference vector pinned in `tron::proto::tests::proto_matches_tronweb_trc20_reference`; live TRON Shasta tx `0x54a73460ea78e5558ce78471e72600c68cc88a428dd76f2a47aa7a5e527fc296` (community testnet USDT `TG3XXyExBkPp9nzdajDZsozEu4BkaSJozs`, 0.0001 USDT self-transfer); no new lessons (worked first try)
+- **Sprint 49:** COMPLETE — Solana SPL Token transfer + generic instruction refactor — **TOKEN SUITE COMPLETE**. New `solana/instruction.rs` (~150 LOC) with generic `Instruction` + `AccountMeta` + `build_message` (4-bucket account ordering: writable+signer / readonly+signer / writable+nonsigner / readonly+nonsigner; program-id-before-accounts traversal matching `@solana/web3.js` `CompiledKeys`; v0/legacy versioning + ALT). New `solana/ata.rs` (~155 LOC): `find_program_address` (PDA via SHA-256 + on-curve check via `ed25519-dalek`), `derive_ata`, `TOKEN_PROGRAM_ID` / `TOKEN_2022_PROGRAM_ID` / `ASSOCIATED_TOKEN_PROGRAM_ID` constants base58-verified by tests. New `solana/spl.rs` (~110 LOC): `create_ata_idempotent` (discriminator 1) + `transfer_checked` (discriminator 12, amount LE u64 + decimals u8). Refactored `solana/tx.rs`: deleted ~120 LOC of hardcoded `build_message_bytes`/`build_message_bytes_v0`; native SOL now uses the same instruction-based path as SPL via `system_transfer_instruction`. SPL build flow always emits `[CreateATAIdempotent, TransferChecked]` so missing-recipient-ATA case auto-resolves (~0.002 SOL rent). 320-byte SPL message byte-equal to `@solana/spl-token` `compileToLegacyMessage` reference, pinned in `chain_solana_integration::spl_message_matches_spl_token_sdk_reference`. Live Solana devnet tx `4556JgY7Z6Cc1ucQckBHqAXfSWpgiksA1KT96tB4ZcdKMHsjRL3LDYu9YgiFaRZj2cawLpAiDsXn8FLrHweSfHRw` (devnet USDC, 0.1 to self via FROST-Ed25519 2-of-3); +9 tests (5 ATA + 1 instruction roundtrip + 2 SPL + 1 SPL ref vector). No new lessons.
 
-**M1-M4: DONE | All protocols production threshold signing | All 68 security findings RESOLVED | 958 tests | GG20 + CGGMP21 + FROST + Stark ECDSA + HD derivation | Cross-chain token transfer: EVM ERC-20 + Aptos Coin + Aptos FA + TRON TRC-20 LIVE; Sui Coin<T> code-complete**
+**M1-M4: DONE | All protocols production threshold signing | All 68 security findings RESOLVED | 967 tests | GG20 + CGGMP21 + FROST + Stark ECDSA + HD derivation | Cross-chain token transfer: EVM ERC-20 + Aptos Coin + Aptos FA + TRON TRC-20 + Solana SPL LIVE; Sui Coin<T> code-complete — TOKEN SUITE COMPLETE across all 6 in-scope chains**
 
 ### Token Transfer Coverage (Sprint 44–45 onward)
 
@@ -260,7 +261,9 @@ First cross-chain token transfer support shipped. Native-asset sends remain cove
 | Aptos | legacy `0x1::coin::transfer<T>` | LIVE (testnet `0x72c2e3b5…`, `<AptosCoin>` path) | 46 |
 | Aptos | Fungible Asset (`0x1::primary_fungible_store::transfer`) | LIVE (testnet `0xb3a41e33…`, native APT via FA at metadata `0xa`) | 47 |
 | TRON | TRC-20 (`TriggerSmartContract` + `transfer(address,uint256)`) | LIVE (Shasta `0x54a73460…`, 0.0001 USDT @ `TG3XXyExBkPp…`, fee_limit 100 TRX) | 48 |
-| Solana | SPL | PLANNED | 49 |
+| Solana | SPL Token (`CreateATAIdempotent` + `TransferChecked`) | LIVE (devnet `4556JgY7…`, 0.1 devnet USDC self-transfer via FROST-Ed25519 2-of-3) | 49 |
+
+**TOKEN SUITE COMPLETE** — single `TokenIdentifier` enum, zero changes to `ChainProvider` trait, ~1700 LOC across 5 sprints (44 design + 45–49 per-chain). Schema validated on all 6 in-scope chains (Bitcoin out of scope; NFTs deferred but schema reserves room).
 
 ### Live Testnet Broadcast Coverage (Sprint 38–43)
 
