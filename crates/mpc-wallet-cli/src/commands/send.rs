@@ -864,26 +864,44 @@ async fn fetch_presign_extras(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let expiration = now_ms.saturating_add(60_000); // 60-second window
+        let expiration = now_ms.saturating_add(60_000);
         let owner_hex = hex::encode(
             mpc_wallet_chains::tron::tx::decode_tron_address(sender)
                 .map_err(|e| anyhow::anyhow!(e))?,
         );
-        eprintln!(
-            "✓ block=ref_block_bytes:0x{} hash:0x{} exp=now+60s (fee_limit omitted — TransferContract)",
-            hex::encode(block_ref.ref_block_bytes),
-            hex::encode(block_ref.ref_block_hash),
-        );
-        // Native TransferContract: NO fee_limit (smart-contract-only field).
-        // Including it produces a non-canonical raw_data_hex that fails
-        // TronGrid's raw_data_hex ↔ raw_data JSON cross-check.
-        return Ok(Some(serde_json::json!({
+
+        // fee_limit policy — diverges by contract type:
+        //   - TransferContract (native TRX): MUST omit per L-017
+        //   - TriggerSmartContract (TRC-20):  MUST include (validator rejects without)
+        let is_trc20 = token_spec
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str())
+            == Some("tron");
+        let mut presign = serde_json::json!({
             "owner_address": owner_hex,
             "ref_block_bytes": hex::encode(block_ref.ref_block_bytes),
             "ref_block_hash": hex::encode(block_ref.ref_block_hash),
             "timestamp": now_ms,
             "expiration": expiration,
-        })));
+        });
+        if is_trc20 {
+            // Default 100 TRX cap; refunded for unused energy.
+            if let serde_json::Value::Object(ref mut o) = presign {
+                o.insert("fee_limit".into(), serde_json::json!(100_000_000i64));
+            }
+            eprintln!(
+                "✓ block=ref_block_bytes:0x{} hash:0x{} exp=now+60s fee_limit=100_000_000 sun (TRC-20)",
+                hex::encode(block_ref.ref_block_bytes),
+                hex::encode(block_ref.ref_block_hash),
+            );
+        } else {
+            eprintln!(
+                "✓ block=ref_block_bytes:0x{} hash:0x{} exp=now+60s (fee_limit omitted — native TransferContract)",
+                hex::encode(block_ref.ref_block_bytes),
+                hex::encode(block_ref.ref_block_hash),
+            );
+        }
+        return Ok(Some(presign));
     }
     Ok(None)
 }
@@ -1114,9 +1132,7 @@ fn explorer_url(chain: Chain, network: &NetworkEnv, tx_hash: &str) -> Option<Str
         (Chain::Sui, NetworkEnv::Mainnet) => "https://suiscan.xyz/mainnet/tx/",
         (Chain::Sui, _) => "https://suiscan.xyz/testnet/tx/",
         (Chain::Aptos, NetworkEnv::Mainnet) => "https://aptoscan.com/transaction/",
-        (Chain::Aptos, NetworkEnv::Devnet) => {
-            "https://aptoscan.com/transaction/{}?network=devnet"
-        }
+        (Chain::Aptos, NetworkEnv::Devnet) => "https://aptoscan.com/transaction/{}?network=devnet",
         (Chain::Aptos, _) => "https://aptoscan.com/transaction/{}?network=testnet",
         (Chain::Movement, _) => "https://explorer.movementnetwork.xyz/txn/{}?network=testnet",
         (Chain::BitcoinMainnet, _) => "https://mempool.space/tx/",

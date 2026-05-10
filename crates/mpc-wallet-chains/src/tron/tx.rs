@@ -116,6 +116,36 @@ pub fn decode_tron_address(addr: &str) -> Result<Vec<u8>, CoreError> {
     Ok(decoded[..21].to_vec())
 }
 
+/// Encode TRC-20 `transfer(address,uint256)` calldata. TRC-20 is ABI-compatible
+/// with ERC-20 (selector `0xa9059cbb`); the only difference is the address
+/// shape — TRON addresses are 21 bytes (`0x41 ‖ hash160`) but the calldata
+/// uses the 20-byte EVM-style hash160 (drop the `0x41` prefix). Reusing
+/// `evm/erc20.rs::encode_transfer` won't work because it expects an `0x...`
+/// EVM address string; we strip the prefix here and build calldata directly.
+pub fn encode_trc20_transfer_calldata(
+    recipient_21: &[u8],
+    amount: i64,
+) -> Result<Vec<u8>, CoreError> {
+    if recipient_21.len() != 21 || recipient_21[0] != 0x41 {
+        return Err(CoreError::InvalidInput(format!(
+            "TRC-20 recipient must be a 21-byte T-address (0x41 prefix), got {} bytes",
+            recipient_21.len()
+        )));
+    }
+    if amount < 0 {
+        return Err(CoreError::InvalidInput("TRC-20 amount must be >= 0".into()));
+    }
+    let mut out = Vec::with_capacity(68);
+    out.extend_from_slice(&[0xa9, 0x05, 0x9c, 0xbb]); // selector
+                                                      // address arg: pad 20-byte hash160 to 32 bytes (skip the 0x41 prefix)
+    out.extend_from_slice(&[0u8; 12]);
+    out.extend_from_slice(&recipient_21[1..]);
+    // uint256 arg: 32-byte big-endian. amount is i64 (>= 0); upper 24 bytes 0.
+    out.extend_from_slice(&[0u8; 24]);
+    out.extend_from_slice(&(amount as u64).to_be_bytes());
+    Ok(out)
+}
+
 /// Build an unsigned TRON `TransferContract` transaction.
 ///
 /// Required `params.extra` keys:
@@ -164,16 +194,52 @@ pub async fn build_tron_transaction(
     let mut ref_block_hash = [0u8; 8];
     ref_block_hash.copy_from_slice(&ref_block_hash_v);
 
-    let raw_data = proto::build_transfer_raw_data(
-        &owner,
-        &to,
-        amount,
-        &ref_block_bytes,
-        &ref_block_hash,
-        expiration,
-        timestamp,
-        fee_limit,
-    );
+    // Token-aware build: native TRX (TransferContract) vs TRC-20
+    // (TriggerSmartContract). `value` semantics differ:
+    //   - native: amount of TRX in sun
+    //   - TRC-20: amount of token in smallest unit (decimals decided by token)
+    let token = crate::token::TokenIdentifier::from_extra(params.extra.as_ref())
+        .map_err(CoreError::InvalidInput)?;
+    let raw_data = match token {
+        crate::token::TokenIdentifier::Native => proto::build_transfer_raw_data(
+            &owner,
+            &to,
+            amount,
+            &ref_block_bytes,
+            &ref_block_hash,
+            expiration,
+            timestamp,
+            fee_limit,
+        ),
+        crate::token::TokenIdentifier::Tron { contract } => {
+            // TRC-20: contract is the token's T-address. fee_limit is REQUIRED
+            // for TVM calls (validator rejects without it — opposite of L-017
+            // for native transfers).
+            let contract_21 = decode_tron_address(&contract)?;
+            let calldata = encode_trc20_transfer_calldata(&to, amount)?;
+            let fee_limit = fee_limit.unwrap_or(100_000_000); // 100 TRX default
+            if fee_limit <= 0 {
+                return Err(CoreError::InvalidInput(
+                    "TRC-20 transfers require fee_limit > 0".into(),
+                ));
+            }
+            proto::build_trc20_transfer_raw_data(
+                &owner,
+                &contract_21,
+                &calldata,
+                &ref_block_bytes,
+                &ref_block_hash,
+                expiration,
+                timestamp,
+                fee_limit,
+            )
+        }
+        other => {
+            return Err(CoreError::InvalidInput(format!(
+                "TRON build_transaction got non-TRON token spec: {other:?}"
+            )));
+        }
+    };
 
     // tx_id = SHA-256(raw_data) — the 32-byte prehash MPC signs.
     // Per L-011, when GG20/CGGMP21 see a 32-byte sign_payload they treat it as

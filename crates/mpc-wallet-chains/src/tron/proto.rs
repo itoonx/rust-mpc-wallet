@@ -29,6 +29,12 @@
 //! validator-side decoder rather than guessing at field order or wire types.
 
 const TRANSFER_TYPE_URL: &str = "type.googleapis.com/protocol.TransferContract";
+const TRIGGER_TYPE_URL: &str = "type.googleapis.com/protocol.TriggerSmartContract";
+
+/// `Contract.ContractType` enum value for the native TRX `TransferContract`.
+pub const CONTRACT_TYPE_TRANSFER: u64 = 1;
+/// `Contract.ContractType` enum value for `TriggerSmartContract` (TRC-20 etc.).
+pub const CONTRACT_TYPE_TRIGGER_SMART_CONTRACT: u64 = 31;
 
 // ── Wire-format primitives ──────────────────────────────────────────────────
 
@@ -76,11 +82,49 @@ pub fn encode_any_transfer(transfer: &[u8]) -> Vec<u8> {
 }
 
 pub fn encode_contract_transfer(any: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(2 + 2 + any.len());
-    // ContractType enum (TransferContract = 1)
+    encode_contract_envelope(CONTRACT_TYPE_TRANSFER, any)
+}
+
+/// Wrap an Any-encoded payload in `Contract { type, parameter }` for an
+/// arbitrary `ContractType` enum value. Use [`CONTRACT_TYPE_TRANSFER`] for
+/// native TRX transfers and [`CONTRACT_TYPE_TRIGGER_SMART_CONTRACT`] for
+/// TRC-20 / TVM smart contract calls.
+pub fn encode_contract_envelope(contract_type: u64, any: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + any.len());
     write_tag(&mut out, 1, 0);
-    write_varint(&mut out, 1);
+    write_varint(&mut out, contract_type);
     write_bytes_field(&mut out, 2, any);
+    out
+}
+
+/// `TriggerSmartContract` proto:
+///   bytes owner_address    = 1 (caller's 21-byte T-address)
+///   bytes contract_address = 2 (TRC-20 contract's 21-byte T-address)
+///   int64 call_value       = 3 (TRX attached to the call — 0 for TRC-20 transfer)
+///   bytes data             = 4 (ABI calldata)
+///
+/// `call_value`/`call_token_value`/`token_id` are omitted when 0 — proto3 default.
+pub fn encode_trigger_smart_contract(
+    owner: &[u8],
+    contract: &[u8],
+    call_value: i64,
+    data: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + owner.len() + contract.len() + data.len());
+    write_bytes_field(&mut out, 1, owner);
+    write_bytes_field(&mut out, 2, contract);
+    if call_value != 0 {
+        write_int64_field(&mut out, 3, call_value);
+    }
+    write_bytes_field(&mut out, 4, data);
+    out
+}
+
+/// Wrap a `TriggerSmartContract` body in `google.protobuf.Any`.
+pub fn encode_any_trigger(trigger: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + TRIGGER_TYPE_URL.len() + 2 + trigger.len());
+    write_bytes_field(&mut out, 1, TRIGGER_TYPE_URL.as_bytes());
+    write_bytes_field(&mut out, 2, trigger);
     out
 }
 
@@ -107,6 +151,34 @@ pub fn encode_raw_data(
         write_int64_field(&mut out, 18, fl);
     }
     out
+}
+
+/// One-shot helper: build the full `Transaction.raw` bytes for a TRC-20
+/// `transfer(address,uint256)` call. `fee_limit_sun` is mandatory (validators
+/// require it for TVM calls — unlike native TransferContract per L-017) and
+/// must be > 0; recommend ~100 TRX (`100_000_000` sun) — refunded if unused.
+#[allow(clippy::too_many_arguments)]
+pub fn build_trc20_transfer_raw_data(
+    owner_21: &[u8],
+    contract_21: &[u8],
+    calldata: &[u8],
+    ref_block_bytes: &[u8; 2],
+    ref_block_hash: &[u8; 8],
+    expiration_ms: i64,
+    timestamp_ms: i64,
+    fee_limit_sun: i64,
+) -> Vec<u8> {
+    let trigger = encode_trigger_smart_contract(owner_21, contract_21, 0, calldata);
+    let any = encode_any_trigger(&trigger);
+    let contract = encode_contract_envelope(CONTRACT_TYPE_TRIGGER_SMART_CONTRACT, &any);
+    encode_raw_data(
+        ref_block_bytes,
+        ref_block_hash,
+        expiration_ms,
+        &contract,
+        timestamp_ms,
+        Some(fee_limit_sun),
+    )
 }
 
 /// One-shot helper: build the full `Transaction.raw` bytes for a TransferContract.
@@ -289,7 +361,7 @@ pub fn decode_transfer_raw_to_json(mut buf: &[u8]) -> Result<serde_json::Value, 
 
 fn decode_contract_to_json(mut buf: &[u8]) -> Result<serde_json::Value, &'static str> {
     let mut type_num: Option<u64> = None;
-    let mut parameter: Option<serde_json::Value> = None;
+    let mut parameter_buf: Option<Vec<u8>> = None;
     while !buf.is_empty() {
         let (field, wire, n) = parse_tag(buf).ok_or("contract tag")?;
         buf = &buf[n..];
@@ -301,14 +373,23 @@ fn decode_contract_to_json(mut buf: &[u8]) -> Result<serde_json::Value, &'static
             }
             (2, 2) => {
                 let (any_buf, n) = read_len_delimited(buf).ok_or("contract parameter")?;
-                parameter = Some(decode_any_transfer_to_json(any_buf)?);
+                parameter_buf = Some(any_buf.to_vec());
                 buf = &buf[n..];
             }
             _ => return Err("unexpected contract field"),
         }
     }
-    let type_str = match type_num.ok_or("contract type missing")? {
-        1 => "TransferContract",
+    let type_num = type_num.ok_or("contract type missing")?;
+    let parameter_buf = parameter_buf.ok_or("contract parameter missing")?;
+    let (type_str, parameter) = match type_num {
+        CONTRACT_TYPE_TRANSFER => (
+            "TransferContract",
+            decode_any_to_json(&parameter_buf, decode_transfer_value_to_json)?,
+        ),
+        CONTRACT_TYPE_TRIGGER_SMART_CONTRACT => (
+            "TriggerSmartContract",
+            decode_any_to_json(&parameter_buf, decode_trigger_value_to_json)?,
+        ),
         other => {
             return Err(Box::leak(
                 format!("unsupported contract type {other}").into_boxed_str(),
@@ -316,12 +397,15 @@ fn decode_contract_to_json(mut buf: &[u8]) -> Result<serde_json::Value, &'static
         }
     };
     Ok(serde_json::json!({
-        "parameter": parameter.ok_or("contract parameter missing")?,
+        "parameter": parameter,
         "type": type_str,
     }))
 }
 
-fn decode_any_transfer_to_json(mut buf: &[u8]) -> Result<serde_json::Value, &'static str> {
+fn decode_any_to_json<F>(mut buf: &[u8], decode_value: F) -> Result<serde_json::Value, &'static str>
+where
+    F: Fn(&[u8]) -> Result<serde_json::Value, &'static str>,
+{
     let mut type_url: Option<String> = None;
     let mut value_bytes: Option<Vec<u8>> = None;
     while !buf.is_empty() {
@@ -341,11 +425,74 @@ fn decode_any_transfer_to_json(mut buf: &[u8]) -> Result<serde_json::Value, &'st
             _ => return Err("unexpected any field"),
         }
     }
-    let value = decode_transfer_value_to_json(&value_bytes.ok_or("any value missing")?)?;
+    let value = decode_value(&value_bytes.ok_or("any value missing")?)?;
     Ok(serde_json::json!({
         "value": value,
         "type_url": type_url.ok_or("any type_url missing")?,
     }))
+}
+
+fn decode_trigger_value_to_json(mut buf: &[u8]) -> Result<serde_json::Value, &'static str> {
+    let mut owner: Option<String> = None;
+    let mut contract: Option<String> = None;
+    let mut call_value: i64 = 0;
+    let mut data: Option<String> = None;
+    while !buf.is_empty() {
+        let (field, wire, n) = parse_tag(buf).ok_or("trigger tag")?;
+        buf = &buf[n..];
+        match (field, wire) {
+            (1, 2) => {
+                let (b, n) = read_len_delimited(buf).ok_or("trigger owner")?;
+                owner = Some(hex::encode(b));
+                buf = &buf[n..];
+            }
+            (2, 2) => {
+                let (b, n) = read_len_delimited(buf).ok_or("trigger contract")?;
+                contract = Some(hex::encode(b));
+                buf = &buf[n..];
+            }
+            (3, 0) => {
+                let (v, n) = read_varint(buf).ok_or("call_value")?;
+                call_value = v as i64;
+                buf = &buf[n..];
+            }
+            (4, 2) => {
+                let (b, n) = read_len_delimited(buf).ok_or("trigger data")?;
+                data = Some(hex::encode(b));
+                buf = &buf[n..];
+            }
+            // Skip optional call_token_value (5) / token_id (6) / etc.
+            (_, 0) => {
+                let (_, n) = read_varint(buf).ok_or("varint skip")?;
+                buf = &buf[n..];
+            }
+            (_, 2) => {
+                let (_, n) = read_len_delimited(buf).ok_or("len skip")?;
+                buf = &buf[n..];
+            }
+            _ => return Err("unexpected trigger field"),
+        }
+    }
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "owner_address".into(),
+        serde_json::Value::String(owner.ok_or("trigger owner missing")?),
+    );
+    obj.insert(
+        "contract_address".into(),
+        serde_json::Value::String(contract.ok_or("trigger contract missing")?),
+    );
+    if call_value != 0 {
+        obj.insert(
+            "call_value".into(),
+            serde_json::Value::Number(call_value.into()),
+        );
+    }
+    obj.insert(
+        "data".into(),
+        serde_json::Value::String(data.ok_or("trigger data missing")?),
+    );
+    Ok(serde_json::Value::Object(obj))
 }
 
 fn decode_transfer_value_to_json(mut buf: &[u8]) -> Result<serde_json::Value, &'static str> {
@@ -457,5 +604,54 @@ mod tests {
             "timestamp": 1_700_000_000_000i64,
         });
         assert_eq!(decoded, expected_json);
+    }
+
+    /// Reference vector captured via `node scripts/tron-trc20-ref-vector.mjs`.
+    /// Asserts byte-for-byte parity against `tronweb` for a TRC-20
+    /// `transfer(address,uint256)` call wrapped in `TriggerSmartContract`.
+    #[test]
+    fn proto_matches_tronweb_trc20_reference() {
+        let owner = hex::decode("411111111111111111111111111111111111111111").unwrap();
+        let contract = hex::decode("419999999999999999999999999999999999999999").unwrap();
+        let calldata = hex::decode(
+            "a9059cbb000000000000000000000000222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f4240"
+        ).unwrap();
+        let ref_block_bytes: [u8; 2] = [0x00, 0x01];
+        let ref_block_hash: [u8; 8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+        let timestamp: i64 = 1_700_000_000_000;
+        let expiration: i64 = 1_700_000_060_000;
+        let fee_limit: i64 = 100_000_000;
+
+        let raw = build_trc20_transfer_raw_data(
+            &owner,
+            &contract,
+            &calldata,
+            &ref_block_bytes,
+            &ref_block_hash,
+            expiration,
+            timestamp,
+            fee_limit,
+        );
+
+        let expected_hex = "0a0200012208010203040506070840e0a499ffbc315aae01081f12a9010a31747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e54726967676572536d617274436f6e747261637412740a1541111111111111111111111111111111111111111112154199999999999999999999999999999999999999992244a9059cbb000000000000000000000000222222222222222222222222222222222222222200000000000000000000000000000000000000000000000000000000000f42407080d095ffbc31900180c2d72f";
+        assert_eq!(
+            hex::encode(&raw),
+            expected_hex,
+            "TRC-20 proto bytes diverge from tronweb reference"
+        );
+
+        // Decoder round-trips this through to the broadcast-shape JSON.
+        let decoded = decode_transfer_raw_to_json(&raw).unwrap();
+        let parameter = decoded["contract"][0]["parameter"]["value"].clone();
+        assert_eq!(
+            parameter["owner_address"],
+            "411111111111111111111111111111111111111111"
+        );
+        assert_eq!(
+            parameter["contract_address"],
+            "419999999999999999999999999999999999999999"
+        );
+        assert_eq!(decoded["contract"][0]["type"], "TriggerSmartContract");
+        assert_eq!(decoded["fee_limit"], serde_json::json!(fee_limit));
     }
 }
