@@ -1,7 +1,9 @@
 use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::MpcSignature;
 
+use crate::evm::erc20;
 use crate::provider::{Chain, SignedTransaction, TransactionParams, UnsignedTransaction};
+use crate::token::{EvmTokenStandard, TokenIdentifier};
 
 /// The secp256k1 curve order n (big-endian, 32 bytes).
 /// S values must satisfy `s <= n/2` for EIP-2 / low-S canonicalization.
@@ -15,6 +17,18 @@ const SECP256K1_N_HALF: [u8; 32] = [
     0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     0x5D, 0x57, 0x6E, 0x73, 0x57, 0xA4, 0x50, 0x1D, 0xDF, 0xE9, 0x2F, 0x46, 0x68, 0x1B, 0x20, 0xA0,
 ];
+
+/// Parse a value string ("0x..." hex or bare decimal) into a U256.
+fn parse_evm_uint(s: &str) -> Result<alloy::primitives::U256, CoreError> {
+    use alloy::primitives::U256;
+    if let Some(hex) = s.strip_prefix("0x") {
+        U256::from_str_radix(hex, 16)
+            .map_err(|e| CoreError::InvalidInput(format!("invalid hex value: {e}")))
+    } else {
+        U256::from_str_radix(s, 10)
+            .map_err(|e| CoreError::InvalidInput(format!("invalid decimal value: {e}")))
+    }
+}
 
 /// Compare two 32-byte big-endian values. Returns `std::cmp::Ordering`.
 fn cmp_bytes32(a: &[u8; 32], b: &[u8; 32]) -> std::cmp::Ordering {
@@ -62,6 +76,13 @@ fn normalise_low_s(s_bytes: &[u8; 32], recovery_id: u8) -> ([u8; 32], u8) {
 }
 
 /// Build an unsigned EVM transaction (EIP-1559).
+///
+/// Token-aware: when `params.extra["token"]` describes an ERC-20 transfer, the
+/// `to`/`value`/`data` fields are rewritten to call `transfer(address,uint256)`
+/// on the token contract — `params.to` becomes the recipient, `params.value`
+/// the token amount in smallest unit, and `params.data` is **ignored** (we
+/// generate the calldata). When the token spec is `Native` or absent, the
+/// previous behavior is preserved exactly.
 pub async fn build_evm_transaction(
     chain: Chain,
     chain_id: u64,
@@ -70,20 +91,44 @@ pub async fn build_evm_transaction(
     use alloy::consensus::TxEip1559;
     use alloy::primitives::{Address, Bytes, TxKind, U256};
 
-    let to_addr: Address = params
-        .to
+    let token =
+        TokenIdentifier::from_extra(params.extra.as_ref()).map_err(CoreError::InvalidInput)?;
+
+    // Resolve effective to / value / data based on the token spec.
+    let (effective_to, effective_value, effective_data, default_gas_limit) = match &token {
+        TokenIdentifier::Native => {
+            let value = parse_evm_uint(&params.value)?;
+            (
+                params.to.clone(),
+                value,
+                params.data.clone().unwrap_or_default(),
+                21_000u64,
+            )
+        }
+        TokenIdentifier::Evm {
+            contract,
+            standard: EvmTokenStandard::Erc20,
+            ..
+        } => {
+            // ERC-20: tx.to = contract; tx.value = 0; tx.data = transfer(recipient, amount).
+            let calldata = erc20::encode_transfer(&params.to, &params.value)?;
+            (contract.clone(), U256::ZERO, calldata, 100_000u64)
+        }
+        TokenIdentifier::Evm { standard, .. } => {
+            return Err(CoreError::InvalidInput(format!(
+                "EVM {standard:?} token transfers not yet implemented (Sprint 45 ships ERC-20 only)"
+            )));
+        }
+        other => {
+            return Err(CoreError::InvalidInput(format!(
+                "EVM build_transaction got non-EVM token spec: {other:?}"
+            )));
+        }
+    };
+
+    let to_addr: Address = effective_to
         .parse()
         .map_err(|e| CoreError::InvalidInput(format!("invalid to address: {e}")))?;
-
-    // Parse value: hex if "0x" prefix, else decimal. Avoid the previous bug
-    // where bare digits like "1000000000000000" were silently parsed as hex.
-    let value = if let Some(hex) = params.value.strip_prefix("0x") {
-        U256::from_str_radix(hex, 16)
-            .map_err(|e| CoreError::InvalidInput(format!("invalid hex value: {e}")))?
-    } else {
-        U256::from_str_radix(&params.value, 10)
-            .map_err(|e| CoreError::InvalidInput(format!("invalid decimal value: {e}")))?
-    };
 
     let tx = TxEip1559 {
         chain_id,
@@ -98,7 +143,7 @@ pub async fn build_evm_transaction(
             .as_ref()
             .and_then(|e| e.get("gas_limit"))
             .and_then(|v| v.as_u64())
-            .unwrap_or(21000),
+            .unwrap_or(default_gas_limit),
         max_fee_per_gas: params
             .extra
             .as_ref()
@@ -114,8 +159,8 @@ pub async fn build_evm_transaction(
             .map(|v| v as u128)
             .unwrap_or(1_000_000_000),
         to: TxKind::Call(to_addr),
-        value,
-        input: Bytes::from(params.data.unwrap_or_default()),
+        value: effective_value,
+        input: Bytes::from(effective_data),
         access_list: Default::default(),
     };
 

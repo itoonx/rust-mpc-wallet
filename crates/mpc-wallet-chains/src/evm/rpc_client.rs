@@ -57,6 +57,44 @@ impl EvmRpcClient {
             .ok_or_else(|| CoreError::Other(format!("rpc {method}: missing result")))
     }
 
+    /// `eth_estimateGas({from, to, data, value})` → estimated gas as u64.
+    /// `data` and `value` must already be 0x-prefixed hex (or empty string for none).
+    /// Used to size `gas_limit` for contract calls (ERC-20 etc.); add a safety
+    /// margin (typically 20%) to the returned value.
+    pub async fn estimate_gas(
+        &self,
+        from: &str,
+        to: &str,
+        data: &str,
+        value_wei_hex: &str,
+    ) -> Result<u64, CoreError> {
+        let mut tx = serde_json::Map::new();
+        tx.insert("from".into(), json!(from));
+        tx.insert("to".into(), json!(to));
+        if !data.is_empty() {
+            tx.insert("data".into(), json!(data));
+        }
+        if !value_wei_hex.is_empty() {
+            tx.insert("value".into(), json!(value_wei_hex));
+        }
+        let res = self
+            .call("eth_estimateGas", json!([serde_json::Value::Object(tx)]))
+            .await?;
+        parse_hex_u64(&res, "estimatedGas")
+    }
+
+    /// `eth_call({to, data}, "latest")` → returns the raw hex result string.
+    /// Used for read-only calls into smart contracts (e.g. ERC-20 `balanceOf`,
+    /// `decimals`, `symbol`). The data must already be 0x-prefixed hex.
+    pub async fn eth_call(&self, to: &str, data: &str) -> Result<String, CoreError> {
+        let res = self
+            .call("eth_call", json!([{"to": to, "data": data}, "latest"]))
+            .await?;
+        res.as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| CoreError::Other("eth_call: result not a string".into()))
+    }
+
     /// `eth_getBalance(address, "latest")` → balance in wei.
     pub async fn get_balance(&self, address: &str) -> Result<u128, CoreError> {
         let res = self

@@ -2,6 +2,7 @@ pub mod provider;
 pub mod registry;
 pub mod rpc;
 pub mod signer;
+pub mod token;
 
 pub mod aptos;
 pub mod bitcoin;

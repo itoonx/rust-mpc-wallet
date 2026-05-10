@@ -94,6 +94,24 @@ pub struct SendArgs {
     /// Password for the encrypted key store (only with --wallet). Prompts if omitted.
     #[arg(long)]
     pub password: Option<String>,
+
+    /// Token to transfer instead of the chain's native token. Shorthand syntax:
+    ///
+    /// - `native` (default) — chain's native gas token
+    /// - `erc20:0x...` — EVM ERC-20 (Sprint 45)
+    /// - `spl:<mint>:<decimals>` / `spl-2022:<mint>:<decimals>` — Solana SPL (Sprint 49)
+    /// - `sui-coin:<type-tag>` — Sui Coin<T> (Sprint 46)
+    /// - `aptos-coin:<type-tag>` / `aptos-fa:<metadata-addr>` — Aptos (Sprints 46/47)
+    /// - `trc20:T...` — TRON TRC-20 (Sprint 48)
+    ///
+    /// Use `--token-json '<full json>'` for the canonical wire form.
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Canonical token spec as JSON (escape hatch when shorthand isn't enough).
+    /// Mutually exclusive with --token. See docs/TOKEN_TRANSFER_DESIGN.md.
+    #[arg(long, conflicts_with = "token")]
+    pub token_json: Option<String>,
 }
 
 pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
@@ -146,15 +164,37 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
     eprintln!("✓ Sender: {}", sender);
 
+    // ── Resolve token spec (shorthand → canonical JSON) ─────────────────────
+    let token_json = parse_token_spec(args.token.as_deref(), args.token_json.as_deref())?;
+    if let Some(ref tj) = token_json {
+        eprintln!("✓ Token spec: {}", tj);
+    }
+
     // ── Pre-flight: chain balance check ────────────────────────────────────
     if is_evm_chain(chain) {
-        let bal = EvmRpcClient::new(&rpc_url)
+        let rpc = EvmRpcClient::new(&rpc_url);
+        // Always print native balance — needed for gas regardless of token transfer.
+        let native_bal = rpc
             .get_balance(&sender)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        eprintln!("✓ On-chain balance of {sender}: {} wei", bal);
-        if bal == 0 {
-            eprintln!("⚠️  Sender has 0 balance — fund this address first or the tx will revert.");
+        eprintln!("✓ On-chain native balance of {sender}: {} wei", native_bal);
+        if native_bal == 0 {
+            eprintln!("⚠️  Sender has 0 native balance — needed for gas; fund first.");
+        }
+        // For ERC-20 transfers, also check the token balance.
+        if let Some(serde_json::Value::Object(t)) = &token_json {
+            if t.get("kind").and_then(|v| v.as_str()) == Some("evm") {
+                if let Some(contract) = t.get("contract").and_then(|v| v.as_str()) {
+                    let token_bal = erc20_balance_of(&rpc, contract, &sender).await?;
+                    eprintln!("✓ Token balance of {sender} on {contract}: {token_bal}");
+                    if token_bal == "0" {
+                        eprintln!(
+                            "⚠️  Sender has 0 token balance — fund the token before transferring."
+                        );
+                    }
+                }
+            }
         }
     } else if chain == Chain::Solana {
         let bal = SolanaRpcClient::new(&rpc_url)
@@ -204,7 +244,16 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
     }
 
     // ── 5. Fetch chain-specific pre-sign data ───────────────────────────────
-    let auto_extra = fetch_presign_extras(chain, &rpc_url, &sender, &group_pubkey).await?;
+    let auto_extra = fetch_presign_extras(
+        chain,
+        &rpc_url,
+        &sender,
+        &group_pubkey,
+        token_json.as_ref(),
+        &args.to,
+        &args.value,
+    )
+    .await?;
     let user_extra = match args.extra.as_deref() {
         Some(s) => Some(
             serde_json::from_str::<serde_json::Value>(s)
@@ -216,6 +265,18 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
     if let Some(gl) = args.gas_limit {
         if let Some(serde_json::Value::Object(ref mut o)) = extra {
             o.insert("gas_limit".into(), serde_json::json!(gl));
+        }
+    }
+    // Inject the token spec into extras (where each chain provider reads it).
+    if let Some(token_value) = token_json.clone() {
+        match extra {
+            Some(serde_json::Value::Object(ref mut o)) => {
+                o.insert("token".into(), token_value);
+            }
+            None => {
+                extra = Some(serde_json::json!({ "token": token_value }));
+            }
+            Some(_) => {} // shouldn't happen — extras are always objects
         }
     }
     let extra = extra; // freeze
@@ -544,11 +605,20 @@ fn resolve_default_rpc_url(
 
 /// Fetch chain-specific pre-sign data and return it as JSON to merge into `extra`.
 /// Returns `None` for chains with no auto-fetch logic.
+///
+/// `recipient` and `value_str` are the user-supplied `--to` / `--value`. They're
+/// only consumed by the EVM arm for `eth_estimateGas` against the real
+/// destination (matters for ERC-20 since gas depends on whether the recipient
+/// already has a non-zero token balance — first-touch storage write is ~5x
+/// cheaper than overwriting).
 async fn fetch_presign_extras(
     chain: Chain,
     rpc_url: &str,
     sender: &str,
     group_pubkey: &GroupPublicKey,
+    token_spec: Option<&serde_json::Value>,
+    recipient: &str,
+    value_str: &str,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     let evm_chains = [
         Chain::Ethereum,
@@ -561,6 +631,7 @@ async fn fetch_presign_extras(
         Chain::Linea,
     ];
     if evm_chains.contains(&chain) {
+        use mpc_wallet_chains::evm::erc20;
         let rpc = EvmRpcClient::new(rpc_url);
         let chain_id = rpc.get_chain_id().await.map_err(|e| anyhow::anyhow!(e))?;
         let nonce = rpc
@@ -571,15 +642,52 @@ async fn fetch_presign_extras(
             .suggest_eip1559_fees()
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
+
+        // Determine effective tx (to, value, data) per token spec, then
+        // estimate gas. For native tx, defaults to a 21k floor (intrinsic
+        // gas of an EOA→EOA transfer); estimate fails fast if the call
+        // would revert pre-broadcast, surfacing the issue before MPC sign.
+        let (est_to, est_value_hex, est_data_hex, fallback_gas) = match token_spec
+            .and_then(|v| v.get("kind"))
+            .and_then(|v| v.as_str())
+        {
+            Some("evm") => {
+                let contract = token_spec
+                    .and_then(|v| v.get("contract"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("token.contract missing"))?;
+                let calldata =
+                    erc20::encode_transfer(recipient, value_str).map_err(|e| anyhow::anyhow!(e))?;
+                (
+                    contract.to_string(),
+                    "0x0".to_string(),
+                    format!("0x{}", hex::encode(calldata)),
+                    100_000u64,
+                )
+            }
+            _ => {
+                // Native ETH transfer.
+                let value_hex = value_str_to_hex(value_str)?;
+                (recipient.to_string(), value_hex, String::new(), 21_000u64)
+            }
+        };
+
+        let estimated = rpc
+            .estimate_gas(sender, &est_to, &est_data_hex, &est_value_hex)
+            .await
+            .unwrap_or(fallback_gas);
+        // 25% safety margin — covers gas refund variance + state changes
+        // between estimate and broadcast.
+        let gas_limit = estimated.saturating_mul(125) / 100;
+        let gas_limit = gas_limit.max(fallback_gas);
+
         eprintln!(
-            "✓ chain_id={chain_id} nonce={nonce} max_fee={} gwei priority={} gwei",
-            max_fee / 1_000_000_000,
-            max_priority / 1_000_000_000
+            "✓ chain_id={chain_id} nonce={nonce} fees: max_fee={max_fee} wei priority={max_priority} wei · gas_limit={gas_limit} (estimated {estimated}, +25% margin)",
         );
         return Ok(Some(serde_json::json!({
             "chain_id": chain_id,
             "nonce": nonce,
-            "gas_limit": 21_000u64,
+            "gas_limit": gas_limit,
             "max_fee_per_gas": max_fee as u64,
             "max_priority_fee_per_gas": max_priority as u64,
         })));
@@ -848,6 +956,102 @@ fn redact_key(url: &str) -> String {
         }
     }
     url.to_string()
+}
+
+/// Convert a value string ("0x..." hex or bare decimal) into 0x-prefixed hex.
+fn value_str_to_hex(s: &str) -> anyhow::Result<String> {
+    if s.starts_with("0x") {
+        return Ok(s.to_string());
+    }
+    // Decimal — convert to hex via u128 (fits all reasonable wei values).
+    let v: u128 = s
+        .parse()
+        .map_err(|e| anyhow::anyhow!("value not decimal u128: {e}"))?;
+    Ok(format!("0x{:x}", v))
+}
+
+/// Translate `--token <shorthand>` (or `--token-json <json>`) into the canonical
+/// JSON `TokenIdentifier` shape that chain providers parse. Returns `None` for
+/// the implicit native case (no flag set, or shorthand "native").
+fn parse_token_spec(
+    shorthand: Option<&str>,
+    json: Option<&str>,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    if let Some(j) = json {
+        let v: serde_json::Value =
+            serde_json::from_str(j).map_err(|e| anyhow::anyhow!("invalid --token-json: {e}"))?;
+        return Ok(Some(v));
+    }
+    let Some(s) = shorthand else {
+        return Ok(None);
+    };
+    if s == "native" {
+        return Ok(None);
+    }
+    let (prefix, rest) = s.split_once(':').ok_or_else(|| {
+        anyhow::anyhow!("--token shorthand must be 'native' or '<kind>:<args>', got '{s}'")
+    })?;
+    let v = match prefix {
+        "erc20" => serde_json::json!({
+            "kind": "evm", "contract": rest, "standard": "erc20",
+        }),
+        "erc721" | "erc1155" => {
+            return Err(anyhow::anyhow!(
+                "--token {prefix}: NFT support deferred; see docs/TOKEN_TRANSFER_DESIGN.md §7"
+            ));
+        }
+        "spl" | "spl-2022" => {
+            let parts: Vec<&str> = rest.split(':').collect();
+            if parts.len() != 2 {
+                return Err(anyhow::anyhow!(
+                    "--token spl shorthand: '{prefix}:<mint>:<decimals>'"
+                ));
+            }
+            let decimals: u8 = parts[1]
+                .parse()
+                .map_err(|e| anyhow::anyhow!("--token spl decimals must be u8: {e}"))?;
+            let program = if prefix == "spl-2022" {
+                "token2022"
+            } else {
+                "spl_token"
+            };
+            serde_json::json!({
+                "kind": "spl", "mint": parts[0], "program": program, "decimals": decimals,
+            })
+        }
+        "sui-coin" => serde_json::json!({ "kind": "sui", "type_tag": rest }),
+        "aptos-coin" => serde_json::json!({
+            "kind": "aptos", "flavor": { "type": "coin", "type_tag": rest },
+        }),
+        "aptos-fa" => serde_json::json!({
+            "kind": "aptos", "flavor": { "type": "fungible_asset", "metadata": rest },
+        }),
+        "trc20" => serde_json::json!({ "kind": "tron", "contract": rest }),
+        other => {
+            return Err(anyhow::anyhow!(
+                "--token: unknown shorthand prefix '{other}'"
+            ))
+        }
+    };
+    Ok(Some(v))
+}
+
+/// Query an ERC-20 contract's `balanceOf(holder)` via `eth_call`. Returns the
+/// balance as a decimal string (uint256 — could exceed u64).
+async fn erc20_balance_of(
+    rpc: &EvmRpcClient,
+    contract: &str,
+    holder: &str,
+) -> anyhow::Result<String> {
+    use mpc_wallet_chains::evm::erc20;
+    let calldata = erc20::encode_balance_of(holder).map_err(|e| anyhow::anyhow!(e))?;
+    let result_hex = rpc
+        .eth_call(contract, &format!("0x{}", hex::encode(calldata)))
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let bytes = hex::decode(result_hex.trim_start_matches("0x"))
+        .map_err(|e| anyhow::anyhow!("balanceOf returned non-hex: {e}"))?;
+    erc20::decode_uint256_decimal(&bytes).map_err(|e| anyhow::anyhow!(e))
 }
 
 fn explorer_url(chain: Chain, network: &NetworkEnv, tx_hash: &str) -> Option<String> {

@@ -61,6 +61,7 @@ retro/
 | [L-015](lessons/L-015_sui-bcs-must-match-upstream-shape.md) | 2026-05-10 | Wire format | High | Sui hand-rolled BCS struct + raw_tx layout must match validator-side decoder — **FIXED** (ref-vector test enforced) |
 | [L-016](lessons/L-016_aptos-double-hash-and-authenticator-order.md) | 2026-05-10 | Wire format | High | Aptos: Ed25519 signs raw `prefix ‖ bcs` (not its SHA3-256 digest), authenticator is pubkey-before-sig with length prefixes — **FIXED** |
 | [L-017](lessons/L-017_tron-broadcast-body-shape-and-swagger-reflection.md) | 2026-05-10 | Wire format / API | High | TRON broadcast needs structured `raw_data` JSON alongside `raw_data_hex`; TransferContract omits `fee_limit`; v=27+parity; TronGrid hides errors behind swagger reflection — **FIXED** |
+| [L-018](lessons/L-018_evm-gas-limit-must-be-dynamic.md) | 2026-05-10 | RPC integration | Medium | EVM gas_limit must come from `eth_estimateGas`, not hardcoded EOA default — applies to all per-tx exec caps (Sui/Aptos/TRON/Solana too) — **FIXED** |
 
 ---
 
