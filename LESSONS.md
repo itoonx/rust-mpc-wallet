@@ -930,3 +930,32 @@ Hand-rolled the protobuf encoder for `Transaction.raw` (TransferContract) and va
 **Takeaway:**
 > The swagger UI of any chain's public node is a lie until proven otherwise — capture a real client request and diff against it.
 > For TRON specifically: omit `fee_limit` for transfers, encode `v` as `27 + parity`, and send the full tronweb body shape, not the swagger-suggested flat hex.
+
+---
+
+## L-018: EVM `gas_limit` must be dynamic via `eth_estimateGas` for non-EOA transfers (Sprint 45)
+
+**Date:** 2026-05-10
+**Category:** Bug
+**Severity:** MEDIUM
+
+**What happened:**
+First live USDC-Sepolia ERC-20 broadcast was rejected by the Sepolia node with an out-of-gas
+revert. The transaction builder was using a static EOA-floor `gas_limit = 21_000`, which is
+correct for plain ETH transfers but nowhere near enough for an ERC-20 `transfer(address,uint256)`
+call. The actual on-chain execution consumed 40,707 gas, so the tx ran out of gas before the
+ERC-20 state update completed.
+
+**Fix / Resolution:**
+Added an `eth_estimateGas` helper to `evm/rpc_client.rs`. Threaded the token spec into
+`fetch_presign_extras` so the gas estimate is run against the rewritten ERC-20 calldata
+(not the original EOA-shaped tx). `gas_limit` is now whatever `eth_estimateGas` returns
+(with a small safety multiplier), not a hardcoded floor. Verified live: tx
+`0x23ab51bde4db9e737f0f6039c21bf418f68147d230f9100119715643ceb090a9` settled at 40,707 gas.
+
+**Takeaway:**
+> "Simulate first, sign second." Any chain with a per-tx execution-gas cap (EVM, Aptos, Sui,
+> TRON for smart contracts) MUST estimate gas against the **final** signing payload before
+> presign — including any contract-call rewrite. A static gas floor is only safe for the
+> single narrow case it was measured for (plain native transfers); the moment calldata
+> changes shape, the floor is wrong.

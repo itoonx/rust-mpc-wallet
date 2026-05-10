@@ -1,9 +1,10 @@
 # Sprint Log
 
-> **Current state (as of 2026-05-10):** Sprint 43 COMPLETE — merged to `main`.
-> 941 tests, 7 production threshold protocols, 68/68 security findings resolved,
+> **Current state (as of 2026-05-10):** Sprint 45 COMPLETE — merged to `main`.
+> 951 tests, 7 production threshold protocols, 68/68 security findings resolved,
 > 6 chains with live testnet MPC broadcast coverage (Sepolia, Solana devnet,
-> Bitcoin testnet, Sui testnet, Aptos testnet, TRON Shasta).
+> Bitcoin testnet, Sui testnet, Aptos testnet, TRON Shasta), plus first
+> cross-chain token transfer support (EVM ERC-20, live USDC-Sepolia broadcast).
 > See `docs/ROADMAP.md` for the live roadmap and next-phase candidates.
 >
 > The content below is the **historical archive** of Sprint 1–N task specs and gate status
@@ -1674,3 +1675,36 @@ Live testnet MPC broadcast push: end-to-end signing from real shares to real tes
   verification, explorer URL.
 - L-017 retro: TRON broadcast body shape + TonGrid swagger reflection trap +
   `fee_limit` omission for transfers + `v = 27 + parity` recovery byte.
+
+---
+
+## Sprint 44–45 Gate Status (2026-05-10 — ALL MERGED)
+
+Cross-chain token transfer foundation: schema design + first live ERC-20 broadcast.
+
+| Sprint | Theme | Owner | R6 Verdict | Merged | Result |
+|--------|-------|-------|------------|--------|--------|
+| 44 | Cross-chain token transfer schema (`TokenIdentifier`) | R0/R7 | APPROVED | ✓ | Schema + research/design only; no chain wire-up |
+| 45 | EVM ERC-20 token transfer (live USDC-Sepolia) | R3a | APPROVED | ✓ | Live tx `0x23ab51bde4db9e737f0f6039c21bf418f68147d230f9100119715643ceb090a9` (0.1 USDC self-transfer, 40,707 gas); L-018 |
+
+**Sprint 44–45 result:** 951 tests pass (was 941; +10 from `token.rs` + `erc20.rs`), fmt + clippy clean.
+**Security:** No new findings. All 68 prior findings remain RESOLVED.
+
+### Sprint 45 highlights (EVM ERC-20)
+- `TokenIdentifier` schema implemented at chain-crate level (`crates/mpc-wallet-chains/src/token.rs`).
+- EVM ERC-20 ABI encoder (`crates/mpc-wallet-chains/src/evm/erc20.rs`) with viem-pinned reference vector.
+- `build_evm_transaction` detects `extra["token"]` and rewrites `to`/`value`/`data` for ERC-20.
+- `eth_estimateGas` helper (`evm/rpc_client.rs`); token spec threaded into `fetch_presign_extras`
+  for dynamic `gas_limit` (replaces the static EOA-floor 21k that broke ERC-20 broadcasts).
+- CLI `--token <shorthand>` flag (e.g. `erc20:0x...`) and `--token-json` escape hatch.
+- L-018 retro: EVM `gas_limit` must be dynamic via `eth_estimateGas` — "simulate first, sign second"
+  applies to all chains with per-tx exec caps.
+
+### Token Transfer Coverage
+| Chain | Status | Sprint |
+|-------|--------|--------|
+| EVM ERC-20 | LIVE (USDC-Sepolia) | 45 |
+| Sui Coin objects | PLANNED | 46 |
+| Aptos coin/FA | PLANNED | 47 |
+| TRON TRC-20 | PLANNED | 48 |
+| Solana SPL | PLANNED | 49 |
