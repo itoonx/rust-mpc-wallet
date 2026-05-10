@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-10 (Sprint 46: Sui `Coin<T>` + Aptos legacy `0x1::coin::transfer<T>`)
+
+### Added
+
+- **Sui `Coin<T>` PTB transfer** — `ProgrammableTransaction::transfer_coin` and
+  `TransactionData::new_transfer_coin`. Source coin is an `Input::Object` (object_ref)
+  feeding `SplitCoins`, not the implicit `GasCoin`. Wire format does **not** encode
+  the type parameter `T` — validators infer it from the object's on-chain type.
+  296-byte BCS output byte-equal to `@mysten/sui`. Live broadcast deferred until
+  a non-SUI testnet token can be funded.
+- **Aptos legacy `0x1::coin::transfer<T>`** — `EntryFunction::coin_transfer` +
+  `RawTransaction::new_coin_transfer` + `StructTag::parse` helper for canonical
+  `0xADDR::module::Name` parsing. 211-byte BCS byte-equal to `@aptos-labs/ts-sdk`.
+- **Live Aptos testnet broadcast** validating the `<AptosCoin>` path (native APT
+  via the legacy coin module): tx
+  `0x72c2e3b599d55a0df9d15d55e7b77022f2163e9120acc3ca9d60c8c7adbe7892`.
+- **CLI shorthand** for both new paths: `--token sui-coin:0x...::module::Type`
+  and `--token aptos-coin:0x...::module::Type`. Flow unchanged through the
+  `TokenIdentifier` schema introduced in Sprint 44.
+- **`SuiRpcClient::get_owned_coins`** now takes a `coin_type` filter so callers
+  can fetch object refs for a specific `Coin<T>` instead of only SUI.
+- 5 new tests (956 total, was 951): 1 Sui Coin reference vector,
+  1 Aptos Coin reference vector, 3 `StructTag::parse` tests.
+
+### Notes
+
+- No new retro lessons — both implementations worked first try by leveraging
+  L-015 (Sui hand-rolled BCS shape), L-016 (Aptos auth/signing-message order),
+  and L-018 (simulate-first dynamic gas / fee).
+- No new security findings; all 68 prior findings remain RESOLVED.
+- Aptos Fungible Asset (`primary_fungible_store`) path remains planned for a
+  later sprint and is not yet wired.
+
 ## [0.6.0] - 2026-05-10 (Sprint 44–45: First cross-chain token transfer — EVM ERC-20)
 
 ### Added

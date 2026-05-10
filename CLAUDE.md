@@ -95,7 +95,7 @@ git commit -m "[R{N}] complete: {task summary}"
 
 ---
 
-## Current State (as of Sprint 45 — EVM ERC-20 token transfer live)
+## Current State (as of Sprint 46 — Sui Coin<T> + Aptos Coin (legacy) token transfer)
 
 ### Auth System (3 methods, Redis-ready)
 
@@ -197,7 +197,7 @@ Gateway (creates proof)    →    MPC Node (verifies before sign)
 
 ### Tests on `main`
 ```
-951 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
+956 tests pass (cargo test --workspace) + 16 E2E (--ignored, need live infra)
 cargo fmt        clean
 cargo clippy     clean (0 warnings, -D warnings)
 cargo audit      clean (.cargo/audit.toml ignores unmaintained transitive deps)
@@ -243,8 +243,9 @@ CI pipeline      ALL GREEN (fmt + clippy + test + audit + E2E)
 - **Sprint 43:** COMPLETE — First live TRON Shasta MPC broadcast (GG20 ECDSA, hand-rolled protobuf `Transaction.raw`); L-017
 - **Sprint 44:** COMPLETE — Cross-chain token transfer schema design (`TokenIdentifier` at chain-crate level); research + design only, no chain wire-up
 - **Sprint 45:** COMPLETE — EVM ERC-20 token transfer (live USDC-Sepolia broadcast `0x23ab51bde4db9e737f0f6039c21bf418f68147d230f9100119715643ceb090a9`, 0.1 USDC self-transfer, 40,707 gas); ABI encoder, dynamic `gas_limit` via `eth_estimateGas`, CLI `--token`/`--token-json` flags; L-018
+- **Sprint 46:** COMPLETE — Sui `Coin<T>` PTB transfer (Object input as `SplitCoins` source, T inferred on-chain — 296-byte BCS matches `@mysten/sui`) + Aptos legacy `0x1::coin::transfer<T>` entry function (211-byte BCS matches `@aptos-labs/ts-sdk`); CLI `--token sui-coin:...` / `--token aptos-coin:...`; live Aptos testnet tx `0x72c2e3b599d55a0df9d15d55e7b77022f2163e9120acc3ca9d60c8c7adbe7892` (`0x1::coin::transfer<AptosCoin>`); Sui live deferred (non-SUI testnet token funding pending); no new lessons (leveraged L-015/L-016/L-018)
 
-**M1-M4: DONE | All protocols production threshold signing | All 68 security findings RESOLVED | 951 tests | GG20 + CGGMP21 + FROST + Stark ECDSA + HD derivation | First cross-chain token transfer (EVM ERC-20)**
+**M1-M4: DONE | All protocols production threshold signing | All 68 security findings RESOLVED | 956 tests | GG20 + CGGMP21 + FROST + Stark ECDSA + HD derivation | Cross-chain token transfer: EVM ERC-20 LIVE, Sui Coin<T> + Aptos Coin code-complete**
 
 ### Token Transfer Coverage (Sprint 44–45 onward)
 
@@ -253,8 +254,9 @@ First cross-chain token transfer support shipped. Native-asset sends remain cove
 | Chain | Token Standard | Status | Sprint |
 |-------|----------------|--------|--------|
 | EVM | ERC-20 | LIVE (USDC-Sepolia) | 45 |
-| Sui | Coin objects | PLANNED | 46 |
-| Aptos | coin / FA | PLANNED | 47 |
+| Sui | `Coin<T>` (PTB SplitCoins+TransferObjects) | CODE-COMPLETE (live pending non-SUI testnet token) | 46 |
+| Aptos | legacy `0x1::coin::transfer<T>` | LIVE (testnet `0x72c2e3b5…`, `<AptosCoin>` path) | 46 |
+| Aptos | Fungible Asset (`0x1::primary_fungible_store`) | PLANNED | 47 |
 | TRON | TRC-20 | PLANNED | 48 |
 | Solana | SPL | PLANNED | 49 |
 
