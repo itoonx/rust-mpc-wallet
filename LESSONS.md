@@ -959,3 +959,39 @@ Added an `eth_estimateGas` helper to `evm/rpc_client.rs`. Threaded the token spe
 > presign — including any contract-call rewrite. A static gas floor is only safe for the
 > single narrow case it was measured for (plain native transfers); the moment calldata
 > changes shape, the floor is wrong.
+
+---
+
+## L-019: Aptos has two address conventions — short-form framework constants vs strict derived addresses (Sprint 47)
+
+**Date:** 2026-05-10
+**Category:** Bug
+**Severity:** MEDIUM
+
+**What happened:**
+Wiring up Aptos Fungible Asset transfers (`0x1::primary_fungible_store::transfer`), the type
+argument and the canonical APT Metadata Object both use short-form framework constants like
+`0xa`. The strict 64-char hex parser used everywhere else in the Aptos module (which we keep
+strict on purpose — it catches copy-truncation bugs on user-supplied sender/recipient
+addresses) rejected `0xa` and similar short forms. The reference vector from
+`@aptos-labs/ts-sdk` left-pads short-form constants to 32 bytes; we needed to do the same for
+type args without weakening the strict parser used for sender/recipient.
+
+**Root cause:**
+Aptos addresses have two coexisting conventions: derived/user-controlled addresses are 32-byte
+opaque values (presented as 64-char hex, never abbreviated); framework constants
+(`0x1`, `0xa`, etc.) are short-form by convention. A single parser cannot serve both — strict
+catches truncation, lenient accepts framework constants. They serve different validation goals.
+
+**Fix / Resolution:**
+Added a dedicated `parse_aptos_address_padded` parser that accepts short-form (e.g. `0xa`) and
+left-pads to 32 bytes. Used **only** for framework constant type-arg paths (the canonical
+`0x1::fungible_asset::Metadata` type tag and the `0xa` APT metadata Object). Sender, recipient,
+and any user-controlled address parsing remain on the strict 64-char path. Reference vector
+matches `@aptos-labs/ts-sdk` byte-for-byte (265 bytes).
+
+**Takeaway:**
+> When a chain has multiple address conventions, write multiple parsers — don't compromise
+> the strict one. The right split is by **call site**, not by input shape: framework constants
+> are short, user-controlled addresses are strict. Conflating them creates either truncation
+> bugs (if you weaken strict) or rejected legit txs (if you over-strict the framework path).
