@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-10 (Sprint 48: TRON TRC-20 token transfer)
+
+### Added
+
+- **TRON TRC-20 token transfer** — `TriggerSmartContract` (ContractType=31) added
+  alongside the existing `TransferContract` (ContractType=1) in `tron/proto.rs`.
+  New encoders: `encode_trigger_smart_contract`, `encode_any_trigger`, and
+  `encode_contract_envelope` (generalizes the prior contract wrapper). Constants
+  `CONTRACT_TYPE_TRANSFER=1` and `CONTRACT_TYPE_TRIGGER_SMART_CONTRACT=31` are
+  now exposed.
+- `build_trc20_transfer_raw_data` one-shot helper that builds a TRC-20 raw
+  transaction with a **mandatory `fee_limit`** — TVM contract calls require
+  it on the wire (opposite of L-017's native-transfer omission rule).
+- `tron/tx.rs::encode_trc20_transfer_calldata` — emits the 68-byte ABI payload:
+  selector `0xa9059cbb` + 32-byte padded recipient (`hash160`, dropping the
+  TRON `0x41` prefix) + 32-byte big-endian amount.
+- `build_tron_transaction` now dispatches `TokenIdentifier::Tron` to the
+  TRC-20 path with `fee_limit` defaulting to 100 TRX (100_000_000 sun).
+- `decode_contract_to_json` dispatches on contract type and decodes
+  `TriggerSmartContract` bodies into the broadcast JSON shape used by node
+  RPC endpoints.
+- CLI `presign` branches by contract type: TRC-20 auto-injects
+  `fee_limit = 100_000_000` sun in the printed raw-data preview; native
+  TRX continues to omit `fee_limit` per L-017.
+- **Reference vector test** — 211-byte tronweb reference pinned byte-equal in
+  `tron::proto::tests::proto_matches_tronweb_trc20_reference`.
+- **Live TRON Shasta MPC broadcast** of a TRC-20 transfer:
+  tx `0x54a73460ea78e5558ce78471e72600c68cc88a428dd76f2a47aa7a5e527fc296`
+  — 0.0001 USDT (community testnet `TG3XXyExBkPp9nzdajDZsozEu4BkaSJozs`)
+  self-transfer signed via GG20 ECDSA from MPC key shares.
+
+### Changed
+
+- Test count: **957 → 958** (`+1` TRC-20 tronweb reference vector).
+- Token Transfer Coverage table: TRON TRC-20 promoted from `PLANNED` to `LIVE`.
+
+### Notes
+
+- No new retro lessons — the TRC-20 path worked first try by leveraging
+  L-017 (native TRON `fee_limit` omission rule) and inverting it for TVM
+  contract calls.
+- No new security findings; all 68 prior findings remain RESOLVED.
+
 ## [0.8.0] - 2026-05-10 (Sprint 47: Aptos Fungible Asset `primary_fungible_store::transfer`)
 
 ### Added

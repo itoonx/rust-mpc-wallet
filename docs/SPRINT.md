@@ -1,6 +1,6 @@
 # Sprint Log
 
-> **Current state (as of 2026-05-10):** Sprint 47 COMPLETE — merged to `main`. 957 tests passing.
+> **Current state (as of 2026-05-10):** Sprint 48 COMPLETE — merged to `main`. 958 tests passing.
 > 956 tests, 7 production threshold protocols, 68/68 security findings resolved,
 > 6 chains with live testnet MPC broadcast coverage (Sepolia, Solana devnet,
 > Bitcoin testnet, Sui testnet, Aptos testnet, TRON Shasta), plus cross-chain
@@ -1752,3 +1752,22 @@ Aptos Fungible Asset (FA) standard — `0x1::primary_fungible_store::transfer`.
 - Live tx `0xb3a41e3339db31111b8613442d895ffe2fc15615bd8624a821d52bc72b8f76f8`: native APT sent through the FA path at canonical metadata `0xa` — same value, different wire path than the Sprint 46 `<AptosCoin>` legacy tx.
 - `parse_aptos_address_padded` accepts short-form like `0xa` and left-pads to 32 bytes (only used for framework constant type args). Sender/recipient still require strict 64-char hex to catch truncation bugs.
 - Reference vector validation: 265-byte BCS output byte-equal to `@aptos-labs/ts-sdk`, pinned in `aptos::types::tests::bcs_matches_aptos_sdk_fa_reference`.
+
+---
+
+## Sprint 48 Gate Status (2026-05-10 — ALL MERGED)
+
+TRON TRC-20 token transfer — `TriggerSmartContract` (ContractType=31) + ABI calldata.
+
+| Sprint | Theme | Owner | R6 Verdict | Merged | Result |
+|--------|-------|-------|------------|--------|--------|
+| 48 | TRON TRC-20 (`TriggerSmartContract` + `transfer(address,uint256)`) | R3+R4 | APPROVED | ✓ | Protobuf `encode_trigger_smart_contract`/`encode_any_trigger`/`encode_contract_envelope` (generalizes prior contract wrapper); constants `CONTRACT_TYPE_TRANSFER=1` + `CONTRACT_TYPE_TRIGGER_SMART_CONTRACT=31`; `build_trc20_transfer_raw_data` one-shot helper with **mandatory `fee_limit`** (TVM calls require it — opposite of L-017's native-transfer omission); `decode_contract_to_json` dispatches by contract type; `encode_trc20_transfer_calldata` emits 68-byte selector `0xa9059cbb` + 32-byte recipient (hash160, drops `0x41` prefix) + 32-byte amount; `build_tron_transaction` dispatches `TokenIdentifier::Tron` to TRC-20 path with `fee_limit` defaulting to 100 TRX; CLI presign branches by contract type (TRC-20 auto-injects `fee_limit=100_000_000` sun, native still omits per L-017); 211-byte tronweb reference vector pinned in `tron::proto::tests::proto_matches_tronweb_trc20_reference`; live Shasta tx `0x54a73460ea78e5558ce78471e72600c68cc88a428dd76f2a47aa7a5e527fc296` (community testnet USDT `TG3XXyExBkPp9nzdajDZsozEu4BkaSJozs`, 0.0001 USDT self-transfer). |
+
+**Sprint 48 result:** 958 tests pass (was 957; +1 TRC-20 tronweb reference vector test `tron::proto::tests::proto_matches_tronweb_trc20_reference`), fmt + clippy clean.
+**Security:** No new findings. All 68 prior findings remain RESOLVED.
+**Lessons:** None — TRC-20 path worked first try by leveraging L-017 (native-transfer fee_limit omission) and inverting it for TVM contract calls.
+
+### Sprint 48 highlights
+- TRC-20 vs native TRON: TVM contract calls **require** `fee_limit` in the raw protobuf (default 100 TRX = 100_000_000 sun); native transfers must **omit** it (per L-017). CLI dispatches by contract type to pick the right path.
+- Calldata layout: 68 bytes total — selector `0xa9059cbb` (4) + recipient (32, padded hash160 with `0x41` TRON prefix dropped) + amount (32, big-endian).
+- Live Shasta tx `0x54a73460ea78e5558ce78471e72600c68cc88a428dd76f2a47aa7a5e527fc296`: 0.0001 USDT (community testnet `TG3XXyExBkPp9nzdajDZsozEu4BkaSJozs`) self-transfer with GG20 ECDSA signature, byte-equal to tronweb reference (211 bytes).
