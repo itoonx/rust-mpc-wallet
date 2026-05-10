@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-10 (Sprint 44–45: First cross-chain token transfer — EVM ERC-20)
+
+### Added
+
+- **Sprint 44** — Cross-chain token transfer schema (`TokenIdentifier`) at chain-crate level,
+  research + design only (no chain wire-up)
+- **Sprint 45** — EVM ERC-20 token transfer support; first live USDC-Sepolia MPC broadcast
+  `0x23ab51bde4db9e737f0f6039c21bf418f68147d230f9100119715643ceb090a9`
+  (0.1 USDC self-transfer, 40,707 gas, sepolia-test wallet)
+- `crates/mpc-wallet-chains/src/token.rs` — `TokenIdentifier` schema implementation
+- `crates/mpc-wallet-chains/src/evm/erc20.rs` — ERC-20 ABI encoder, validated byte-equal
+  against viem-pinned reference vector
+- `build_evm_transaction` detects `extra["token"]` and rewrites `to`/`value`/`data` for ERC-20
+- `eth_estimateGas` helper in `evm/rpc_client.rs`; token spec threaded into
+  `fetch_presign_extras` for dynamic `gas_limit`
+- CLI `--token <shorthand>` flag (e.g. `erc20:0x...`) and `--token-json` escape hatch
+- New retro lesson L-018 (EVM `gas_limit` must be dynamic via `eth_estimateGas` —
+  "simulate first, sign second" applies to all chains with per-tx exec caps)
+
+### Fixed
+
+- EVM ERC-20 broadcasts no longer rejected for out-of-gas: dynamic `gas_limit` via
+  `eth_estimateGas` replaces the static EOA-floor 21k that worked only for plain ETH transfers (L-018)
+
+### Changed
+
+- Test count: 941 → 951 (+10 from `token.rs` + `erc20.rs`)
+
+### Security
+
+- No new findings. All 68 prior findings remain RESOLVED.
+
 ## [0.5.0] - 2026-05-10 (Sprint 38–43: Live testnet MPC broadcasts on 6 chains)
 
 ### Added
@@ -183,7 +215,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SEC-015: Debug leaks share bytes → manual Debug with `[REDACTED]`
 - SEC-016: Bitcoin unwrap → proper error propagation
 
-[Unreleased]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.2.0...v0.3.0
