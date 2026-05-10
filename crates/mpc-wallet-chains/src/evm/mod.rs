@@ -1,4 +1,5 @@
 pub mod address;
+pub mod erc20;
 pub mod rpc_client;
 pub mod signer;
 pub mod tx;
