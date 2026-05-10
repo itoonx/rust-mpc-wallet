@@ -716,24 +716,24 @@ async fn fetch_presign_extras(
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
         let expiration = now_ms.saturating_add(60_000); // 60-second window
-        let fee_limit: i64 = 100_000_000; // 100 TRX cap (refunded for transfers)
         let owner_hex = hex::encode(
             mpc_wallet_chains::tron::tx::decode_tron_address(sender)
                 .map_err(|e| anyhow::anyhow!(e))?,
         );
         eprintln!(
-            "✓ block=ref_block_bytes:0x{} hash:0x{} exp=now+60s fee_limit={}",
+            "✓ block=ref_block_bytes:0x{} hash:0x{} exp=now+60s (fee_limit omitted — TransferContract)",
             hex::encode(block_ref.ref_block_bytes),
             hex::encode(block_ref.ref_block_hash),
-            fee_limit,
         );
+        // Native TransferContract: NO fee_limit (smart-contract-only field).
+        // Including it produces a non-canonical raw_data_hex that fails
+        // TronGrid's raw_data_hex ↔ raw_data JSON cross-check.
         return Ok(Some(serde_json::json!({
             "owner_address": owner_hex,
             "ref_block_bytes": hex::encode(block_ref.ref_block_bytes),
             "ref_block_hash": hex::encode(block_ref.ref_block_hash),
             "timestamp": now_ms,
             "expiration": expiration,
-            "fee_limit": fee_limit,
         })));
     }
     Ok(None)

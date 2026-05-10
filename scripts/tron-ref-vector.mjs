@@ -17,7 +17,10 @@ const REF_BLOCK_BYTES_HEX = "0001";
 const REF_BLOCK_HASH_HEX = "0102030405060708";
 const TIMESTAMP = 1_700_000_000_000;
 const EXPIRATION = TIMESTAMP + 60_000;
-const FEE_LIMIT = 100_000_000;
+// fee_limit (field 18) is omitted: TRON only uses it for TriggerSmartContract,
+// not native TransferContract. tronweb's transactionBuilder.sendTrx does the
+// same — including it produces a non-canonical raw_data_hex that fails
+// validator cross-check against the parsed raw_data JSON object.
 
 const tronWeb = new TronWeb({ fullHost: "https://api.shasta.trongrid.io" });
 
@@ -39,7 +42,6 @@ const txJson = {
     ref_block_bytes: REF_BLOCK_BYTES_HEX,
     ref_block_hash: REF_BLOCK_HASH_HEX,
     expiration: EXPIRATION,
-    fee_limit: FEE_LIMIT,
     timestamp: TIMESTAMP,
   },
   visible: false,
@@ -79,7 +81,6 @@ console.log(
         ref_block_hash: REF_BLOCK_HASH_HEX,
         timestamp: TIMESTAMP,
         expiration: EXPIRATION,
-        fee_limit: FEE_LIMIT,
       },
       raw_hex: "0x" + rawHex,
       raw_len: rawBytes.length,

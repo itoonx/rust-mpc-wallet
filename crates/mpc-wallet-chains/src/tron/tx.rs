@@ -53,19 +53,17 @@ fn parse_i64_field(extra: &serde_json::Value, key: &str) -> Result<i64, CoreErro
 /// Recover the T-address that signed a TRON transaction.
 ///
 /// `prehash` is the 32-byte `SHA-256(raw_data)` payload MPC signed.
-/// `recovery_id ∈ {0, 1}` (TRON does NOT use Ethereum's `27 + parity`).
-pub fn recover_tron_sender(prehash: &[u8], sig: &MpcSignature) -> Result<String, CoreError> {
+/// `parity ∈ {0, 1}` is the raw recovery id (the wire-format `v` byte is
+/// `27 + parity` per Ethereum convention — `tronweb` writes `0x1B`/`0x1C`).
+pub fn recover_tron_sender_from_parity(
+    prehash: &[u8],
+    r: &[u8],
+    s: &[u8],
+    parity: u8,
+) -> Result<String, CoreError> {
     use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
     use mpc_wallet_core::protocol::GroupPublicKey;
 
-    let (r, s, v) = match sig {
-        MpcSignature::Ecdsa { r, s, recovery_id } => (r, s, *recovery_id),
-        _ => {
-            return Err(CoreError::InvalidInput(
-                "TRON requires ECDSA signature".into(),
-            ))
-        }
-    };
     if r.len() != 32 || s.len() != 32 {
         return Err(CoreError::InvalidInput(format!(
             "TRON sig must be r=32 s=32, got r={} s={}",
@@ -84,14 +82,29 @@ pub fn recover_tron_sender(prehash: &[u8], sig: &MpcSignature) -> Result<String,
     rs[32..].copy_from_slice(s);
     let signature =
         Signature::from_slice(&rs).map_err(|e| CoreError::Crypto(format!("invalid sig: {e}")))?;
-    let recovery_id = RecoveryId::try_from(v)
-        .map_err(|e| CoreError::Crypto(format!("invalid recovery_id {v}: {e}")))?;
+    let recovery_id = RecoveryId::try_from(parity)
+        .map_err(|e| CoreError::Crypto(format!("invalid parity {parity}: {e}")))?;
     let verifying = VerifyingKey::recover_from_prehash(prehash, &signature, recovery_id)
         .map_err(|e| CoreError::Crypto(format!("recover_from_prehash: {e}")))?;
     let group_pubkey = GroupPublicKey::Secp256k1Uncompressed(
         verifying.to_encoded_point(false).as_bytes().to_vec(),
     );
     crate::tron::address::derive_tron_address(&group_pubkey)
+}
+
+/// Recover the T-address from a signed TRON tx. Reads `recovery_id` from the
+/// MpcSignature directly (raw 0/1 — what GG20/CGGMP21 produce internally
+/// before wire-format encoding).
+pub fn recover_tron_sender(prehash: &[u8], sig: &MpcSignature) -> Result<String, CoreError> {
+    let (r, s, parity) = match sig {
+        MpcSignature::Ecdsa { r, s, recovery_id } => (r, s, *recovery_id),
+        _ => {
+            return Err(CoreError::InvalidInput(
+                "TRON requires ECDSA signature".into(),
+            ))
+        }
+    };
+    recover_tron_sender_from_parity(prehash, r, s, parity)
 }
 
 /// Decode a base58check T-address to its 21-byte raw form (`0x41 ‖ hash160`).
@@ -111,7 +124,12 @@ pub fn decode_tron_address(addr: &str) -> Result<Vec<u8>, CoreError> {
 /// - `ref_block_hash` (hex, 8 bytes)
 /// - `expiration` (i64, ms since epoch)
 /// - `timestamp` (i64, ms since epoch)
-/// - `fee_limit` (i64, sun — defaults handled by caller)
+///
+/// Optional:
+/// - `fee_limit` (i64, sun) — only encoded for `TriggerSmartContract` flows.
+///   Native TransferContract MUST omit this; tronweb does the same. Including
+///   it produces a non-canonical body that fails the validator's
+///   `raw_data_hex` ↔ `raw_data` JSON cross-check.
 ///
 /// `params.value` is the transfer amount in **sun** (1 TRX = 1_000_000 sun).
 /// `params.to` is a base58 T-address.
@@ -137,7 +155,7 @@ pub async fn build_tron_transaction(
     let ref_block_hash_v = parse_hex_field(extra, "ref_block_hash", 8)?;
     let expiration = parse_i64_field(extra, "expiration")?;
     let timestamp = parse_i64_field(extra, "timestamp")?;
-    let fee_limit = parse_i64_field(extra, "fee_limit")?;
+    let fee_limit = extra.get("fee_limit").and_then(|v| v.as_i64());
 
     let to = decode_tron_address(&params.to)?;
 
@@ -172,8 +190,8 @@ pub async fn build_tron_transaction(
 /// Finalize a TRON transaction with an ECDSA signature.
 ///
 /// Wire format on the trailing 65 bytes: `r(32) ‖ s(32) ‖ v(1)`.
-/// `v` is the raw `recovery_id ∈ {0, 1}` — TRON does NOT use Ethereum's
-/// `27 + parity` convention.
+/// `v = 27 + recovery_id` (Ethereum-style — `0x1B` or `0x1C`). `tronweb`
+/// writes the byte this way; TronGrid validators accept it directly.
 pub fn finalize_tron_transaction(
     unsigned: &UnsignedTransaction,
     sig: &MpcSignature,
@@ -193,11 +211,16 @@ pub fn finalize_tron_transaction(
             s.len()
         )));
     }
+    if recovery_id > 1 {
+        return Err(CoreError::Crypto(format!(
+            "TRON recovery_id must be 0 or 1, got {recovery_id}"
+        )));
+    }
 
     let mut raw_tx = unsigned.tx_data.clone();
     raw_tx.extend_from_slice(&r);
     raw_tx.extend_from_slice(&s);
-    raw_tx.push(recovery_id);
+    raw_tx.push(27 + recovery_id);
 
     // tx_hash = tx_id = SHA-256(raw_data) — TRON's canonical transaction id.
     let tx_hash = hex::encode(&unsigned.sign_payload);
@@ -214,7 +237,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finalize_appends_r_s_v() {
+    fn finalize_appends_r_s_v_with_eth_offset() {
         let unsigned = UnsignedTransaction {
             chain: Chain::Tron,
             sign_payload: vec![0xAA; 32],
@@ -229,6 +252,7 @@ mod tests {
         assert_eq!(signed.raw_tx.len(), 100 + TRON_SIG_LEN);
         assert_eq!(&signed.raw_tx[100..132], &[0x11; 32]);
         assert_eq!(&signed.raw_tx[132..164], &[0x22; 32]);
-        assert_eq!(signed.raw_tx[164], 1);
+        // 27 + parity(1) = 0x1C — Ethereum-style v byte.
+        assert_eq!(signed.raw_tx[164], 0x1C);
     }
 }

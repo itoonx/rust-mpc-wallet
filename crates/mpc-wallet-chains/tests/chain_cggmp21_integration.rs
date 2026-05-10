@@ -137,7 +137,6 @@ async fn test_tron_with_cggmp21_signature() {
             "ref_block_hash": "0102030405060708",
             "expiration": 1_700_000_060_000i64,
             "timestamp": 1_700_000_000_000i64,
-            "fee_limit": 100_000_000i64,
         })),
     };
     let unsigned = provider.build_transaction(params).await.unwrap();

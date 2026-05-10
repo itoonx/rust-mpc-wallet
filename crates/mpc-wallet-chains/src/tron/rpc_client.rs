@@ -8,6 +8,8 @@
 use mpc_wallet_core::error::CoreError;
 use serde_json::Value;
 
+use crate::tron::proto;
+
 /// Reference block info — the (block_bytes, block_hash) pair the validator
 /// uses to anchor a transaction to a recent block (replay protection).
 pub struct BlockRef {
@@ -96,8 +98,13 @@ impl TronRpcClient {
     }
 
     /// `POST /wallet/broadcasttransaction` with the JSON-shaped signed tx.
-    /// `raw_tx` MUST be the protobuf raw_data bytes (NO trailing signature).
-    /// Returns the canonical tx_id (hex of SHA-256(raw_data)).
+    /// `raw_data` is the protobuf `Transaction.raw` body (no trailing sig);
+    /// `sig` is `r ‖ s ‖ v` with `v = 27 + parity`. The body MUST include
+    /// both `raw_data_hex` and the structured `raw_data` object — the
+    /// validator independently parses each and cross-checks them. Omitting
+    /// `raw_data` causes TronGrid to silently return swagger reflection
+    /// (`{ Error: string }`) instead of a real validator error, masking the
+    /// problem. Returns the canonical `tx_id` (hex of `SHA-256(raw_data)`).
     pub async fn broadcast(&self, raw_data: &[u8], sig: &[u8]) -> Result<String, CoreError> {
         if sig.len() != 65 {
             return Err(CoreError::InvalidInput(format!(
@@ -108,28 +115,43 @@ impl TronRpcClient {
         use sha2::{Digest, Sha256};
         let tx_id = hex::encode(Sha256::digest(raw_data));
 
+        let raw_data_json = proto::decode_transfer_raw_to_json(raw_data)
+            .map_err(|e| CoreError::Other(format!("TRON raw_data decode for broadcast: {e}")))?;
+
         let body = serde_json::json!({
+            "visible": false,
             "txID": tx_id,
+            "raw_data": raw_data_json,
             "raw_data_hex": hex::encode(raw_data),
             "signature": [hex::encode(sig)],
         });
         let resp = self.post("/wallet/broadcasttransaction", body).await?;
 
-        if resp.get("result").and_then(|r| r.as_bool()) != Some(true) {
-            let code = resp
-                .get("code")
-                .and_then(|c| c.as_str())
-                .unwrap_or("UNKNOWN");
-            // `message` comes back hex-encoded ASCII per TronGrid convention.
-            let raw_msg = resp.get("message").and_then(|m| m.as_str()).unwrap_or("");
-            let decoded = hex::decode(raw_msg)
-                .ok()
-                .and_then(|v| String::from_utf8(v).ok())
-                .unwrap_or_else(|| raw_msg.to_string());
-            return Err(CoreError::Other(format!(
-                "TRON broadcast rejected: {code}: {decoded}"
-            )));
+        // TronGrid responds with `{result: true, txid: "..."}` on success.
+        // On failure the shape varies: sometimes `{code, message}` (message
+        // hex-encoded), sometimes `{Error: "..."}`, sometimes the body echoes
+        // back with no `result` field at all when validation fails before the
+        // node even parses the tx. Dump the raw response when anything looks
+        // off so we don't have to guess at TronGrid's mood.
+        if resp.get("result").and_then(|r| r.as_bool()) == Some(true) {
+            return Ok(tx_id);
         }
-        Ok(tx_id)
+        let code = resp
+            .get("code")
+            .and_then(|c| c.as_str())
+            .unwrap_or("UNKNOWN");
+        let raw_msg = resp.get("message").and_then(|m| m.as_str()).unwrap_or("");
+        let decoded = hex::decode(raw_msg)
+            .ok()
+            .and_then(|v| String::from_utf8(v).ok())
+            .unwrap_or_else(|| raw_msg.to_string());
+        let error_field = resp
+            .get("Error")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
+        Err(CoreError::Other(format!(
+            "TRON broadcast rejected: code={code} msg='{decoded}' error='{error_field}' raw={resp}"
+        )))
     }
 }

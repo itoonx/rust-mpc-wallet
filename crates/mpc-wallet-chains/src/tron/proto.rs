@@ -84,6 +84,10 @@ pub fn encode_contract_transfer(any: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Encode `Transaction.raw`. `fee_limit_sun` is omitted when None — TRON only
+/// requires it for `TriggerSmartContract`, never for native `TransferContract`.
+/// Including it produces a non-canonical body that fails the validator's
+/// raw_data_hex ↔ raw_data JSON cross-check.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_raw_data(
     ref_block_bytes: &[u8; 2],
@@ -91,16 +95,17 @@ pub fn encode_raw_data(
     expiration_ms: i64,
     contract_bytes: &[u8],
     timestamp_ms: i64,
-    fee_limit_sun: i64,
+    fee_limit_sun: Option<i64>,
 ) -> Vec<u8> {
-    let mut out =
-        Vec::with_capacity(2 + 2 + 2 + 8 + 2 + 8 + 2 + contract_bytes.len() + 2 + 8 + 2 + 8);
+    let mut out = Vec::with_capacity(48 + contract_bytes.len());
     write_bytes_field(&mut out, 1, ref_block_bytes);
     write_bytes_field(&mut out, 4, ref_block_hash);
     write_int64_field(&mut out, 8, expiration_ms);
     write_bytes_field(&mut out, 11, contract_bytes);
     write_int64_field(&mut out, 14, timestamp_ms);
-    write_int64_field(&mut out, 18, fee_limit_sun);
+    if let Some(fl) = fee_limit_sun {
+        write_int64_field(&mut out, 18, fl);
+    }
     out
 }
 
@@ -114,7 +119,7 @@ pub fn build_transfer_raw_data(
     ref_block_hash: &[u8; 8],
     expiration_ms: i64,
     timestamp_ms: i64,
-    fee_limit_sun: i64,
+    fee_limit_sun: Option<i64>,
 ) -> Vec<u8> {
     let transfer = encode_transfer_contract(owner_21, to_21, amount_sun);
     let any = encode_any_transfer(&transfer);
@@ -127,6 +132,253 @@ pub fn build_transfer_raw_data(
         timestamp_ms,
         fee_limit_sun,
     )
+}
+
+/// Build the JSON shape `tronweb` POSTs as `raw_data` in
+/// `/wallet/broadcasttransaction`. The validator decodes this object
+/// independently and cross-checks it against `raw_data_hex`.
+///
+/// Keep this function in lock-step with [`build_transfer_raw_data`] — the JSON
+/// shape and the bytes MUST describe the same logical transaction.
+#[allow(clippy::too_many_arguments)]
+pub fn build_transfer_raw_data_json(
+    owner_21: &[u8],
+    to_21: &[u8],
+    amount_sun: i64,
+    ref_block_bytes: &[u8; 2],
+    ref_block_hash: &[u8; 8],
+    expiration_ms: i64,
+    timestamp_ms: i64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "contract": [{
+            "parameter": {
+                "value": {
+                    "owner_address": hex::encode(owner_21),
+                    "to_address": hex::encode(to_21),
+                    "amount": amount_sun,
+                },
+                "type_url": TRANSFER_TYPE_URL,
+            },
+            "type": "TransferContract",
+        }],
+        "ref_block_bytes": hex::encode(ref_block_bytes),
+        "ref_block_hash": hex::encode(ref_block_hash),
+        "expiration": expiration_ms,
+        "timestamp": timestamp_ms,
+    })
+}
+
+// ── Bytes → JSON (for broadcast `raw_data` object) ──────────────────────────
+
+fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
+    let mut v = 0u64;
+    let mut shift = 0u32;
+    for (i, &b) in buf.iter().enumerate() {
+        v |= ((b & 0x7f) as u64) << shift;
+        if b & 0x80 == 0 {
+            return Some((v, i + 1));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+    None
+}
+
+fn parse_tag(buf: &[u8]) -> Option<(u32, u32, usize)> {
+    let (raw, n) = read_varint(buf)?;
+    Some(((raw >> 3) as u32, (raw & 0x7) as u32, n))
+}
+
+fn read_len_delimited(buf: &[u8]) -> Option<(&[u8], usize)> {
+    let (len, n) = read_varint(buf)?;
+    let total = n + len as usize;
+    if total > buf.len() {
+        return None;
+    }
+    Some((&buf[n..total], total))
+}
+
+/// Decode a `TransferContract` `Transaction.raw` blob back into the JSON shape
+/// `tronweb` POSTs as the `raw_data` field of `/wallet/broadcasttransaction`.
+/// The validator independently parses our `raw_data_hex` and cross-checks it
+/// against this JSON object — they MUST describe the same logical tx.
+pub fn decode_transfer_raw_to_json(mut buf: &[u8]) -> Result<serde_json::Value, &'static str> {
+    let mut ref_block_bytes: Option<String> = None;
+    let mut ref_block_hash: Option<String> = None;
+    let mut expiration: Option<i64> = None;
+    let mut timestamp: Option<i64> = None;
+    let mut fee_limit: Option<i64> = None;
+    let mut contract_value: Option<serde_json::Value> = None;
+
+    while !buf.is_empty() {
+        let (field, wire, n) = parse_tag(buf).ok_or("tag")?;
+        buf = &buf[n..];
+        match (field, wire) {
+            (1, 2) => {
+                let (b, n) = read_len_delimited(buf).ok_or("ref_block_bytes")?;
+                ref_block_bytes = Some(hex::encode(b));
+                buf = &buf[n..];
+            }
+            (4, 2) => {
+                let (b, n) = read_len_delimited(buf).ok_or("ref_block_hash")?;
+                ref_block_hash = Some(hex::encode(b));
+                buf = &buf[n..];
+            }
+            (8, 0) => {
+                let (v, n) = read_varint(buf).ok_or("expiration")?;
+                expiration = Some(v as i64);
+                buf = &buf[n..];
+            }
+            (11, 2) => {
+                let (contract_buf, n) = read_len_delimited(buf).ok_or("contract")?;
+                contract_value = Some(decode_contract_to_json(contract_buf)?);
+                buf = &buf[n..];
+            }
+            (14, 0) => {
+                let (v, n) = read_varint(buf).ok_or("timestamp")?;
+                timestamp = Some(v as i64);
+                buf = &buf[n..];
+            }
+            (18, 0) => {
+                let (v, n) = read_varint(buf).ok_or("fee_limit")?;
+                fee_limit = Some(v as i64);
+                buf = &buf[n..];
+            }
+            // Skip unknown fields by advancing past their payload.
+            (_, 0) => {
+                let (_, n) = read_varint(buf).ok_or("varint skip")?;
+                buf = &buf[n..];
+            }
+            (_, 2) => {
+                let (_, n) = read_len_delimited(buf).ok_or("len skip")?;
+                buf = &buf[n..];
+            }
+            _ => return Err("unsupported wire type"),
+        }
+    }
+
+    let mut obj = serde_json::Map::new();
+    obj.insert(
+        "contract".into(),
+        serde_json::Value::Array(vec![contract_value.ok_or("missing contract")?]),
+    );
+    obj.insert(
+        "ref_block_bytes".into(),
+        serde_json::Value::String(ref_block_bytes.ok_or("missing ref_block_bytes")?),
+    );
+    obj.insert(
+        "ref_block_hash".into(),
+        serde_json::Value::String(ref_block_hash.ok_or("missing ref_block_hash")?),
+    );
+    obj.insert(
+        "expiration".into(),
+        serde_json::Value::Number(expiration.ok_or("missing expiration")?.into()),
+    );
+    if let Some(fl) = fee_limit {
+        obj.insert("fee_limit".into(), serde_json::Value::Number(fl.into()));
+    }
+    obj.insert(
+        "timestamp".into(),
+        serde_json::Value::Number(timestamp.ok_or("missing timestamp")?.into()),
+    );
+    Ok(serde_json::Value::Object(obj))
+}
+
+fn decode_contract_to_json(mut buf: &[u8]) -> Result<serde_json::Value, &'static str> {
+    let mut type_num: Option<u64> = None;
+    let mut parameter: Option<serde_json::Value> = None;
+    while !buf.is_empty() {
+        let (field, wire, n) = parse_tag(buf).ok_or("contract tag")?;
+        buf = &buf[n..];
+        match (field, wire) {
+            (1, 0) => {
+                let (v, n) = read_varint(buf).ok_or("contract type")?;
+                type_num = Some(v);
+                buf = &buf[n..];
+            }
+            (2, 2) => {
+                let (any_buf, n) = read_len_delimited(buf).ok_or("contract parameter")?;
+                parameter = Some(decode_any_transfer_to_json(any_buf)?);
+                buf = &buf[n..];
+            }
+            _ => return Err("unexpected contract field"),
+        }
+    }
+    let type_str = match type_num.ok_or("contract type missing")? {
+        1 => "TransferContract",
+        other => {
+            return Err(Box::leak(
+                format!("unsupported contract type {other}").into_boxed_str(),
+            ))
+        }
+    };
+    Ok(serde_json::json!({
+        "parameter": parameter.ok_or("contract parameter missing")?,
+        "type": type_str,
+    }))
+}
+
+fn decode_any_transfer_to_json(mut buf: &[u8]) -> Result<serde_json::Value, &'static str> {
+    let mut type_url: Option<String> = None;
+    let mut value_bytes: Option<Vec<u8>> = None;
+    while !buf.is_empty() {
+        let (field, wire, n) = parse_tag(buf).ok_or("any tag")?;
+        buf = &buf[n..];
+        match (field, wire) {
+            (1, 2) => {
+                let (b, n) = read_len_delimited(buf).ok_or("any type_url")?;
+                type_url = Some(String::from_utf8(b.to_vec()).map_err(|_| "type_url utf8")?);
+                buf = &buf[n..];
+            }
+            (2, 2) => {
+                let (b, n) = read_len_delimited(buf).ok_or("any value")?;
+                value_bytes = Some(b.to_vec());
+                buf = &buf[n..];
+            }
+            _ => return Err("unexpected any field"),
+        }
+    }
+    let value = decode_transfer_value_to_json(&value_bytes.ok_or("any value missing")?)?;
+    Ok(serde_json::json!({
+        "value": value,
+        "type_url": type_url.ok_or("any type_url missing")?,
+    }))
+}
+
+fn decode_transfer_value_to_json(mut buf: &[u8]) -> Result<serde_json::Value, &'static str> {
+    let mut owner: Option<String> = None;
+    let mut to: Option<String> = None;
+    let mut amount: Option<i64> = None;
+    while !buf.is_empty() {
+        let (field, wire, n) = parse_tag(buf).ok_or("value tag")?;
+        buf = &buf[n..];
+        match (field, wire) {
+            (1, 2) => {
+                let (b, n) = read_len_delimited(buf).ok_or("owner")?;
+                owner = Some(hex::encode(b));
+                buf = &buf[n..];
+            }
+            (2, 2) => {
+                let (b, n) = read_len_delimited(buf).ok_or("to")?;
+                to = Some(hex::encode(b));
+                buf = &buf[n..];
+            }
+            (3, 0) => {
+                let (v, n) = read_varint(buf).ok_or("amount")?;
+                amount = Some(v as i64);
+                buf = &buf[n..];
+            }
+            _ => return Err("unexpected transfer field"),
+        }
+    }
+    Ok(serde_json::json!({
+        "owner_address": owner.ok_or("owner missing")?,
+        "to_address": to.ok_or("to missing")?,
+        "amount": amount.ok_or("amount missing")?,
+    }))
 }
 
 #[cfg(test)]
@@ -145,19 +397,6 @@ mod tests {
         }
     }
 
-    fn read_varint(buf: &[u8]) -> Option<(u64, usize)> {
-        let mut v = 0u64;
-        let mut shift = 0;
-        for (i, &b) in buf.iter().enumerate() {
-            v |= ((b & 0x7f) as u64) << shift;
-            if b & 0x80 == 0 {
-                return Some((v, i + 1));
-            }
-            shift += 7;
-        }
-        None
-    }
-
     /// Reference vector captured via `node scripts/tron-ref-vector.mjs`.
     /// Asserts byte-for-byte parity against `tronweb`'s native protobuf encoder.
     #[test]
@@ -169,7 +408,6 @@ mod tests {
         let ref_block_hash: [u8; 8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
         let timestamp: i64 = 1_700_000_000_000;
         let expiration: i64 = 1_700_000_060_000;
-        let fee_limit: i64 = 100_000_000;
 
         let raw = build_transfer_raw_data(
             &owner,
@@ -179,10 +417,10 @@ mod tests {
             &ref_block_hash,
             expiration,
             timestamp,
-            fee_limit,
+            None,
         );
 
-        let expected_hex = "0a0200012208010203040506070840e0a499ffbc315a67080112630a2d747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e5472616e73666572436f6e747261637412320a15411111111111111111111111111111111111111111121541222222222222222222222222222222222222222218c0843d7080d095ffbc31900180c2d72f";
+        let expected_hex = "0a0200012208010203040506070840e0a499ffbc315a67080112630a2d747970652e676f6f676c65617069732e636f6d2f70726f746f636f6c2e5472616e73666572436f6e747261637412320a15411111111111111111111111111111111111111111121541222222222222222222222222222222222222222218c0843d7080d095ffbc31";
         let expected = hex::decode(expected_hex).unwrap();
 
         assert_eq!(
@@ -196,7 +434,28 @@ mod tests {
         let tx_id = Sha256::digest(&raw);
         assert_eq!(
             hex::encode(tx_id),
-            "27a4f25e6990634ff0172305f32c25b04e6ea79605238bfbfee30962ffbc2f1a",
+            "e0139655d946fbdeeff8a8a0bfe82453354b97245fab8c13fb3ba39016a494e2",
         );
+
+        // Decoder round-trips: bytes → JSON → expected JSON shape.
+        let decoded = decode_transfer_raw_to_json(&raw).unwrap();
+        let expected_json = serde_json::json!({
+            "contract": [{
+                "parameter": {
+                    "value": {
+                        "owner_address": "411111111111111111111111111111111111111111",
+                        "to_address": "412222222222222222222222222222222222222222",
+                        "amount": 1_000_000,
+                    },
+                    "type_url": "type.googleapis.com/protocol.TransferContract",
+                },
+                "type": "TransferContract",
+            }],
+            "ref_block_bytes": "0001",
+            "ref_block_hash": "0102030405060708",
+            "expiration": 1_700_000_060_000i64,
+            "timestamp": 1_700_000_000_000i64,
+        });
+        assert_eq!(decoded, expected_json);
     }
 }
