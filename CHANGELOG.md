@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-10 (Sprint 47: Aptos Fungible Asset `primary_fungible_store::transfer`)
+
+### Added
+
+- **Aptos Fungible Asset (FA) transfer** — `EntryFunction::primary_fungible_store_transfer`
+  + `RawTransaction::new_fungible_asset_transfer`. Wire format: type arg is always
+  `0x1::fungible_asset::Metadata`; args = `[Object<Metadata>, recipient, amount]`.
+  The Metadata Object **address** replaces `Coin<T>`'s type-system identity — same
+  logical asset, different on-chain identity model from the legacy `Coin<T>` path.
+- **Live Aptos testnet broadcast** validating the FA path: tx
+  `0xb3a41e3339db31111b8613442d895ffe2fc15615bd8624a821d52bc72b8f76f8` — native APT
+  routed through `primary_fungible_store::transfer` at canonical metadata `0xa`.
+- **`parse_aptos_address_padded`** address parser for short-form framework constants
+  (e.g. `0xa`); left-pads to 32 bytes. Sender/recipient still use strict 64-char hex
+  to catch copy-truncation bugs.
+- 265-byte BCS reference vector pinned via `@aptos-labs/ts-sdk` in
+  `aptos::types::tests::bcs_matches_aptos_sdk_fa_reference`.
+- New retro lesson **L-019** (Aptos has two address conventions — strict for derived
+  addresses, short-form tolerated for framework constants; needs split parser).
+
+### Changed
+
+- Test count: 956 → 957 (+1 FA reference vector).
+
+### Security
+
+- No new findings. All 68 prior findings remain RESOLVED.
+
 ## [0.7.0] - 2026-05-10 (Sprint 46: Sui `Coin<T>` + Aptos legacy `0x1::coin::transfer<T>`)
 
 ### Added
@@ -248,7 +276,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SEC-015: Debug leaks share bytes → manual Debug with `[REDACTED]`
 - SEC-016: Bitcoin unwrap → proper error propagation
 
-[Unreleased]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/itoonx/vaultex-mpc-rust/compare/v0.3.0...v0.4.0

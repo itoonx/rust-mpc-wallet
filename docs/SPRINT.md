@@ -1,6 +1,6 @@
 # Sprint Log
 
-> **Current state (as of 2026-05-10):** Sprint 46 COMPLETE — merged to `main`.
+> **Current state (as of 2026-05-10):** Sprint 47 COMPLETE — merged to `main`. 957 tests passing.
 > 956 tests, 7 production threshold protocols, 68/68 security findings resolved,
 > 6 chains with live testnet MPC broadcast coverage (Sepolia, Solana devnet,
 > Bitcoin testnet, Sui testnet, Aptos testnet, TRON Shasta), plus cross-chain
@@ -1732,3 +1732,23 @@ Second token-transfer sprint: Sui `Coin<T>` + Aptos legacy `0x1::coin::transfer<
 - Sui PTB shape: source coin is now an `Input::Object` (object_ref) into `SplitCoins`, not the implicit `GasCoin`; transferred amount is a `pure u64` input; recipient is a `pure address` input. Type parameter `T` is **not** in the wire format.
 - Aptos `EntryFunction` path uses `module_id = 0x1::coin`, `function = transfer`, generic args = `[StructTag(T)]`, args = BCS(`recipient`, `amount`). `StructTag::parse("0x1::aptos_coin::AptosCoin")` constructs the type tag from the canonical string form.
 - CLI shorthand `--token sui-coin:0x...::module::Type` and `--token aptos-coin:0x...::module::Type` flow unchanged through the `TokenIdentifier` schema introduced in Sprint 44.
+
+---
+
+## Sprint 47 Gate Status (2026-05-10 — ALL MERGED)
+
+Aptos Fungible Asset (FA) standard — `0x1::primary_fungible_store::transfer`.
+
+| Sprint | Theme | Owner | R6 Verdict | Merged | Result |
+|--------|-------|-------|------------|--------|--------|
+| 47 | Aptos FA `primary_fungible_store::transfer` | R3 | APPROVED | ✓ | `EntryFunction::primary_fungible_store_transfer` + `RawTransaction::new_fungible_asset_transfer`; type arg always `0x1::fungible_asset::Metadata`, args = `[Object<Metadata>, recipient, amount]`; `parse_aptos_address_padded` for short-form framework constants like `0xa` (sender/recipient remain strict 64-char); 265-byte BCS byte-equal to `@aptos-labs/ts-sdk`; live testnet tx `0xb3a41e3339db31111b8613442d895ffe2fc15615bd8624a821d52bc72b8f76f8` (native APT routed through FA at canonical metadata `0xa`). |
+
+**Sprint 47 result:** 957 tests pass (was 956; +1 FA reference vector test `aptos::types::tests::bcs_matches_aptos_sdk_fa_reference`), fmt + clippy clean.
+**Security:** No new findings. All 68 prior findings remain RESOLVED.
+**Lessons:** L-019 — Aptos has two address conventions (strict 64-char for derived addresses to catch copy-truncation; short-form tolerated for framework constants like `0xa`); needs split parser.
+
+### Sprint 47 highlights
+- FA identity model: `Coin<T>` keyed identity in the **type system** (generic parameter `T`); FA keys identity by a runtime `Object<Metadata>` **address**. Same logical asset (native APT) can route through either path with different wire-format identity.
+- Live tx `0xb3a41e3339db31111b8613442d895ffe2fc15615bd8624a821d52bc72b8f76f8`: native APT sent through the FA path at canonical metadata `0xa` — same value, different wire path than the Sprint 46 `<AptosCoin>` legacy tx.
+- `parse_aptos_address_padded` accepts short-form like `0xa` and left-pads to 32 bytes (only used for framework constant type args). Sender/recipient still require strict 64-char hex to catch truncation bugs.
+- Reference vector validation: 265-byte BCS output byte-equal to `@aptos-labs/ts-sdk`, pinned in `aptos::types::tests::bcs_matches_aptos_sdk_fa_reference`.
