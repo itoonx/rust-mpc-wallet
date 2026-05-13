@@ -32,7 +32,22 @@ impl DwellirProvider {
     }
 
     /// Map Chain to Dwellir's subdomain slug.
+    ///
+    /// Source-of-truth precedence (Step 8):
+    /// 1. `CHAIN_METADATA` — per-NetworkInfo `dwellir_slug`. Wired for the
+    ///    6 LIVE chains; one place to edit when slugs change.
+    /// 2. Fallback hardcoded match below — covers chains not yet in
+    ///    `CHAIN_METADATA` (EVM L2s beyond Ethereum, Substrate, Cosmos,
+    ///    Ton, Movement, Starknet). These migrate as their `ChainMetadata`
+    ///    entries land.
     fn chain_slug(chain: Chain, network: &NetworkEnv) -> Option<&'static str> {
+        if let Some(m) = crate::metadata::metadata_for(chain) {
+            if let Some(n) = m.network(network) {
+                if n.dwellir_slug.is_some() {
+                    return n.dwellir_slug;
+                }
+            }
+        }
         match (chain, network) {
             // EVM L1s
             (Chain::Ethereum, NetworkEnv::Testnet) => Some("ethereum-sepolia"),
@@ -177,5 +192,46 @@ impl RpcProvider for DwellirProvider {
 
     fn api_key_header(&self) -> Option<(&str, &str)> {
         None // Dwellir uses path-based auth
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::metadata_for;
+
+    /// Parity: for every (chain, env) where the metadata declares a
+    /// `dwellir_slug`, the dwellir provider's slug must match — no drift
+    /// allowed once metadata claims authority.
+    #[test]
+    fn parity_metadata_dwellir_slug_matches_provider() {
+        let envs = [NetworkEnv::Mainnet, NetworkEnv::Testnet, NetworkEnv::Devnet];
+        for m in crate::metadata::CHAIN_METADATA {
+            for env in &envs {
+                let Some(n) = m.network(env) else { continue };
+                let Some(meta_slug) = n.dwellir_slug else {
+                    continue;
+                };
+                let provider_slug = DwellirProvider::chain_slug(m.chain, env)
+                    .expect("provider missing slug while metadata declares one");
+                assert_eq!(
+                    provider_slug, meta_slug,
+                    "{:?} {:?}: metadata={meta_slug} provider={provider_slug}",
+                    m.chain, env
+                );
+            }
+        }
+    }
+
+    /// Once metadata is wired (Step 8), live-chain slugs MUST come from
+    /// metadata, not from the fallback match. We confirm by reading the
+    /// metadata directly — if it returns `Some`, that's the source.
+    #[test]
+    fn live_chain_dwellir_slugs_come_from_metadata() {
+        for c in [Chain::Ethereum, Chain::Solana, Chain::Sui, Chain::Aptos] {
+            let m = metadata_for(c).expect("live chain has metadata");
+            let any_slug = m.networks.iter().any(|n| n.dwellir_slug.is_some());
+            assert!(any_slug, "{:?} should have at least one dwellir_slug", c);
+        }
     }
 }
