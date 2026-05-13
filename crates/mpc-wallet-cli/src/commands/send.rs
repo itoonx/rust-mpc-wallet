@@ -939,6 +939,10 @@ fn redact_key(url: &str) -> String {
 /// Translate `--token <shorthand>` (or `--token-json <json>`) into the canonical
 /// JSON `TokenIdentifier` shape that chain providers parse. Returns `None` for
 /// the implicit native case (no flag set, or shorthand "native").
+///
+/// Step 6 of the standardization refactor: shorthand parsing delegates to
+/// `TokenIdentifier::parse_shorthand()` in the chains crate so the CLI and
+/// any SDK consumer share a single source of truth.
 fn parse_token_spec(
     shorthand: Option<&str>,
     json: Option<&str>,
@@ -951,55 +955,13 @@ fn parse_token_spec(
     let Some(s) = shorthand else {
         return Ok(None);
     };
-    if s == "native" {
+    let token = TokenIdentifier::parse_shorthand(s).map_err(|e| anyhow::anyhow!("--token: {e}"))?;
+    if token.is_native() {
         return Ok(None);
     }
-    let (prefix, rest) = s.split_once(':').ok_or_else(|| {
-        anyhow::anyhow!("--token shorthand must be 'native' or '<kind>:<args>', got '{s}'")
-    })?;
-    let v = match prefix {
-        "erc20" => serde_json::json!({
-            "kind": "evm", "contract": rest, "standard": "erc20",
-        }),
-        "erc721" | "erc1155" => {
-            return Err(anyhow::anyhow!(
-                "--token {prefix}: NFT support deferred; see docs/TOKEN_TRANSFER_DESIGN.md §7"
-            ));
-        }
-        "spl" | "spl-2022" => {
-            let parts: Vec<&str> = rest.split(':').collect();
-            if parts.len() != 2 {
-                return Err(anyhow::anyhow!(
-                    "--token spl shorthand: '{prefix}:<mint>:<decimals>'"
-                ));
-            }
-            let decimals: u8 = parts[1]
-                .parse()
-                .map_err(|e| anyhow::anyhow!("--token spl decimals must be u8: {e}"))?;
-            let program = if prefix == "spl-2022" {
-                "token2022"
-            } else {
-                "spl_token"
-            };
-            serde_json::json!({
-                "kind": "spl", "mint": parts[0], "program": program, "decimals": decimals,
-            })
-        }
-        "sui-coin" => serde_json::json!({ "kind": "sui", "type_tag": rest }),
-        "aptos-coin" => serde_json::json!({
-            "kind": "aptos", "flavor": { "type": "coin", "type_tag": rest },
-        }),
-        "aptos-fa" => serde_json::json!({
-            "kind": "aptos", "flavor": { "type": "fungible_asset", "metadata": rest },
-        }),
-        "trc20" => serde_json::json!({ "kind": "tron", "contract": rest }),
-        other => {
-            return Err(anyhow::anyhow!(
-                "--token: unknown shorthand prefix '{other}'"
-            ))
-        }
-    };
-    Ok(Some(v))
+    Ok(Some(
+        serde_json::to_value(&token).map_err(|e| anyhow::anyhow!("token serialize: {e}"))?,
+    ))
 }
 
 /// Query an ERC-20 contract's `balanceOf(holder)` via `eth_call`. Returns the

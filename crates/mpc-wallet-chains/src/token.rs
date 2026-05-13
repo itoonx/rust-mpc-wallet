@@ -86,6 +86,72 @@ impl TokenIdentifier {
     pub fn is_native(&self) -> bool {
         matches!(self, Self::Native)
     }
+
+    /// Parse the user-facing `--token <shorthand>` form into a typed
+    /// `TokenIdentifier`. Lives at the chain-crate level so CLI/SDK
+    /// callers share one parser. The supported shorthands are:
+    ///
+    ///   - `native` → `Native`
+    ///   - `erc20:<contract>` → EVM ERC-20
+    ///   - `spl:<mint>:<decimals>` / `spl-2022:<mint>:<decimals>` → Solana SPL
+    ///   - `sui-coin:<type-tag>` → Sui `Coin<T>`
+    ///   - `aptos-coin:<type-tag>` → Aptos legacy `Coin<T>`
+    ///   - `aptos-fa:<metadata-addr>` → Aptos Fungible Asset
+    ///   - `trc20:<contract>` → TRON TRC-20
+    pub fn parse_shorthand(s: &str) -> Result<Self, String> {
+        if s == "native" {
+            return Ok(Self::Native);
+        }
+        let (prefix, rest) = s.split_once(':').ok_or_else(|| {
+            format!("token shorthand must be 'native' or '<kind>:<args>', got '{s}'")
+        })?;
+        match prefix {
+            "erc20" => Ok(Self::Evm {
+                contract: rest.to_string(),
+                standard: EvmTokenStandard::Erc20,
+                token_id: None,
+            }),
+            "erc721" | "erc1155" => Err(format!(
+                "token {prefix}: NFT support deferred; see docs/TOKEN_TRANSFER_DESIGN.md §7"
+            )),
+            "spl" | "spl-2022" => {
+                let parts: Vec<&str> = rest.split(':').collect();
+                if parts.len() != 2 {
+                    return Err(format!("token spl shorthand: '{prefix}:<mint>:<decimals>'"));
+                }
+                let decimals: u8 = parts[1]
+                    .parse()
+                    .map_err(|e| format!("spl decimals must be u8: {e}"))?;
+                let program = if prefix == "spl-2022" {
+                    SplProgram::Token2022
+                } else {
+                    SplProgram::SplToken
+                };
+                Ok(Self::Spl {
+                    mint: parts[0].to_string(),
+                    program,
+                    decimals,
+                })
+            }
+            "sui-coin" => Ok(Self::Sui {
+                type_tag: rest.to_string(),
+            }),
+            "aptos-coin" => Ok(Self::Aptos {
+                flavor: AptosTokenKind::Coin {
+                    type_tag: rest.to_string(),
+                },
+            }),
+            "aptos-fa" => Ok(Self::Aptos {
+                flavor: AptosTokenKind::FungibleAsset {
+                    metadata: rest.to_string(),
+                },
+            }),
+            "trc20" => Ok(Self::Tron {
+                contract: rest.to_string(),
+            }),
+            other => Err(format!("token: unknown shorthand prefix '{other}'")),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -146,6 +212,86 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_shorthand_native() {
+        assert_eq!(
+            TokenIdentifier::parse_shorthand("native").unwrap(),
+            TokenIdentifier::Native
+        );
+    }
+
+    #[test]
+    fn parse_shorthand_erc20() {
+        let t = TokenIdentifier::parse_shorthand("erc20:0xabc").unwrap();
+        match t {
+            TokenIdentifier::Evm {
+                contract,
+                standard,
+                token_id,
+            } => {
+                assert_eq!(contract, "0xabc");
+                assert_eq!(standard, EvmTokenStandard::Erc20);
+                assert_eq!(token_id, None);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn parse_shorthand_spl_token_and_2022() {
+        let t = TokenIdentifier::parse_shorthand("spl:M1nt:6").unwrap();
+        match t {
+            TokenIdentifier::Spl {
+                mint,
+                program,
+                decimals,
+            } => {
+                assert_eq!(mint, "M1nt");
+                assert_eq!(program, SplProgram::SplToken);
+                assert_eq!(decimals, 6);
+            }
+            _ => panic!("wrong"),
+        }
+        let t = TokenIdentifier::parse_shorthand("spl-2022:M:9").unwrap();
+        match t {
+            TokenIdentifier::Spl { program, .. } => {
+                assert_eq!(program, SplProgram::Token2022);
+            }
+            _ => panic!("wrong"),
+        }
+    }
+
+    #[test]
+    fn parse_shorthand_sui_aptos_tron() {
+        assert!(matches!(
+            TokenIdentifier::parse_shorthand("sui-coin:0xa::usdc::USDC").unwrap(),
+            TokenIdentifier::Sui { .. }
+        ));
+        assert!(matches!(
+            TokenIdentifier::parse_shorthand("aptos-coin:0x1::aptos_coin::AptosCoin").unwrap(),
+            TokenIdentifier::Aptos {
+                flavor: AptosTokenKind::Coin { .. }
+            }
+        ));
+        assert!(matches!(
+            TokenIdentifier::parse_shorthand("aptos-fa:0xa").unwrap(),
+            TokenIdentifier::Aptos {
+                flavor: AptosTokenKind::FungibleAsset { .. }
+            }
+        ));
+        assert!(matches!(
+            TokenIdentifier::parse_shorthand("trc20:TG3XX").unwrap(),
+            TokenIdentifier::Tron { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_shorthand_rejects_unknown_prefix() {
+        assert!(TokenIdentifier::parse_shorthand("foo:bar").is_err());
+        assert!(TokenIdentifier::parse_shorthand("erc721:0xabc").is_err());
+        assert!(TokenIdentifier::parse_shorthand("notaprefix").is_err());
     }
 
     #[test]
