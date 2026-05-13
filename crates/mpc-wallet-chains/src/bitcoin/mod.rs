@@ -70,6 +70,34 @@ impl ChainProvider for BitcoinProvider {
         })
     }
 
+    async fn fetch_presign_extras(
+        &self,
+        ctx: crate::presign::PresignContext<'_>,
+    ) -> Result<crate::presign::PresignExtras, CoreError> {
+        use crate::address_type::AddressType;
+        use crate::presign::{PresignExtras, Utxo};
+        let rpc = rpc_client::BitcoinRpcClient::new(ctx.rpc_url);
+        let utxos = rpc.get_utxos(ctx.sender).await?;
+        let pubkey_hex = address::compressed_pubkey_hex(ctx.group_pubkey)?;
+        let utxos = utxos
+            .into_iter()
+            .map(|u| Utxo {
+                txid: u.txid,
+                vout: u.vout,
+                value_sats: u.value,
+            })
+            .collect();
+        Ok(PresignExtras::Btc {
+            utxos,
+            // 2 sat/vB is the conservative default the CLI used historically;
+            // overridable via --extra at the call site.
+            fee_rate_sat_per_vb: 2,
+            addr_type: AddressType::Bech32P2wpkh,
+            pubkey_hex,
+            change_address: ctx.sender.to_string(),
+        })
+    }
+
     fn derive_address(&self, group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
         // Default to P2WPKH (native SegWit). Taproot requires BIP-341 key
         // tweaking that the current FROST-Secp256k1-TR protocol doesn't

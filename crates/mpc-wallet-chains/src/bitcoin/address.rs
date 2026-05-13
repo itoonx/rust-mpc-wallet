@@ -3,6 +3,26 @@ use bitcoin::{Address, CompressedPublicKey, Network};
 use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::GroupPublicKey;
 
+/// Hex-encoded 33-byte compressed secp256k1 pubkey. Accepts either the
+/// compressed or uncompressed variant of `GroupPublicKey` and normalizes
+/// to compressed form. Used in Bitcoin presign extras and BIP-143 sighash
+/// witness construction.
+pub fn compressed_pubkey_hex(group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
+    match group_pubkey {
+        GroupPublicKey::Secp256k1(bytes) if bytes.len() == 33 => Ok(hex::encode(bytes)),
+        GroupPublicKey::Secp256k1Uncompressed(bytes) if bytes.len() == 65 => {
+            let parity = if bytes[64] & 1 == 0 { 0x02 } else { 0x03 };
+            let mut out = Vec::with_capacity(33);
+            out.push(parity);
+            out.extend_from_slice(&bytes[1..33]);
+            Ok(hex::encode(out))
+        }
+        _ => Err(CoreError::Crypto(
+            "compressed_pubkey_hex: expected secp256k1 group public key".into(),
+        )),
+    }
+}
+
 /// Derive a P2WPKH (native SegWit, bech32 `tb1q…` / `bc1q…`) address from a
 /// secp256k1 group public key. This is the path used for live ECDSA-signed txs
 /// (BIP-141 + BIP-143). For Taproot, see [`derive_taproot_address`].

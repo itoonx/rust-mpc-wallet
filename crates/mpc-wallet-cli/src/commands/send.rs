@@ -700,32 +700,32 @@ async fn fetch_presign_extras(
         return Ok(Some(extras.to_legacy_extras_json()));
     }
     if matches!(chain, Chain::BitcoinTestnet | Chain::BitcoinMainnet) {
-        let rpc = BitcoinRpcClient::new(rpc_url);
-        let utxos = rpc
-            .get_utxos(sender)
+        // Migrated to provider.fetch_presign_extras() in Step 4c.
+        use mpc_wallet_chains::presign::{PresignContext, PresignExtras};
+        let provider = ChainRegistry::default_testnet()
+            .provider(chain)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let token_typed = token_spec
+            .map(|v| serde_json::from_value::<TokenIdentifier>(v.clone()))
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("token spec deser: {e}"))?;
+        let ctx = PresignContext {
+            rpc_url,
+            sender,
+            group_pubkey,
+            token: token_typed.as_ref(),
+            recipient,
+            value_str,
+        };
+        let extras = provider
+            .fetch_presign_extras(ctx)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        let total: u64 = utxos.iter().map(|u| u.value).sum();
-        eprintln!("✓ {} UTXO(s) totalling {} sats", utxos.len(), total);
-        let pubkey_hex = compressed_pubkey_hex(group_pubkey)?;
-        // Pass UTXO list as JSON; the tx builder picks the largest one.
-        let utxos_json: Vec<serde_json::Value> = utxos
-            .into_iter()
-            .map(|u| {
-                serde_json::json!({
-                    "txid": u.txid,
-                    "vout": u.vout,
-                    "value": u.value,
-                })
-            })
-            .collect();
-        return Ok(Some(serde_json::json!({
-            "addr_type": "p2wpkh",
-            "pubkey_hex": pubkey_hex,
-            "utxos": utxos_json,
-            "change_address": sender,
-            "fee_rate_sat_per_vb": 2u64,
-        })));
+        if let PresignExtras::Btc { utxos, .. } = &extras {
+            let total: u64 = utxos.iter().map(|u| u.value_sats).sum();
+            eprintln!("✓ {} UTXO(s) totalling {} sats", utxos.len(), total);
+        }
+        return Ok(Some(extras.to_legacy_extras_json()));
     }
     if chain == Chain::Sui {
         use mpc_wallet_chains::sui::rpc_client::SuiRpcClient;
@@ -903,23 +903,6 @@ async fn fetch_presign_extras(
 
 /// Render a `GroupPublicKey` as a 33-byte compressed hex string for chains
 /// (like Bitcoin P2WPKH) that need it in `extras`.
-fn compressed_pubkey_hex(group_pubkey: &GroupPublicKey) -> anyhow::Result<String> {
-    match group_pubkey {
-        GroupPublicKey::Secp256k1(bytes) if bytes.len() == 33 => Ok(hex::encode(bytes)),
-        GroupPublicKey::Secp256k1Uncompressed(bytes) if bytes.len() == 65 => {
-            let parity = if bytes[64] & 1 == 0 { 0x02 } else { 0x03 };
-            let mut out = Vec::with_capacity(33);
-            out.push(parity);
-            out.extend_from_slice(&bytes[1..33]);
-            Ok(hex::encode(out))
-        }
-        other => Err(anyhow::anyhow!(
-            "compressed_pubkey_hex: expected secp256k1 key, got {:?}",
-            std::mem::discriminant(other)
-        )),
-    }
-}
-
 /// Merge auto-fetched extras with user-supplied extras (user wins).
 fn merge_extras(
     auto: Option<serde_json::Value>,
