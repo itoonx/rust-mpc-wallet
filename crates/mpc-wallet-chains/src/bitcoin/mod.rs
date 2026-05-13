@@ -61,6 +61,15 @@ impl ChainProvider for BitcoinProvider {
         }
     }
 
+    fn metadata(&self) -> &'static crate::metadata::ChainMetadata {
+        crate::metadata::metadata_for(self.chain()).unwrap_or_else(|| {
+            panic!(
+                "CHAIN_METADATA has no entry for {:?} — only BitcoinTestnet is wired in Step 3",
+                self.chain()
+            )
+        })
+    }
+
     fn derive_address(&self, group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
         // Default to P2WPKH (native SegWit). Taproot requires BIP-341 key
         // tweaking that the current FROST-Secp256k1-TR protocol doesn't

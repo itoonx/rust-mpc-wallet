@@ -118,6 +118,10 @@ impl ChainProvider for SuiProvider {
         Chain::Sui
     }
 
+    fn metadata(&self) -> &'static crate::metadata::ChainMetadata {
+        crate::metadata::metadata_for(Chain::Sui).expect("CHAIN_METADATA must contain Sui")
+    }
+
     fn derive_address(&self, group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
         address::derive_sui_address(group_pubkey)
     }

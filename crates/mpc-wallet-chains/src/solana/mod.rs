@@ -80,6 +80,10 @@ impl ChainProvider for SolanaProvider {
         Chain::Solana
     }
 
+    fn metadata(&self) -> &'static crate::metadata::ChainMetadata {
+        crate::metadata::metadata_for(Chain::Solana).expect("CHAIN_METADATA must contain Solana")
+    }
+
     fn derive_address(&self, group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
         address::derive_solana_address(group_pubkey)
     }

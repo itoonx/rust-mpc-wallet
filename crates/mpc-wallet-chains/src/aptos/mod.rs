@@ -103,6 +103,15 @@ impl ChainProvider for AptosProvider {
         self.chain
     }
 
+    fn metadata(&self) -> &'static crate::metadata::ChainMetadata {
+        crate::metadata::metadata_for(self.chain).unwrap_or_else(|| {
+            panic!(
+                "CHAIN_METADATA has no entry for {:?} — only Aptos is wired in Step 3 (Movement deferred)",
+                self.chain
+            )
+        })
+    }
+
     fn derive_address(&self, group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
         address::derive_aptos_address(group_pubkey)
     }

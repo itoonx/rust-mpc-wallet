@@ -39,6 +39,10 @@ impl ChainProvider for TronProvider {
         Chain::Tron
     }
 
+    fn metadata(&self) -> &'static crate::metadata::ChainMetadata {
+        crate::metadata::metadata_for(Chain::Tron).expect("CHAIN_METADATA must contain Tron")
+    }
+
     fn derive_address(&self, group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
         address::derive_tron_address(group_pubkey)
     }

@@ -111,11 +111,242 @@ impl ChainMetadata {
     }
 }
 
-/// The metadata table. Populated incrementally in Step 3 of the
-/// standardization refactor — empty for the additive Step 1 commit so
-/// downstream callers can begin wiring against the type without waiting
-/// for every per-chain entry to land.
-pub const CHAIN_METADATA: &[ChainMetadata] = &[];
+// ── Per-network records ────────────────────────────────────────────────
+// Stored as named consts so per-chain ChainMetadata entries stay readable.
+
+const ETHEREUM_NETWORKS: &[NetworkInfo] = &[
+    NetworkInfo {
+        env: NetworkEnv::Mainnet,
+        chain_id: Some(1),
+        default_rpc: "https://eth.llamarpc.com",
+        explorer_base_url: "https://etherscan.io",
+        explorer_tx_path: "/tx/",
+        faucet_url: None,
+    },
+    NetworkInfo {
+        env: NetworkEnv::Testnet,
+        chain_id: Some(11_155_111),
+        default_rpc: "https://ethereum-sepolia-rpc.publicnode.com",
+        explorer_base_url: "https://sepolia.etherscan.io",
+        explorer_tx_path: "/tx/",
+        faucet_url: Some("https://sepoliafaucet.com"),
+    },
+];
+
+const BITCOIN_TESTNET_NETWORKS: &[NetworkInfo] = &[NetworkInfo {
+    env: NetworkEnv::Testnet,
+    chain_id: None,
+    default_rpc: "https://blockstream.info/testnet/api",
+    explorer_base_url: "https://mempool.space/testnet",
+    explorer_tx_path: "/tx/",
+    faucet_url: Some("https://coinfaucet.eu/en/btc-testnet/"),
+}];
+
+const SOLANA_NETWORKS: &[NetworkInfo] = &[
+    NetworkInfo {
+        env: NetworkEnv::Mainnet,
+        chain_id: None,
+        default_rpc: "https://api.mainnet-beta.solana.com",
+        explorer_base_url: "https://explorer.solana.com",
+        explorer_tx_path: "/tx/",
+        faucet_url: None,
+    },
+    NetworkInfo {
+        env: NetworkEnv::Devnet,
+        chain_id: None,
+        default_rpc: "https://api.devnet.solana.com",
+        explorer_base_url: "https://explorer.solana.com",
+        explorer_tx_path: "/tx/",
+        faucet_url: Some("https://faucet.solana.com"),
+    },
+    NetworkInfo {
+        env: NetworkEnv::Testnet,
+        chain_id: None,
+        default_rpc: "https://api.testnet.solana.com",
+        explorer_base_url: "https://explorer.solana.com",
+        explorer_tx_path: "/tx/",
+        faucet_url: Some("https://faucet.solana.com"),
+    },
+];
+
+const SUI_NETWORKS: &[NetworkInfo] = &[
+    NetworkInfo {
+        env: NetworkEnv::Mainnet,
+        chain_id: None,
+        default_rpc: "https://fullnode.mainnet.sui.io:443",
+        explorer_base_url: "https://suiscan.xyz/mainnet",
+        explorer_tx_path: "/tx/",
+        faucet_url: None,
+    },
+    NetworkInfo {
+        env: NetworkEnv::Testnet,
+        chain_id: None,
+        default_rpc: "https://fullnode.testnet.sui.io:443",
+        explorer_base_url: "https://suiscan.xyz/testnet",
+        explorer_tx_path: "/tx/",
+        faucet_url: Some("https://faucet.sui.io/"),
+    },
+    NetworkInfo {
+        env: NetworkEnv::Devnet,
+        chain_id: None,
+        default_rpc: "https://fullnode.devnet.sui.io:443",
+        explorer_base_url: "https://suiscan.xyz/devnet",
+        explorer_tx_path: "/tx/",
+        faucet_url: Some("https://faucet.sui.io/"),
+    },
+];
+
+const APTOS_NETWORKS: &[NetworkInfo] = &[
+    NetworkInfo {
+        env: NetworkEnv::Mainnet,
+        chain_id: Some(1),
+        default_rpc: "https://api.mainnet.aptoslabs.com",
+        explorer_base_url: "https://aptoscan.com",
+        explorer_tx_path: "/transaction/",
+        faucet_url: None,
+    },
+    NetworkInfo {
+        env: NetworkEnv::Testnet,
+        chain_id: Some(2),
+        default_rpc: "https://api.testnet.aptoslabs.com",
+        explorer_base_url: "https://aptoscan.com",
+        explorer_tx_path: "/transaction/",
+        faucet_url: Some("https://aptos.dev/network/faucet"),
+    },
+    NetworkInfo {
+        env: NetworkEnv::Devnet,
+        chain_id: Some(165),
+        default_rpc: "https://api.devnet.aptoslabs.com",
+        explorer_base_url: "https://aptoscan.com",
+        explorer_tx_path: "/transaction/",
+        faucet_url: Some("https://aptos.dev/network/faucet"),
+    },
+];
+
+const TRON_NETWORKS: &[NetworkInfo] = &[
+    NetworkInfo {
+        env: NetworkEnv::Mainnet,
+        chain_id: None,
+        default_rpc: "https://api.trongrid.io",
+        explorer_base_url: "https://tronscan.org",
+        explorer_tx_path: "/#/transaction/",
+        faucet_url: None,
+    },
+    NetworkInfo {
+        env: NetworkEnv::Testnet,
+        chain_id: None,
+        default_rpc: "https://api.shasta.trongrid.io",
+        explorer_base_url: "https://shasta.tronscan.org",
+        explorer_tx_path: "/#/transaction/",
+        faucet_url: Some("https://shasta.tronex.io"),
+    },
+];
+
+// ── Scheme + token-standard slices ─────────────────────────────────────
+
+const SECP256K1_ECDSA_SCHEMES: &[CryptoScheme] =
+    &[CryptoScheme::Gg20Ecdsa, CryptoScheme::Cggmp21Secp256k1];
+
+const BITCOIN_SCHEMES: &[CryptoScheme] = &[
+    CryptoScheme::Gg20Ecdsa,
+    CryptoScheme::Cggmp21Secp256k1,
+    CryptoScheme::FrostSecp256k1Tr,
+];
+
+const ED25519_SCHEMES: &[CryptoScheme] = &[CryptoScheme::FrostEd25519];
+
+const EVM_TOKENS: &[TokenStandard] = &[TokenStandard::Native, TokenStandard::Erc20];
+const BTC_TOKENS: &[TokenStandard] = &[TokenStandard::Native];
+const SOLANA_TOKENS: &[TokenStandard] = &[
+    TokenStandard::Native,
+    TokenStandard::SplToken,
+    TokenStandard::SplToken2022,
+];
+const SUI_TOKENS: &[TokenStandard] = &[TokenStandard::Native, TokenStandard::SuiCoin];
+const APTOS_TOKENS: &[TokenStandard] = &[
+    TokenStandard::Native,
+    TokenStandard::AptosLegacyCoin,
+    TokenStandard::AptosFungibleAsset,
+];
+const TRON_TOKENS: &[TokenStandard] = &[TokenStandard::Native, TokenStandard::Trc20];
+
+/// The metadata table. Scope (Step 3): the 6 LIVE-broadcast chains. Other
+/// `Chain` variants stay unwired against this table and their providers
+/// keep using the trait's default `metadata()` panic until they migrate.
+pub const CHAIN_METADATA: &[ChainMetadata] = &[
+    ChainMetadata {
+        chain: Chain::Ethereum,
+        display_name: "Ethereum",
+        native_symbol: "ETH",
+        native_unit: "wei",
+        native_decimals: 18,
+        default_addr_type: AddressType::EvmHex,
+        compatible_schemes: SECP256K1_ECDSA_SCHEMES,
+        token_standards: EVM_TOKENS,
+        networks: ETHEREUM_NETWORKS,
+        dwellir_slug: Some("ethereum"),
+    },
+    ChainMetadata {
+        chain: Chain::BitcoinTestnet,
+        display_name: "Bitcoin Testnet",
+        native_symbol: "tBTC",
+        native_unit: "sats",
+        native_decimals: 8,
+        default_addr_type: AddressType::Bech32P2wpkh,
+        compatible_schemes: BITCOIN_SCHEMES,
+        token_standards: BTC_TOKENS,
+        networks: BITCOIN_TESTNET_NETWORKS,
+        dwellir_slug: None,
+    },
+    ChainMetadata {
+        chain: Chain::Solana,
+        display_name: "Solana",
+        native_symbol: "SOL",
+        native_unit: "lamports",
+        native_decimals: 9,
+        default_addr_type: AddressType::SolanaEd25519,
+        compatible_schemes: ED25519_SCHEMES,
+        token_standards: SOLANA_TOKENS,
+        networks: SOLANA_NETWORKS,
+        dwellir_slug: Some("solana"),
+    },
+    ChainMetadata {
+        chain: Chain::Sui,
+        display_name: "Sui",
+        native_symbol: "SUI",
+        native_unit: "MIST",
+        native_decimals: 9,
+        default_addr_type: AddressType::SuiBlake2b,
+        compatible_schemes: ED25519_SCHEMES,
+        token_standards: SUI_TOKENS,
+        networks: SUI_NETWORKS,
+        dwellir_slug: Some("sui"),
+    },
+    ChainMetadata {
+        chain: Chain::Aptos,
+        display_name: "Aptos",
+        native_symbol: "APT",
+        native_unit: "octas",
+        native_decimals: 8,
+        default_addr_type: AddressType::AptosSha3,
+        compatible_schemes: ED25519_SCHEMES,
+        token_standards: APTOS_TOKENS,
+        networks: APTOS_NETWORKS,
+        dwellir_slug: Some("aptos"),
+    },
+    ChainMetadata {
+        chain: Chain::Tron,
+        display_name: "TRON",
+        native_symbol: "TRX",
+        native_unit: "sun",
+        native_decimals: 6,
+        default_addr_type: AddressType::TronBase58Check,
+        compatible_schemes: SECP256K1_ECDSA_SCHEMES,
+        token_standards: TRON_TOKENS,
+        networks: TRON_NETWORKS,
+        dwellir_slug: None,
+    },
+];
 
 /// Lookup metadata for a chain. Returns `None` until the chain's entry
 /// lands in `CHAIN_METADATA` (Step 3).
@@ -141,14 +372,111 @@ mod tests {
     }
 
     #[test]
-    fn metadata_for_returns_none_when_table_empty_or_chain_missing() {
-        // Either the table is empty (Step 1) or it doesn't yet contain
-        // every variant — either way, this is the contract.
-        let _ = metadata_for(Chain::Ethereum);
+    fn metadata_for_returns_some_for_live_chains() {
+        for c in [
+            Chain::Ethereum,
+            Chain::BitcoinTestnet,
+            Chain::Solana,
+            Chain::Sui,
+            Chain::Aptos,
+            Chain::Tron,
+        ] {
+            assert!(metadata_for(c).is_some(), "metadata missing for {c:?}");
+        }
+    }
+
+    #[test]
+    fn metadata_for_returns_none_for_unwired_chains() {
+        // Substrate/Cosmos/Ton/Monero/Starknet not yet wired (Step 3 scope).
+        for c in [
+            Chain::Polkadot,
+            Chain::CosmosHub,
+            Chain::Ton,
+            Chain::Monero,
+            Chain::Starknet,
+        ] {
+            assert!(metadata_for(c).is_none(), "unexpected metadata for {c:?}");
+        }
+    }
+
+    #[test]
+    fn every_entry_chain_field_matches_slot_key() {
+        // The const table is keyed by `chain` field; ensure no copy-paste drift.
+        for m in CHAIN_METADATA {
+            assert_eq!(
+                metadata_for(m.chain).map(|x| x.chain),
+                Some(m.chain),
+                "{:?} not findable",
+                m.chain
+            );
+        }
+    }
+
+    #[test]
+    fn every_entry_has_at_least_one_network_and_one_scheme() {
+        for m in CHAIN_METADATA {
+            assert!(!m.networks.is_empty(), "{:?} has no networks", m.chain);
+            assert!(
+                !m.compatible_schemes.is_empty(),
+                "{:?} has no schemes",
+                m.chain
+            );
+            assert!(
+                m.token_standards.contains(&TokenStandard::Native),
+                "{:?} must accept Native",
+                m.chain
+            );
+        }
+    }
+
+    #[test]
+    fn every_explorer_base_url_is_https() {
+        for m in CHAIN_METADATA {
+            for n in m.networks {
+                assert!(
+                    n.explorer_base_url.starts_with("https://"),
+                    "{:?} {:?} explorer not https: {}",
+                    m.chain,
+                    n.env,
+                    n.explorer_base_url
+                );
+                assert!(
+                    n.default_rpc.starts_with("https://"),
+                    "{:?} {:?} rpc not https: {}",
+                    m.chain,
+                    n.env,
+                    n.default_rpc
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_duplicate_chain_entries() {
+        let mut seen = std::collections::HashSet::new();
+        for m in CHAIN_METADATA {
+            assert!(seen.insert(m.chain), "duplicate entry for {:?}", m.chain);
+        }
     }
 
     #[test]
     fn token_standard_native_is_distinct() {
         assert_ne!(TokenStandard::Native, TokenStandard::Erc20);
+    }
+
+    #[test]
+    fn ethereum_sepolia_chain_id_correct() {
+        let eth = metadata_for(Chain::Ethereum).unwrap();
+        let sepolia = eth.network(&NetworkEnv::Testnet).unwrap();
+        assert_eq!(sepolia.chain_id, Some(11_155_111));
+        let mainnet = eth.network(&NetworkEnv::Mainnet).unwrap();
+        assert_eq!(mainnet.chain_id, Some(1));
+    }
+
+    #[test]
+    fn supports_native_token_for_all_live_chains() {
+        for m in CHAIN_METADATA {
+            assert!(m.supports(TokenStandard::Native));
+        }
     }
 }

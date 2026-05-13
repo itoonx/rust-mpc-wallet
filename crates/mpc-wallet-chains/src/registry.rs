@@ -408,4 +408,31 @@ mod tests {
         // BitcoinProvider in testnet env returns BitcoinTestnet chain
         assert_eq!(provider.chain(), Chain::BitcoinTestnet);
     }
+
+    #[test]
+    fn metadata_smoke_all_live_chains_via_registry() {
+        // Step 3 scope: 6 LIVE-broadcast chains must answer `metadata()`
+        // through the registry path. Other chains are deliberately not
+        // wired yet (they would panic — covered by the metadata table tests).
+        let mainnet = ChainRegistry::default_mainnet();
+        let testnet = ChainRegistry::default_testnet();
+
+        // Ethereum, Solana, Sui, Aptos, Tron all valid on mainnet.
+        for c in [
+            Chain::Ethereum,
+            Chain::Solana,
+            Chain::Sui,
+            Chain::Aptos,
+            Chain::Tron,
+        ] {
+            let p = mainnet.provider(c).unwrap();
+            let m = p.metadata();
+            assert_eq!(m.chain, c, "metadata chain field mismatch for {:?}", c);
+            assert!(!m.native_unit.is_empty(), "native_unit empty for {:?}", c);
+        }
+
+        // Bitcoin live entry is the testnet variant; access via testnet registry.
+        let p = testnet.provider(Chain::BitcoinTestnet).unwrap();
+        assert_eq!(p.metadata().chain, Chain::BitcoinTestnet);
+    }
 }
