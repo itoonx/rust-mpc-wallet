@@ -1806,7 +1806,7 @@ Bitcoin out of scope; NFTs deferred (schema reserves room).
 | Chain  | Standard                                            | Sprint | Status                                                                  |
 |--------|-----------------------------------------------------|--------|-------------------------------------------------------------------------|
 | EVM    | ERC-20                                              | 45     | LIVE (USDC-Sepolia `0x23ab51bd…`)                                       |
-| Sui    | `Coin<T>` (PTB SplitCoins+TransferObjects)          | 46     | code-complete, BCS byte-equal to `@mysten/sui` (live deferred)          |
+| Sui    | `Coin<T>` (PTB SplitCoins+TransferObjects)          | 46 / 50 live | LIVE (testnet `DFQmfoEb…`, Circle USDC, FROST-Ed25519 2-of-3)     |
 | Aptos  | legacy `0x1::coin::transfer<T>`                     | 46     | LIVE (testnet `0x72c2e3b5…`, `<AptosCoin>`)                             |
 | Aptos  | Fungible Asset (`0x1::primary_fungible_store::transfer`) | 47 | LIVE (testnet `0xb3a41e33…`, native APT via FA at metadata `0xa`)       |
 | TRON   | TRC-20 (`TriggerSmartContract` + `transfer`)        | 48     | LIVE (Shasta `0x54a73460…`, USDT, fee_limit 100 TRX)                    |
@@ -1815,3 +1815,26 @@ Bitcoin out of scope; NFTs deferred (schema reserves room).
 **Schema validated on all 6 in-scope chains.** Cross-chain reference-vector tests
 (EVM ABI, Sui BCS, Aptos BCS legacy + FA, TRON tronweb protobuf, Solana
 `@solana/spl-token`) pin every wire format to the canonical SDK output, byte-for-byte.
+
+---
+
+## Sprint 50 Gate Status (2026-05-14 — DOC-ONLY CLOSE-OUT) — TOKEN SUITE LIVE END-TO-END
+
+Sui `Coin<T>` live broadcast close-out. No code changes — only sourced a non-SUI testnet token (Circle USDC via faucet.circle.com lists Sui Testnet), funded the existing Sui FROST-Ed25519 MPC wallet, and ran the Sprint 46 code path end-to-end.
+
+| Sprint | Theme | Owner | R6 Verdict | Merged | Result |
+|--------|-------|-------|------------|--------|--------|
+| 50 | Sui `Coin<T>` live close-out | R3d | N/A (doc-only) | ✓ | Funded Sui testnet wallet (`0x009c9bf4…`, group `99ee01ec-…`) with 20 Circle testnet USDC at type tag `0xa1ec7fc00a6f40db9693ad1415d0c193ad3906494428cf252621037bd7117e29::usdc::USDC` (6 decimals, legacy `Coin<T>` standard — drop-in for the Sprint 46 PTB path). CLI presign auto-picked source `Coin<USDC>` `0x60af844b…` (balance 20_000_000) and gas SUI `0xc3bcc249…` (balance 898_002_120 MIST); FROST-Ed25519 2-of-3 produced 296-byte BCS `TransactionData::V1` (PTB: `SplitCoins(src_coin, [100_000]) → TransferObjects([split], sender)`) + 97-byte Ed25519 sig envelope. Live Sui testnet tx **`DFQmfoEbdiF5NJhXBomcCnm5uwbHK2WF7eFAUSnzPeM2`** (status=success, gas ~2.35M MIST = ~0.00235 SUI, 0.1 USDC self-transfer). Explorer: https://suiscan.xyz/testnet/tx/DFQmfoEbdiF5NJhXBomcCnm5uwbHK2WF7eFAUSnzPeM2 |
+
+**Sprint 50 result:** 967 tests pass (unchanged — doc-only). No new lessons (Sprint 46 hand-rolled BCS held; only blocker was sourcing a non-SUI testnet token, resolved via Circle's official faucet listing Sui Testnet).
+**Security:** No new findings. All 68 prior findings remain RESOLVED.
+
+### Sprint 50 highlights
+- **TOKEN SUITE LIVE ON ALL 6 CHAINS** — every cross-chain token standard from Sprints 44–49 now has a broadcast-confirmed testnet tx, not just byte-equal reference vectors.
+- Circle's testnet USDC faucet supports Sui Testnet (20 USDC / address / 2 hr, address-only request — no signed message). Type tag is the canonical Circle one, decimals = 6, standard = legacy `Coin<T>`.
+- CLI `presign_sui` flow worked first try: `suix_getCoins` for both gas SUI and source `Coin<T>`, BCS-encode PTB, FROST-Ed25519 sign, broadcast — no code touched since Sprint 46.
+- Updated:
+  - `tests/e2e/funded-wallets.local.json` `sui-testnet` block adds `funded_usdc`, `usdc_type_tag`, `usdc_decimals`, `usdc_faucet`, `verified_usdc_tx`.
+  - `CLAUDE.md` Token Coverage table flips Sui from CODE-COMPLETE → LIVE; sprint marker advances Sprint 49 → Sprint 50; one-line summary flips to "TOKEN SUITE LIVE END-TO-END".
+  - `docs/SPRINT.md` Token Suite Retrospective row flips Sui to LIVE.
+  - Memory `project_funded_testnet_wallets.md` Sui block gains `verified_usdc_tx` + Coin<T> usage notes + Circle faucet pointer.
