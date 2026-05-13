@@ -112,6 +112,45 @@ impl ChainProvider for AptosProvider {
         })
     }
 
+    async fn fetch_presign_extras(
+        &self,
+        ctx: crate::presign::PresignContext<'_>,
+    ) -> Result<crate::presign::PresignExtras, CoreError> {
+        use crate::presign::PresignExtras;
+        let rpc = rpc_client::AptosRpcClient::new(ctx.rpc_url);
+        let account = rpc.get_account(ctx.sender).await?;
+        let chain_id = rpc.get_chain_id().await?;
+        let gas_unit_price = rpc.estimate_gas_price().await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let expiration_timestamp_secs = now.saturating_add(60); // 60-second TTL.
+
+        let pubkey_hex = match ctx.group_pubkey {
+            GroupPublicKey::Ed25519(b) if b.len() == 32 => hex::encode(b),
+            _ => {
+                return Err(CoreError::Crypto(
+                    "Aptos requires 32-byte Ed25519 group key".into(),
+                ));
+            }
+        };
+
+        // Aptos validators reject txs whose `max_gas_amount * gas_unit_price`
+        // is below the per-tx minimum (intrinsic gas ~1500 + sig verification +
+        // script execution). 100k gas units covers a simple
+        // `aptos_account::transfer`; unused gas is refunded.
+        Ok(PresignExtras::Aptos {
+            sequence_number: account.sequence_number.0,
+            max_gas_amount: 100_000,
+            gas_unit_price,
+            expiration_timestamp_secs,
+            chain_id,
+            sender: ctx.sender.to_string(),
+            pubkey_hex,
+        })
+    }
+
     fn derive_address(&self, group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
         address::derive_aptos_address(group_pubkey)
     }

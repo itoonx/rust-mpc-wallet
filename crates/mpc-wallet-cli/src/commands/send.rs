@@ -767,46 +767,45 @@ async fn fetch_presign_extras(
         return Ok(Some(extras.to_legacy_extras_json()));
     }
     if matches!(chain, Chain::Aptos | Chain::Movement) {
-        use mpc_wallet_chains::aptos::rpc_client::AptosRpcClient;
-        let rpc = AptosRpcClient::new(rpc_url);
-        let account = rpc
-            .get_account(sender)
-            .await
+        // Migrated to provider.fetch_presign_extras() in Step 4e.
+        // Note: only Aptos is wired in CHAIN_METADATA (Step 3 scope);
+        // Movement still relies on the AptosProvider but its metadata()
+        // call would panic — fine because this presign path doesn't touch
+        // metadata(), it only calls fetch_presign_extras() which doesn't
+        // depend on the metadata table.
+        use mpc_wallet_chains::presign::{PresignContext, PresignExtras};
+        let provider = ChainRegistry::default_testnet()
+            .provider(chain)
             .map_err(|e| anyhow::anyhow!(e))?;
-        let chain_id = rpc.get_chain_id().await.map_err(|e| anyhow::anyhow!(e))?;
-        let gas_unit_price = rpc
-            .estimate_gas_price()
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let expiration = now.saturating_add(60); // valid for 60 seconds
-                                                 // Sender's Ed25519 pubkey, hex-encoded for the AptosProvider extras path.
-        let pubkey_hex = match group_pubkey {
-            GroupPublicKey::Ed25519(b) if b.len() == 32 => hex::encode(b),
-            _ => return Err(anyhow::anyhow!("Aptos requires 32-byte Ed25519 group key")),
+        let token_typed = token_spec
+            .map(|v| serde_json::from_value::<TokenIdentifier>(v.clone()))
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("token spec deser: {e}"))?;
+        let ctx = PresignContext {
+            rpc_url,
+            sender,
+            group_pubkey,
+            token: token_typed.as_ref(),
+            recipient,
+            value_str,
         };
-        // Aptos validators reject txs whose `max_gas_amount * gas_unit_price`
-        // is below the per-tx minimum (intrinsic gas ~1500 + signature
-        // verification + script execution). 100_000 gas units is a safe
-        // upper bound for a simple `aptos_account::transfer` — unused gas is
-        // refunded.
-        let max_gas_amount = 100_000u64;
-        eprintln!(
-            "✓ sequence={} chain_id={} gas_price={} octas budget={} exp=now+60s",
-            account.sequence_number.0, chain_id, gas_unit_price, max_gas_amount
-        );
-        return Ok(Some(serde_json::json!({
-            "sender": sender,
-            "pubkey_hex": pubkey_hex,
-            "sequence_number": account.sequence_number.0,
-            "max_gas_amount": max_gas_amount,
-            "gas_unit_price": gas_unit_price,
-            "expiration_timestamp_secs": expiration,
-            "chain_id": chain_id,
-        })));
+        let extras = provider
+            .fetch_presign_extras(ctx)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if let PresignExtras::Aptos {
+            sequence_number,
+            chain_id,
+            gas_unit_price,
+            max_gas_amount,
+            ..
+        } = &extras
+        {
+            eprintln!(
+                "✓ sequence={sequence_number} chain_id={chain_id} gas_price={gas_unit_price} octas budget={max_gas_amount} exp=now+60s"
+            );
+        }
+        return Ok(Some(extras.to_legacy_extras_json()));
     }
     if chain == Chain::Tron {
         use mpc_wallet_chains::tron::rpc_client::TronRpcClient;
