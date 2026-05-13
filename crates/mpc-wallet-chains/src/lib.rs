@@ -1,3 +1,6 @@
+pub mod address_type;
+pub mod metadata;
+pub mod presign;
 pub mod provider;
 pub mod registry;
 pub mod rpc;
