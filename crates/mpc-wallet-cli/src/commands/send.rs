@@ -232,6 +232,7 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
     // ── 5. Fetch chain-specific pre-sign data ───────────────────────────────
     let auto_extra = fetch_presign_extras(
         chain,
+        &network,
         &rpc_url,
         &sender,
         &group_pubkey,
@@ -579,8 +580,10 @@ fn resolve_default_rpc_url(
 /// destination (matters for ERC-20 since gas depends on whether the recipient
 /// already has a non-zero token balance — first-touch storage write is ~5x
 /// cheaper than overwriting).
+#[allow(clippy::too_many_arguments)]
 async fn fetch_presign_extras(
     chain: Chain,
+    network: &NetworkEnv,
     rpc_url: &str,
     sender: &str,
     group_pubkey: &GroupPublicKey,
@@ -588,141 +591,66 @@ async fn fetch_presign_extras(
     recipient: &str,
     value_str: &str,
 ) -> anyhow::Result<Option<serde_json::Value>> {
-    let evm_chains = [
-        Chain::Ethereum,
-        Chain::Polygon,
-        Chain::Bsc,
-        Chain::Arbitrum,
-        Chain::Optimism,
-        Chain::Base,
-        Chain::Avalanche,
-        Chain::Linea,
-    ];
-    if evm_chains.contains(&chain) {
-        // Migrated to provider.fetch_presign_extras() in Step 4 of the
-        // chain-registry standardization refactor. CLI no longer owns EVM
-        // RPC dance — it lives in EvmProvider.
-        use mpc_wallet_chains::presign::{PresignContext, PresignExtras};
-        use mpc_wallet_chains::registry::ChainRegistry;
-        let registry = ChainRegistry::default_mainnet();
-        let provider = registry.provider(chain).map_err(|e| anyhow::anyhow!(e))?;
-        let token_typed = token_spec
-            .map(|v| serde_json::from_value::<TokenIdentifier>(v.clone()))
-            .transpose()
-            .map_err(|e| anyhow::anyhow!("token spec deser: {e}"))?;
-        let ctx = PresignContext {
-            rpc_url,
-            sender,
-            group_pubkey,
-            token: token_typed.as_ref(),
-            recipient,
-            value_str,
-        };
-        let extras = provider
-            .fetch_presign_extras(ctx)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        if let PresignExtras::Evm {
+    // Step 7: six previously-bespoke per-chain branches collapse into one
+    // trait dispatch. Each provider owns its RPC dance — the CLI just
+    // builds the context, calls fetch_presign_extras, logs the typed
+    // result, and serializes back to the legacy JSON shape that
+    // build_transaction currently reads.
+    use mpc_wallet_chains::presign::PresignContext;
+    let registry = match network {
+        NetworkEnv::Mainnet => ChainRegistry::default_mainnet(),
+        _ => ChainRegistry::default_testnet(),
+    };
+    let provider = registry.provider(chain).map_err(|e| anyhow::anyhow!(e))?;
+    let token_typed = token_spec
+        .map(|v| serde_json::from_value::<TokenIdentifier>(v.clone()))
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("token spec deser: {e}"))?;
+    let ctx = PresignContext {
+        rpc_url,
+        sender,
+        group_pubkey,
+        token: token_typed.as_ref(),
+        recipient,
+        value_str,
+    };
+    let extras = match provider.fetch_presign_extras(ctx).await {
+        Ok(e) => e,
+        // Chains without a presign impl (Substrate, Cosmos, Ton, Monero,
+        // Starknet, UTXO non-Bitcoin) fall through — caller passes any
+        // chain-specific extras via --extra.
+        Err(_) => return Ok(None),
+    };
+    log_presign(&extras);
+    Ok(Some(extras.to_legacy_extras_json()))
+}
+
+/// Emit the chain-specific eprintln status line for the typed presign payload.
+fn log_presign(extras: &mpc_wallet_chains::presign::PresignExtras) {
+    use mpc_wallet_chains::presign::PresignExtras;
+    match extras {
+        PresignExtras::Evm {
             chain_id,
             nonce,
             gas_limit,
             max_fee_per_gas,
             max_priority_fee_per_gas,
-        } = &extras
-        {
-            eprintln!(
-                "✓ chain_id={chain_id} nonce={nonce} fees: max_fee={max_fee_per_gas} wei priority={max_priority_fee_per_gas} wei · gas_limit={gas_limit}",
-            );
-        }
-        return Ok(Some(extras.to_legacy_extras_json()));
-    }
-    if chain == Chain::Solana {
-        // Migrated to provider.fetch_presign_extras() in Step 4b.
-        use mpc_wallet_chains::presign::{PresignContext, PresignExtras};
-        let provider = ChainRegistry::default_mainnet()
-            .provider(chain)
-            .map_err(|e| anyhow::anyhow!(e))?;
-        let token_typed = token_spec
-            .map(|v| serde_json::from_value::<TokenIdentifier>(v.clone()))
-            .transpose()
-            .map_err(|e| anyhow::anyhow!("token spec deser: {e}"))?;
-        let ctx = PresignContext {
-            rpc_url,
-            sender,
-            group_pubkey,
-            token: token_typed.as_ref(),
-            recipient,
-            value_str,
-        };
-        let extras = provider
-            .fetch_presign_extras(ctx)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        if let PresignExtras::Sol {
+        } => eprintln!(
+            "✓ chain_id={chain_id} nonce={nonce} fees: max_fee={max_fee_per_gas} wei priority={max_priority_fee_per_gas} wei · gas_limit={gas_limit}",
+        ),
+        PresignExtras::Sol {
             recent_blockhash, ..
-        } = &extras
-        {
-            eprintln!("✓ recent_blockhash={recent_blockhash}");
-        }
-        return Ok(Some(extras.to_legacy_extras_json()));
-    }
-    if matches!(chain, Chain::BitcoinTestnet | Chain::BitcoinMainnet) {
-        // Migrated to provider.fetch_presign_extras() in Step 4c.
-        use mpc_wallet_chains::presign::{PresignContext, PresignExtras};
-        let provider = ChainRegistry::default_testnet()
-            .provider(chain)
-            .map_err(|e| anyhow::anyhow!(e))?;
-        let token_typed = token_spec
-            .map(|v| serde_json::from_value::<TokenIdentifier>(v.clone()))
-            .transpose()
-            .map_err(|e| anyhow::anyhow!("token spec deser: {e}"))?;
-        let ctx = PresignContext {
-            rpc_url,
-            sender,
-            group_pubkey,
-            token: token_typed.as_ref(),
-            recipient,
-            value_str,
-        };
-        let extras = provider
-            .fetch_presign_extras(ctx)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        if let PresignExtras::Btc { utxos, .. } = &extras {
+        } => eprintln!("✓ recent_blockhash={recent_blockhash}"),
+        PresignExtras::Btc { utxos, .. } => {
             let total: u64 = utxos.iter().map(|u| u.value_sats).sum();
             eprintln!("✓ {} UTXO(s) totalling {} sats", utxos.len(), total);
         }
-        return Ok(Some(extras.to_legacy_extras_json()));
-    }
-    if chain == Chain::Sui {
-        // Migrated to provider.fetch_presign_extras() in Step 4d.
-        use mpc_wallet_chains::presign::{PresignContext, PresignExtras};
-        let provider = ChainRegistry::default_testnet()
-            .provider(chain)
-            .map_err(|e| anyhow::anyhow!(e))?;
-        let token_typed = token_spec
-            .map(|v| serde_json::from_value::<TokenIdentifier>(v.clone()))
-            .transpose()
-            .map_err(|e| anyhow::anyhow!("token spec deser: {e}"))?;
-        let ctx = PresignContext {
-            rpc_url,
-            sender,
-            group_pubkey,
-            token: token_typed.as_ref(),
-            recipient,
-            value_str,
-        };
-        let extras = provider
-            .fetch_presign_extras(ctx)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        if let PresignExtras::Sui {
+        PresignExtras::Sui {
             gas_payment,
             gas_price,
             coin_payment,
             ..
-        } = &extras
-        {
+        } => {
             eprintln!(
                 "✓ gas_coin={} version={} · ref_price={} MIST/gas",
                 gas_payment.object_id, gas_payment.version, gas_price
@@ -731,90 +659,29 @@ async fn fetch_presign_extras(
                 eprintln!("✓ source_coin={} version={}", c.object_id, c.version);
             }
         }
-        return Ok(Some(extras.to_legacy_extras_json()));
-    }
-    if matches!(chain, Chain::Aptos | Chain::Movement) {
-        // Migrated to provider.fetch_presign_extras() in Step 4e.
-        // Note: only Aptos is wired in CHAIN_METADATA (Step 3 scope);
-        // Movement still relies on the AptosProvider but its metadata()
-        // call would panic — fine because this presign path doesn't touch
-        // metadata(), it only calls fetch_presign_extras() which doesn't
-        // depend on the metadata table.
-        use mpc_wallet_chains::presign::{PresignContext, PresignExtras};
-        let provider = ChainRegistry::default_testnet()
-            .provider(chain)
-            .map_err(|e| anyhow::anyhow!(e))?;
-        let token_typed = token_spec
-            .map(|v| serde_json::from_value::<TokenIdentifier>(v.clone()))
-            .transpose()
-            .map_err(|e| anyhow::anyhow!("token spec deser: {e}"))?;
-        let ctx = PresignContext {
-            rpc_url,
-            sender,
-            group_pubkey,
-            token: token_typed.as_ref(),
-            recipient,
-            value_str,
-        };
-        let extras = provider
-            .fetch_presign_extras(ctx)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        if let PresignExtras::Aptos {
+        PresignExtras::Aptos {
             sequence_number,
             chain_id,
             gas_unit_price,
             max_gas_amount,
             ..
-        } = &extras
-        {
-            eprintln!(
-                "✓ sequence={sequence_number} chain_id={chain_id} gas_price={gas_unit_price} octas budget={max_gas_amount} exp=now+60s"
-            );
-        }
-        return Ok(Some(extras.to_legacy_extras_json()));
-    }
-    if chain == Chain::Tron {
-        // Migrated to provider.fetch_presign_extras() in Step 4f.
-        use mpc_wallet_chains::presign::{PresignContext, PresignExtras};
-        let provider = ChainRegistry::default_testnet()
-            .provider(chain)
-            .map_err(|e| anyhow::anyhow!(e))?;
-        let token_typed = token_spec
-            .map(|v| serde_json::from_value::<TokenIdentifier>(v.clone()))
-            .transpose()
-            .map_err(|e| anyhow::anyhow!("token spec deser: {e}"))?;
-        let ctx = PresignContext {
-            rpc_url,
-            sender,
-            group_pubkey,
-            token: token_typed.as_ref(),
-            recipient,
-            value_str,
-        };
-        let extras = provider
-            .fetch_presign_extras(ctx)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        if let PresignExtras::Tron {
+        } => eprintln!(
+            "✓ sequence={sequence_number} chain_id={chain_id} gas_price={gas_unit_price} octas budget={max_gas_amount} exp=now+60s"
+        ),
+        PresignExtras::Tron {
             ref_block_bytes,
             ref_block_hash,
             fee_limit,
             ..
-        } = &extras
-        {
-            match fee_limit {
-                Some(f) => eprintln!(
-                    "✓ block=ref_block_bytes:0x{ref_block_bytes} hash:0x{ref_block_hash} exp=now+60s fee_limit={f} sun (TRC-20)"
-                ),
-                None => eprintln!(
-                    "✓ block=ref_block_bytes:0x{ref_block_bytes} hash:0x{ref_block_hash} exp=now+60s (fee_limit omitted — native TransferContract)"
-                ),
-            }
-        }
-        return Ok(Some(extras.to_legacy_extras_json()));
+        } => match fee_limit {
+            Some(f) => eprintln!(
+                "✓ block=ref_block_bytes:0x{ref_block_bytes} hash:0x{ref_block_hash} exp=now+60s fee_limit={f} sun (TRC-20)"
+            ),
+            None => eprintln!(
+                "✓ block=ref_block_bytes:0x{ref_block_bytes} hash:0x{ref_block_hash} exp=now+60s (fee_limit omitted — native TransferContract)"
+            ),
+        },
     }
-    Ok(None)
 }
 
 /// Render a `GroupPublicKey` as a 33-byte compressed hex string for chains
