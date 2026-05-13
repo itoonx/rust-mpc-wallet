@@ -670,16 +670,34 @@ async fn fetch_presign_extras(
         return Ok(Some(extras.to_legacy_extras_json()));
     }
     if chain == Chain::Solana {
-        let rpc = SolanaRpcClient::new(rpc_url);
-        let blockhash = rpc
-            .get_latest_blockhash()
+        // Migrated to provider.fetch_presign_extras() in Step 4b.
+        use mpc_wallet_chains::presign::{PresignContext, PresignExtras};
+        let provider = ChainRegistry::default_mainnet()
+            .provider(chain)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let token_typed = token_spec
+            .map(|v| serde_json::from_value::<TokenIdentifier>(v.clone()))
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("token spec deser: {e}"))?;
+        let ctx = PresignContext {
+            rpc_url,
+            sender,
+            group_pubkey,
+            token: token_typed.as_ref(),
+            recipient,
+            value_str,
+        };
+        let extras = provider
+            .fetch_presign_extras(ctx)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        eprintln!("✓ recent_blockhash={blockhash}");
-        return Ok(Some(serde_json::json!({
-            "from": sender,
-            "recent_blockhash": blockhash,
-        })));
+        if let PresignExtras::Sol {
+            recent_blockhash, ..
+        } = &extras
+        {
+            eprintln!("✓ recent_blockhash={recent_blockhash}");
+        }
+        return Ok(Some(extras.to_legacy_extras_json()));
     }
     if matches!(chain, Chain::BitcoinTestnet | Chain::BitcoinMainnet) {
         let rpc = BitcoinRpcClient::new(rpc_url);

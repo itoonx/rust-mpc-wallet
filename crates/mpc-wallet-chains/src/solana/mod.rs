@@ -84,6 +84,18 @@ impl ChainProvider for SolanaProvider {
         crate::metadata::metadata_for(Chain::Solana).expect("CHAIN_METADATA must contain Solana")
     }
 
+    async fn fetch_presign_extras(
+        &self,
+        ctx: crate::presign::PresignContext<'_>,
+    ) -> Result<crate::presign::PresignExtras, CoreError> {
+        let rpc = rpc_client::SolanaRpcClient::new(ctx.rpc_url);
+        let blockhash = rpc.get_latest_blockhash().await?;
+        Ok(crate::presign::PresignExtras::Sol {
+            recent_blockhash: blockhash,
+            sender: ctx.sender.to_string(),
+        })
+    }
+
     fn derive_address(&self, group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
         address::derive_solana_address(group_pubkey)
     }
