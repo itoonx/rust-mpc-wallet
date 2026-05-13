@@ -1838,3 +1838,46 @@ Sui `Coin<T>` live broadcast close-out. No code changes — only sourced a non-S
   - `CLAUDE.md` Token Coverage table flips Sui from CODE-COMPLETE → LIVE; sprint marker advances Sprint 49 → Sprint 50; one-line summary flips to "TOKEN SUITE LIVE END-TO-END".
   - `docs/SPRINT.md` Token Suite Retrospective row flips Sui to LIVE.
   - Memory `project_funded_testnet_wallets.md` Sui block gains `verified_usdc_tx` + Coin<T> usage notes + Circle faucet pointer.
+
+---
+
+## Sprint 51 Gate Status (2026-05-14 — REFACTOR LANDED, E2E DEFERRED) — CHAIN REGISTRY STANDARDIZATION
+
+Single-session refactor consolidating per-chain configuration into a compile-time const table. Adding a new LIVE chain now hits **two files** (CHAIN_METADATA entry + provider impl) instead of the previous eight scattered hotspots in CLI helpers, RPC URL resolvers, balance checks, explorer URL constructors, and faucet hint strings.
+
+| Sub-step | Theme | Owner | Commit | Result |
+|----------|-------|-------|--------|--------|
+| 1 | Additive modules: `metadata.rs`, `address_type.rs`, `presign.rs` | R0 | `0a75c7ab` | Type-only land; no callers |
+| 2 | Extend `ChainProvider` trait with `metadata()` + `fetch_presign_extras()` | R0 | `3cc097ad` | Default `unimplemented!()` / `Err(Unsupported)` |
+| 3 | Populate `CHAIN_METADATA` for the 6 LIVE chains; wire `metadata()` impls | R3 | `89130f1d` | +9 property tests; chain-slot drift impossible |
+| 4a–f | Move per-chain RPC dance from CLI → providers (EVM/Sol/BTC/Sui/Aptos/TRON) | R3 | `f153e64e` … `3740d5d6` | 290 LOC moved out of `send.rs` |
+| 5 | Flip CLI helpers (`resolve_default_rpc_url`, `explorer_url`, balance-check `eprintln!`) to metadata | R4 | `f8cda9aa` | +5 parity tests |
+| 6 | `TokenIdentifier::parse_shorthand` replaces CLI parser | R3 | `6d010a65` | +5 round-trip tests; SDK + CLI share parser |
+| 7 | Collapse CLI presign branches; prune dead dwellir arms | R4 | `a2ac5f3e` | 6 if-arms → 1 trait dispatch; ~200 LOC deleted |
+| 8 | `DwellirProvider::chain_slug` reads `metadata.dwellir_slug` first | R3 | `716a66c5` | +7 parity tests; per-NetworkInfo slug |
+
+**Sprint 51 result:** 624/624 workspace lib tests pass (was 617 → +7 metadata/dwellir parity, +5 token shorthand). `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings` clean on every commit. Zero crypto / protocol / BCS/RLP/protobuf encoder code touched — pure plumbing.
+
+**Security:** No new findings. All 68 prior findings remain RESOLVED. R6 audit not required (no signing-path code modified).
+
+### Sprint 51 highlights
+
+- **`ChainMetadata` const table** is single source of truth for: display name, native symbol/unit/decimals, default address type (typed `AddressType` enum — `"p2wpkh"`/`"taproot"` magic strings retired), compatible MPC schemes, accepted token standards, per-`NetworkInfo` (RPC URL, explorer base, faucet URL, chain id, Dwellir slug).
+- **`PresignExtras` enum** + `PresignContext` borrowed view replace the opaque `serde_json::Value` extras blob. Transition shim `to_legacy_extras_json()` keeps downstream `build_transaction` consumers unchanged through the refactor.
+- **CLI surface drop**: `send.rs` shrinks by ~400 lines. `fetch_presign_extras` body becomes one trait dispatch + a `log_presign()` helper. Per-chain RPC clients are imported only inside provider impls now.
+- **Parity tests** lock the metadata-driven URLs / slugs / units byte-equal to pre-refactor values for the 6 LIVE chains — no silent drift possible.
+- **Out-of-scope (deferred)**:
+  - Substrate / Cosmos / Ton / Monero / Starknet `ChainMetadata` entries — those chains stay stub providers; entries land when they go LIVE.
+  - `provider.fetch_balance()` trait method (would eliminate the remaining balance-check RPC dispatch in CLI). Orthogonal to presign concern; not blocking.
+  - Live E2E broadcast regression (Step 9 of plan) — refactor validated by unit + parity tests; live re-broadcasts to be batched in Sprint 52.
+
+### Definition of done — check
+
+- [x] Adding a new chain to the LIVE set = **one CHAIN_METADATA entry + one provider impl**. Zero CLI edits required.
+- [x] `cargo test --workspace --lib`: 624 / 624 green. Parity tests confirm zero behavioural drift on the 6 LIVE chains.
+- [x] CLI presign function body has zero chain-conditional branches (collapsed to a single trait dispatch).
+- [ ] **E2E live broadcast per chain confirms — deferred to Sprint 52.** Acceptance gate from plan file; refactor logically complete and unit/parity tests pass, but the only honest validation of the send path is a real testnet tx per chain. Funded wallets ready in `tests/e2e/funded-wallets.local.json`.
+
+### Plan file
+
+`/Users/thecoding/.claude/plans/graceful-roaming-floyd.md` — 8-step plan executed in order with one commit per step (4 split into 4a–4f). All steps green on workspace gates; only Step 9 (E2E) outstanding.
