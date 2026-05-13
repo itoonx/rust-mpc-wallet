@@ -808,51 +808,44 @@ async fn fetch_presign_extras(
         return Ok(Some(extras.to_legacy_extras_json()));
     }
     if chain == Chain::Tron {
-        use mpc_wallet_chains::tron::rpc_client::TronRpcClient;
-        let rpc = TronRpcClient::new(rpc_url);
-        let block_ref = rpc.get_now_block().await.map_err(|e| anyhow::anyhow!(e))?;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        let expiration = now_ms.saturating_add(60_000);
-        let owner_hex = hex::encode(
-            mpc_wallet_chains::tron::tx::decode_tron_address(sender)
-                .map_err(|e| anyhow::anyhow!(e))?,
-        );
-
-        // fee_limit policy — diverges by contract type:
-        //   - TransferContract (native TRX): MUST omit per L-017
-        //   - TriggerSmartContract (TRC-20):  MUST include (validator rejects without)
-        let is_trc20 = token_spec
-            .and_then(|v| v.get("kind"))
-            .and_then(|v| v.as_str())
-            == Some("tron");
-        let mut presign = serde_json::json!({
-            "owner_address": owner_hex,
-            "ref_block_bytes": hex::encode(block_ref.ref_block_bytes),
-            "ref_block_hash": hex::encode(block_ref.ref_block_hash),
-            "timestamp": now_ms,
-            "expiration": expiration,
-        });
-        if is_trc20 {
-            // Default 100 TRX cap; refunded for unused energy.
-            if let serde_json::Value::Object(ref mut o) = presign {
-                o.insert("fee_limit".into(), serde_json::json!(100_000_000i64));
+        // Migrated to provider.fetch_presign_extras() in Step 4f.
+        use mpc_wallet_chains::presign::{PresignContext, PresignExtras};
+        let provider = ChainRegistry::default_testnet()
+            .provider(chain)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let token_typed = token_spec
+            .map(|v| serde_json::from_value::<TokenIdentifier>(v.clone()))
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("token spec deser: {e}"))?;
+        let ctx = PresignContext {
+            rpc_url,
+            sender,
+            group_pubkey,
+            token: token_typed.as_ref(),
+            recipient,
+            value_str,
+        };
+        let extras = provider
+            .fetch_presign_extras(ctx)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if let PresignExtras::Tron {
+            ref_block_bytes,
+            ref_block_hash,
+            fee_limit,
+            ..
+        } = &extras
+        {
+            match fee_limit {
+                Some(f) => eprintln!(
+                    "✓ block=ref_block_bytes:0x{ref_block_bytes} hash:0x{ref_block_hash} exp=now+60s fee_limit={f} sun (TRC-20)"
+                ),
+                None => eprintln!(
+                    "✓ block=ref_block_bytes:0x{ref_block_bytes} hash:0x{ref_block_hash} exp=now+60s (fee_limit omitted — native TransferContract)"
+                ),
             }
-            eprintln!(
-                "✓ block=ref_block_bytes:0x{} hash:0x{} exp=now+60s fee_limit=100_000_000 sun (TRC-20)",
-                hex::encode(block_ref.ref_block_bytes),
-                hex::encode(block_ref.ref_block_hash),
-            );
-        } else {
-            eprintln!(
-                "✓ block=ref_block_bytes:0x{} hash:0x{} exp=now+60s (fee_limit omitted — native TransferContract)",
-                hex::encode(block_ref.ref_block_bytes),
-                hex::encode(block_ref.ref_block_hash),
-            );
         }
-        return Ok(Some(presign));
+        return Ok(Some(extras.to_legacy_extras_json()));
     }
     Ok(None)
 }
