@@ -167,6 +167,73 @@ impl ChainProvider for EvmProvider {
         })
     }
 
+    async fn fetch_presign_extras(
+        &self,
+        ctx: crate::presign::PresignContext<'_>,
+    ) -> Result<crate::presign::PresignExtras, CoreError> {
+        use crate::presign::PresignExtras;
+        use crate::token::{EvmTokenStandard, TokenIdentifier};
+        let rpc = rpc_client::EvmRpcClient::new(ctx.rpc_url);
+        let chain_id = rpc.get_chain_id().await?;
+        let nonce = rpc.get_nonce(ctx.sender).await?;
+        let (max_fee, max_priority) = rpc.suggest_eip1559_fees().await?;
+
+        // Per-token gas-estimation target. ERC-20 transfer() calldata is
+        // routed against the token contract address (not the user's `--to`);
+        // native sends estimate against the recipient directly.
+        let (est_to, est_value_hex, est_data_hex, fallback_gas) = match ctx.token {
+            Some(TokenIdentifier::Evm {
+                contract,
+                standard: EvmTokenStandard::Erc20,
+                ..
+            }) => {
+                let calldata = erc20::encode_transfer(ctx.recipient, ctx.value_str)
+                    .map_err(|e| CoreError::Other(e.to_string()))?;
+                (
+                    contract.clone(),
+                    "0x0".to_string(),
+                    format!("0x{}", hex::encode(calldata)),
+                    100_000u64,
+                )
+            }
+            _ => {
+                // Native ETH transfer — 21k intrinsic floor.
+                let value_hex = if ctx.value_str.starts_with("0x") {
+                    ctx.value_str.to_string()
+                } else {
+                    let v: u128 = ctx
+                        .value_str
+                        .parse()
+                        .map_err(|e| CoreError::Other(format!("value not decimal u128: {e}")))?;
+                    format!("0x{:x}", v)
+                };
+                (
+                    ctx.recipient.to_string(),
+                    value_hex,
+                    String::new(),
+                    21_000u64,
+                )
+            }
+        };
+
+        // 25% safety margin: gas refund variance + state changes between
+        // estimate and broadcast. Floor at intrinsic minimum to keep
+        // EOA→EOA sends viable when the node refuses estimation.
+        let estimated = rpc
+            .estimate_gas(ctx.sender, &est_to, &est_data_hex, &est_value_hex)
+            .await
+            .unwrap_or(fallback_gas);
+        let gas_limit = (estimated.saturating_mul(125) / 100).max(fallback_gas);
+
+        Ok(PresignExtras::Evm {
+            nonce,
+            gas_limit,
+            max_fee_per_gas: max_fee.to_string(),
+            max_priority_fee_per_gas: max_priority.to_string(),
+            chain_id,
+        })
+    }
+
     fn derive_address(&self, group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
         address::derive_evm_address(group_pubkey)
     }

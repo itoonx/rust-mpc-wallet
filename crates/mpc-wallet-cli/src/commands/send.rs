@@ -25,6 +25,7 @@ use mpc_wallet_chains::rpc::providers::dwellir::DwellirProvider;
 use mpc_wallet_chains::rpc::providers::infura::InfuraProvider;
 use mpc_wallet_chains::rpc::RpcProvider;
 use mpc_wallet_chains::solana::rpc_client::SolanaRpcClient;
+use mpc_wallet_chains::token::TokenIdentifier;
 use mpc_wallet_core::key_store::types::KeyGroupId;
 use mpc_wallet_core::key_store::KeyStore;
 use mpc_wallet_core::protocol::{GroupPublicKey, KeyShare, MpcProtocol, MpcSignature};
@@ -631,66 +632,42 @@ async fn fetch_presign_extras(
         Chain::Linea,
     ];
     if evm_chains.contains(&chain) {
-        use mpc_wallet_chains::evm::erc20;
-        let rpc = EvmRpcClient::new(rpc_url);
-        let chain_id = rpc.get_chain_id().await.map_err(|e| anyhow::anyhow!(e))?;
-        let nonce = rpc
-            .get_nonce(sender)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        let (max_fee, max_priority) = rpc
-            .suggest_eip1559_fees()
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-
-        // Determine effective tx (to, value, data) per token spec, then
-        // estimate gas. For native tx, defaults to a 21k floor (intrinsic
-        // gas of an EOA→EOA transfer); estimate fails fast if the call
-        // would revert pre-broadcast, surfacing the issue before MPC sign.
-        let (est_to, est_value_hex, est_data_hex, fallback_gas) = match token_spec
-            .and_then(|v| v.get("kind"))
-            .and_then(|v| v.as_str())
-        {
-            Some("evm") => {
-                let contract = token_spec
-                    .and_then(|v| v.get("contract"))
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("token.contract missing"))?;
-                let calldata =
-                    erc20::encode_transfer(recipient, value_str).map_err(|e| anyhow::anyhow!(e))?;
-                (
-                    contract.to_string(),
-                    "0x0".to_string(),
-                    format!("0x{}", hex::encode(calldata)),
-                    100_000u64,
-                )
-            }
-            _ => {
-                // Native ETH transfer.
-                let value_hex = value_str_to_hex(value_str)?;
-                (recipient.to_string(), value_hex, String::new(), 21_000u64)
-            }
+        // Migrated to provider.fetch_presign_extras() in Step 4 of the
+        // chain-registry standardization refactor. CLI no longer owns EVM
+        // RPC dance — it lives in EvmProvider.
+        use mpc_wallet_chains::presign::{PresignContext, PresignExtras};
+        use mpc_wallet_chains::registry::ChainRegistry;
+        let registry = ChainRegistry::default_mainnet();
+        let provider = registry.provider(chain).map_err(|e| anyhow::anyhow!(e))?;
+        let token_typed = token_spec
+            .map(|v| serde_json::from_value::<TokenIdentifier>(v.clone()))
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("token spec deser: {e}"))?;
+        let ctx = PresignContext {
+            rpc_url,
+            sender,
+            group_pubkey,
+            token: token_typed.as_ref(),
+            recipient,
+            value_str,
         };
-
-        let estimated = rpc
-            .estimate_gas(sender, &est_to, &est_data_hex, &est_value_hex)
+        let extras = provider
+            .fetch_presign_extras(ctx)
             .await
-            .unwrap_or(fallback_gas);
-        // 25% safety margin — covers gas refund variance + state changes
-        // between estimate and broadcast.
-        let gas_limit = estimated.saturating_mul(125) / 100;
-        let gas_limit = gas_limit.max(fallback_gas);
-
-        eprintln!(
-            "✓ chain_id={chain_id} nonce={nonce} fees: max_fee={max_fee} wei priority={max_priority} wei · gas_limit={gas_limit} (estimated {estimated}, +25% margin)",
-        );
-        return Ok(Some(serde_json::json!({
-            "chain_id": chain_id,
-            "nonce": nonce,
-            "gas_limit": gas_limit,
-            "max_fee_per_gas": max_fee as u64,
-            "max_priority_fee_per_gas": max_priority as u64,
-        })));
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if let PresignExtras::Evm {
+            chain_id,
+            nonce,
+            gas_limit,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+        } = &extras
+        {
+            eprintln!(
+                "✓ chain_id={chain_id} nonce={nonce} fees: max_fee={max_fee_per_gas} wei priority={max_priority_fee_per_gas} wei · gas_limit={gas_limit}",
+            );
+        }
+        return Ok(Some(extras.to_legacy_extras_json()));
     }
     if chain == Chain::Solana {
         let rpc = SolanaRpcClient::new(rpc_url);
@@ -1015,18 +992,6 @@ fn redact_key(url: &str) -> String {
         }
     }
     url.to_string()
-}
-
-/// Convert a value string ("0x..." hex or bare decimal) into 0x-prefixed hex.
-fn value_str_to_hex(s: &str) -> anyhow::Result<String> {
-    if s.starts_with("0x") {
-        return Ok(s.to_string());
-    }
-    // Decimal — convert to hex via u128 (fits all reasonable wei values).
-    let v: u128 = s
-        .parse()
-        .map_err(|e| anyhow::anyhow!("value not decimal u128: {e}"))?;
-    Ok(format!("0x{:x}", v))
 }
 
 /// Translate `--token <shorthand>` (or `--token-json <json>`) into the canonical

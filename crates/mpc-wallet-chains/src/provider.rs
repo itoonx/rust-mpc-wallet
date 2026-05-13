@@ -5,8 +5,7 @@ use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::{GroupPublicKey, MpcSignature};
 
 use crate::metadata::ChainMetadata;
-use crate::presign::PresignExtras;
-use crate::token::TokenIdentifier;
+use crate::presign::{PresignContext, PresignExtras};
 
 /// Supported blockchain networks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -299,10 +298,7 @@ pub trait ChainProvider: Send + Sync {
     /// `Unsupported`; per-chain providers override one-by-one in Step 4.
     async fn fetch_presign_extras(
         &self,
-        _rpc_url: &str,
-        _sender: &str,
-        _group_pubkey: &GroupPublicKey,
-        _token: Option<&TokenIdentifier>,
+        _ctx: PresignContext<'_>,
     ) -> Result<PresignExtras, CoreError> {
         Err(CoreError::Other(
             "fetch_presign_extras not implemented for this chain".into(),
