@@ -122,6 +122,74 @@ impl ChainProvider for SuiProvider {
         crate::metadata::metadata_for(Chain::Sui).expect("CHAIN_METADATA must contain Sui")
     }
 
+    async fn fetch_presign_extras(
+        &self,
+        ctx: crate::presign::PresignContext<'_>,
+    ) -> Result<crate::presign::PresignExtras, CoreError> {
+        use crate::presign::{PresignExtras, SuiObjectRef};
+        use crate::token::TokenIdentifier;
+        let rpc = rpc_client::SuiRpcClient::new(ctx.rpc_url);
+
+        // Always fetch a SUI coin for gas (regardless of token kind).
+        let sui_coins = rpc.get_owned_coins(ctx.sender, "0x2::sui::SUI").await?;
+        let gas_coin = sui_coins
+            .iter()
+            .max_by_key(|c| c.balance.0)
+            .ok_or_else(|| {
+                CoreError::Other(format!(
+                    "Sui sender {} owns no SUI coin objects — needed for gas; fund via https://faucet.sui.io/",
+                    ctx.sender
+                ))
+            })?;
+        let gas_price = rpc.get_reference_gas_price().await?;
+
+        let pubkey_hex = match ctx.group_pubkey {
+            GroupPublicKey::Ed25519(b) if b.len() == 32 => hex::encode(b),
+            _ => {
+                return Err(CoreError::Crypto(
+                    "Sui requires 32-byte Ed25519 group key".into(),
+                ));
+            }
+        };
+
+        // For Coin<T> transfers, also fetch a source coin object of that type.
+        let coin_payment = if let Some(TokenIdentifier::Sui { type_tag }) = ctx.token {
+            let token_coins = rpc.get_owned_coins(ctx.sender, type_tag).await?;
+            let src = token_coins
+                .iter()
+                .max_by_key(|c| c.balance.0)
+                .ok_or_else(|| {
+                    CoreError::Other(format!(
+                        "Sui sender {} owns no Coin<{}> objects — fund via the relevant faucet",
+                        ctx.sender, type_tag
+                    ))
+                })?;
+            Some(SuiObjectRef {
+                object_id: src.object_id.clone(),
+                version: src.version.0,
+                digest: src.digest.clone(),
+            })
+        } else {
+            None
+        };
+
+        Ok(PresignExtras::Sui {
+            gas_payment: SuiObjectRef {
+                object_id: gas_coin.object_id.clone(),
+                version: gas_coin.version.0,
+                digest: gas_coin.digest.clone(),
+            },
+            // 10M MIST gas budget — historical CLI default, sufficient
+            // for PTB tx through current Sui ref_gas_price; overridable
+            // via --extra.
+            gas_budget: 10_000_000,
+            gas_price,
+            sender: ctx.sender.to_string(),
+            pubkey_hex,
+            coin_payment,
+        })
+    }
+
     fn derive_address(&self, group_pubkey: &GroupPublicKey) -> Result<String, CoreError> {
         address::derive_sui_address(group_pubkey)
     }

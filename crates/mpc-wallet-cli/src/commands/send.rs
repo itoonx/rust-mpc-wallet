@@ -728,86 +728,43 @@ async fn fetch_presign_extras(
         return Ok(Some(extras.to_legacy_extras_json()));
     }
     if chain == Chain::Sui {
-        use mpc_wallet_chains::sui::rpc_client::SuiRpcClient;
-        let rpc = SuiRpcClient::new(rpc_url);
-
-        // Always fetch SUI coins for gas payment (regardless of token).
-        let sui_coins = rpc
-            .get_owned_coins(sender, "0x2::sui::SUI")
-            .await
+        // Migrated to provider.fetch_presign_extras() in Step 4d.
+        use mpc_wallet_chains::presign::{PresignContext, PresignExtras};
+        let provider = ChainRegistry::default_testnet()
+            .provider(chain)
             .map_err(|e| anyhow::anyhow!(e))?;
-        if sui_coins.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Sui sender {sender} owns no SUI coin objects — needed for gas; fund via https://faucet.sui.io/"
-            ));
-        }
-        let gas_coin = sui_coins
-            .iter()
-            .max_by_key(|c| c.balance.0)
-            .expect("non-empty checked above");
-        let gas_price = rpc
-            .get_reference_gas_price()
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-        eprintln!(
-            "✓ gas_coin={} version={} balance={} MIST · ref_price={} MIST/gas",
-            gas_coin.object_id, gas_coin.version.0, gas_coin.balance.0, gas_price
-        );
-
-        let pubkey_hex = match group_pubkey {
-            GroupPublicKey::Ed25519(b) if b.len() == 32 => hex::encode(b),
-            _ => return Err(anyhow::anyhow!("Sui requires 32-byte Ed25519 group key")),
+        let token_typed = token_spec
+            .map(|v| serde_json::from_value::<TokenIdentifier>(v.clone()))
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("token spec deser: {e}"))?;
+        let ctx = PresignContext {
+            rpc_url,
+            sender,
+            group_pubkey,
+            token: token_typed.as_ref(),
+            recipient,
+            value_str,
         };
-
-        let mut presign = serde_json::json!({
-            "sender": sender,
-            "pubkey_hex": pubkey_hex,
-            "gas_payment_object_id": gas_coin.object_id,
-            "gas_payment_version": gas_coin.version.0,
-            "gas_payment_digest": gas_coin.digest,
-            "gas_price": gas_price,
-            "gas_budget": 10_000_000u64,
-        });
-
-        // For Sui Coin<T> transfers, also fetch a source coin object of that type.
-        if let Some(t) = token_spec {
-            if t.get("kind").and_then(|v| v.as_str()) == Some("sui") {
-                let coin_type = t
-                    .get("type_tag")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Sui token spec missing type_tag"))?;
-                let token_coins = rpc
-                    .get_owned_coins(sender, coin_type)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))?;
-                if token_coins.is_empty() {
-                    return Err(anyhow::anyhow!(
-                        "Sui sender {sender} owns no Coin<{coin_type}> objects — fund via the relevant faucet"
-                    ));
-                }
-                let src = token_coins
-                    .iter()
-                    .max_by_key(|c| c.balance.0)
-                    .expect("non-empty");
-                eprintln!(
-                    "✓ source_coin<{coin_type}>={} version={} balance={}",
-                    src.object_id, src.version.0, src.balance.0
-                );
-                if let serde_json::Value::Object(ref mut o) = presign {
-                    o.insert(
-                        "coin_payment_object_id".into(),
-                        serde_json::json!(src.object_id),
-                    );
-                    o.insert(
-                        "coin_payment_version".into(),
-                        serde_json::json!(src.version.0),
-                    );
-                    o.insert("coin_payment_digest".into(), serde_json::json!(src.digest));
-                }
+        let extras = provider
+            .fetch_presign_extras(ctx)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if let PresignExtras::Sui {
+            gas_payment,
+            gas_price,
+            coin_payment,
+            ..
+        } = &extras
+        {
+            eprintln!(
+                "✓ gas_coin={} version={} · ref_price={} MIST/gas",
+                gas_payment.object_id, gas_payment.version, gas_price
+            );
+            if let Some(c) = coin_payment {
+                eprintln!("✓ source_coin={} version={}", c.object_id, c.version);
             }
         }
-
-        return Ok(Some(presign));
+        return Ok(Some(extras.to_legacy_extras_json()));
     }
     if matches!(chain, Chain::Aptos | Chain::Movement) {
         use mpc_wallet_chains::aptos::rpc_client::AptosRpcClient;
