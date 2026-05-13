@@ -4,6 +4,10 @@ use serde::{Deserialize, Serialize};
 use mpc_wallet_core::error::CoreError;
 use mpc_wallet_core::protocol::{GroupPublicKey, MpcSignature};
 
+use crate::metadata::ChainMetadata;
+use crate::presign::PresignExtras;
+use crate::token::TokenIdentifier;
+
 /// Supported blockchain networks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Chain {
@@ -280,6 +284,28 @@ pub trait ChainProvider: Send + Sync {
     ) -> Result<String, CoreError> {
         Err(CoreError::Other(
             "broadcast not implemented for this chain".into(),
+        ))
+    }
+
+    /// Return the static metadata record for this chain. Default impl panics
+    /// until the provider is wired into `CHAIN_METADATA` (Step 3 of the
+    /// standardization refactor); see `metadata.rs`.
+    fn metadata(&self) -> &'static ChainMetadata {
+        unimplemented!("metadata() not yet wired for this chain")
+    }
+
+    /// Perform the chain's RPC dance to assemble typed presign extras
+    /// (nonce/gas/blockhash/UTXOs/etc). Default impl returns
+    /// `Unsupported`; per-chain providers override one-by-one in Step 4.
+    async fn fetch_presign_extras(
+        &self,
+        _rpc_url: &str,
+        _sender: &str,
+        _group_pubkey: &GroupPublicKey,
+        _token: Option<&TokenIdentifier>,
+    ) -> Result<PresignExtras, CoreError> {
+        Err(CoreError::Other(
+            "fetch_presign_extras not implemented for this chain".into(),
         ))
     }
 }
