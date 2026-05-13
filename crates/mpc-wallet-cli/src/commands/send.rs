@@ -202,46 +202,31 @@ pub async fn run(args: SendArgs, format: OutputFormat) -> anyhow::Result<()> {
             .get_balance(&sender)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        eprintln!("✓ On-chain balance of {sender}: {} lamports", bal);
-        if bal == 0 {
-            eprintln!("⚠️  Sender has 0 lamports — fund via https://faucet.solana.com first.");
-        }
+        report_balance(chain, &network, &sender, bal);
     } else if matches!(chain, Chain::BitcoinTestnet | Chain::BitcoinMainnet) {
         let bal = BitcoinRpcClient::new(&rpc_url)
             .get_balance(&sender)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        eprintln!("✓ On-chain balance of {sender}: {} sats", bal);
-        if bal == 0 {
-            eprintln!("⚠️  Sender has 0 sats — fund via a testnet faucet first.");
-        }
+        report_balance(chain, &network, &sender, bal);
     } else if matches!(chain, Chain::Aptos | Chain::Movement) {
         let bal = mpc_wallet_chains::aptos::rpc_client::AptosRpcClient::new(&rpc_url)
             .get_balance(&sender)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        eprintln!("✓ On-chain balance of {sender}: {} octas", bal);
-        if bal == 0 {
-            eprintln!("⚠️  Sender has 0 octas — fund via https://aptos.dev/network/faucet first.");
-        }
+        report_balance(chain, &network, &sender, bal);
     } else if chain == Chain::Sui {
         let bal = mpc_wallet_chains::sui::rpc_client::SuiRpcClient::new(&rpc_url)
             .get_balance(&sender)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        eprintln!("✓ On-chain balance of {sender}: {} MIST", bal);
-        if bal == 0 {
-            eprintln!("⚠️  Sender has 0 MIST — fund via https://faucet.sui.io/ first.");
-        }
+        report_balance(chain, &network, &sender, bal);
     } else if chain == Chain::Tron {
         let bal = mpc_wallet_chains::tron::rpc_client::TronRpcClient::new(&rpc_url)
             .get_balance(&sender)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        eprintln!("✓ On-chain balance of {sender}: {} sun", bal);
-        if bal == 0 {
-            eprintln!("⚠️  Sender has 0 sun — fund via https://shasta.tronex.io or https://www.trongrid.io/shasta first.");
-        }
+        report_balance(chain, &network, &sender, bal);
     }
 
     // ── 5. Fetch chain-specific pre-sign data ───────────────────────────────
@@ -556,47 +541,29 @@ fn resolve_default_rpc_url(
         }
     }
 
-    // 3. Public endpoints — Solana RPC + Bitcoin Esplora REST.
-    if chain == Chain::Solana {
-        return Ok(match network {
-            NetworkEnv::Mainnet => "https://api.mainnet-beta.solana.com".into(),
-            NetworkEnv::Devnet => "https://api.devnet.solana.com".into(),
-            _ => "https://api.testnet.solana.com".into(),
-        });
-    }
-    if chain == Chain::Sui {
-        return Ok(match network {
-            NetworkEnv::Mainnet => "https://fullnode.mainnet.sui.io:443".into(),
-            NetworkEnv::Devnet => "https://fullnode.devnet.sui.io:443".into(),
-            _ => "https://fullnode.testnet.sui.io:443".into(),
-        });
-    }
-    if matches!(chain, Chain::Aptos | Chain::Movement) {
-        // Aptos public REST endpoints.
-        if chain == Chain::Aptos {
-            return Ok(match network {
-                NetworkEnv::Mainnet => "https://api.mainnet.aptoslabs.com".into(),
-                NetworkEnv::Devnet => "https://api.devnet.aptoslabs.com".into(),
-                _ => "https://api.testnet.aptoslabs.com".into(),
-            });
-        }
-        // Movement public REST.
+    // 3. Public endpoint from CHAIN_METADATA. One source of truth — adding
+    //    a chain = adding a metadata entry, not editing this function.
+    //    Movement falls back to its hardcoded URLs (not yet metadata-wired).
+    if matches!(chain, Chain::Movement) {
         return Ok(match network {
             NetworkEnv::Mainnet => "https://mainnet.movementnetwork.xyz/v1".into(),
             _ => "https://testnet.bardock.movementnetwork.xyz/v1".into(),
         });
     }
-    if matches!(chain, Chain::BitcoinTestnet | Chain::BitcoinMainnet) {
-        return Ok(match (chain, network) {
-            (Chain::BitcoinMainnet, NetworkEnv::Mainnet) => "https://blockstream.info/api".into(),
-            _ => "https://blockstream.info/testnet/api".into(),
-        });
-    }
-    if chain == Chain::Tron {
-        return Ok(match network {
-            NetworkEnv::Mainnet => "https://api.trongrid.io".into(),
-            _ => "https://api.shasta.trongrid.io".into(),
-        });
+    // Bitcoin: registry maps `BitcoinMainnet` in a testnet env back to
+    // BitcoinTestnet's metadata, so use the metadata's chain field rather
+    // than the user-facing one.
+    let effective = if matches!(chain, Chain::BitcoinMainnet)
+        && matches!(network, NetworkEnv::Testnet | NetworkEnv::Devnet)
+    {
+        Chain::BitcoinTestnet
+    } else {
+        chain
+    };
+    if let Some(m) = mpc_wallet_chains::metadata::metadata_for(effective) {
+        if let Some(n) = m.network(network) {
+            return Ok(n.default_rpc.to_string());
+        }
     }
 
     Err(anyhow::anyhow!(
@@ -852,6 +819,31 @@ async fn fetch_presign_extras(
 
 /// Render a `GroupPublicKey` as a 33-byte compressed hex string for chains
 /// (like Bitcoin P2WPKH) that need it in `extras`.
+/// Print on-chain balance and a metadata-driven faucet hint when zero.
+/// Unit name and faucet URL come from `CHAIN_METADATA` — no more
+/// hardcoded `eprintln!()` literals per chain.
+fn report_balance<B: std::fmt::Display>(chain: Chain, network: &NetworkEnv, sender: &str, bal: B) {
+    let effective = if matches!(chain, Chain::BitcoinMainnet)
+        && matches!(network, NetworkEnv::Testnet | NetworkEnv::Devnet)
+    {
+        Chain::BitcoinTestnet
+    } else {
+        chain
+    };
+    let (unit, faucet) = mpc_wallet_chains::metadata::metadata_for(effective)
+        .and_then(|m| m.network(network).map(|n| (m.native_unit, n.faucet_url)))
+        .unwrap_or(("units", None));
+    eprintln!("✓ On-chain balance of {sender}: {bal} {unit}");
+    // Compare against the zero literal as a string — works for any Display
+    // type the per-chain RPC client returns (u64/u128/i64).
+    if bal.to_string() == "0" {
+        match faucet {
+            Some(url) => eprintln!("⚠️  Sender has 0 {unit} — fund via {url} first."),
+            None => eprintln!("⚠️  Sender has 0 {unit} — fund first."),
+        }
+    }
+}
+
 /// Merge auto-fetched extras with user-supplied extras (user wins).
 fn merge_extras(
     auto: Option<serde_json::Value>,
@@ -1029,9 +1021,33 @@ async fn erc20_balance_of(
 }
 
 fn explorer_url(chain: Chain, network: &NetworkEnv, tx_hash: &str) -> Option<String> {
+    // Metadata-driven for the 6 wired LIVE chains. For Solana devnet/testnet
+    // and Aptos devnet/testnet, the legacy URL appended a `?cluster=...` /
+    // `?network=...` query — preserve that here as a chain-specific suffix.
+    let effective = if matches!(chain, Chain::BitcoinMainnet)
+        && matches!(network, NetworkEnv::Testnet | NetworkEnv::Devnet)
+    {
+        Chain::BitcoinTestnet
+    } else {
+        chain
+    };
+    if let Some(m) = mpc_wallet_chains::metadata::metadata_for(effective) {
+        if let Some(n) = m.network(network) {
+            let mut url = n.explorer_tx_url(tx_hash);
+            // Devnet/testnet query suffixes that the metadata doesn't model:
+            match (chain, network) {
+                (Chain::Solana, NetworkEnv::Devnet) => url.push_str("?cluster=devnet"),
+                (Chain::Solana, NetworkEnv::Testnet) => url.push_str("?cluster=testnet"),
+                (Chain::Aptos, NetworkEnv::Devnet) => url.push_str("?network=devnet"),
+                (Chain::Aptos, NetworkEnv::Testnet) => url.push_str("?network=testnet"),
+                _ => {}
+            }
+            return Some(url);
+        }
+    }
+    // Fallback for chains not yet in CHAIN_METADATA (EVM L2s, Movement, etc.)
+    // — preserves the pre-refactor URLs.
     let base = match (chain, network) {
-        (Chain::Ethereum, NetworkEnv::Mainnet) => "https://etherscan.io/tx/",
-        (Chain::Ethereum, _) => "https://sepolia.etherscan.io/tx/",
         (Chain::Polygon, NetworkEnv::Mainnet) => "https://polygonscan.com/tx/",
         (Chain::Polygon, _) => "https://amoy.polygonscan.com/tx/",
         (Chain::Bsc, _) => "https://bscscan.com/tx/",
@@ -1042,18 +1058,7 @@ fn explorer_url(chain: Chain, network: &NetworkEnv, tx_hash: &str) -> Option<Str
         (Chain::Base, NetworkEnv::Mainnet) => "https://basescan.org/tx/",
         (Chain::Base, _) => "https://sepolia.basescan.org/tx/",
         (Chain::Avalanche, _) => "https://snowtrace.io/tx/",
-        (Chain::Solana, NetworkEnv::Mainnet) => "https://explorer.solana.com/tx/",
-        (Chain::Solana, _) => "https://explorer.solana.com/tx/{}?cluster=devnet",
-        (Chain::Sui, NetworkEnv::Mainnet) => "https://suiscan.xyz/mainnet/tx/",
-        (Chain::Sui, _) => "https://suiscan.xyz/testnet/tx/",
-        (Chain::Aptos, NetworkEnv::Mainnet) => "https://aptoscan.com/transaction/",
-        (Chain::Aptos, NetworkEnv::Devnet) => "https://aptoscan.com/transaction/{}?network=devnet",
-        (Chain::Aptos, _) => "https://aptoscan.com/transaction/{}?network=testnet",
         (Chain::Movement, _) => "https://explorer.movementnetwork.xyz/txn/{}?network=testnet",
-        (Chain::BitcoinMainnet, _) => "https://mempool.space/tx/",
-        (Chain::BitcoinTestnet, _) => "https://mempool.space/testnet/tx/",
-        (Chain::Tron, NetworkEnv::Mainnet) => "https://tronscan.org/#/transaction/",
-        (Chain::Tron, _) => "https://shasta.tronscan.org/#/transaction/",
         _ => return None,
     };
     if base.contains("{}") {
@@ -1137,9 +1142,67 @@ mod tests {
     }
 
     #[test]
-    fn test_default_rpc_evm_no_keys_errors() {
-        let r = resolve_default_rpc_url(Chain::Ethereum, &NetworkEnv::Testnet, None, None);
-        assert!(r.is_err());
+    fn test_default_rpc_evm_no_keys_falls_back_to_metadata_public_rpc() {
+        // Post-Step-5: Ethereum has a metadata-listed public Sepolia RPC,
+        // so callers no longer need a Dwellir/Infura key for read-only use.
+        let url =
+            resolve_default_rpc_url(Chain::Ethereum, &NetworkEnv::Testnet, None, None).unwrap();
+        assert!(
+            url.contains("publicnode") || url.contains("https://"),
+            "got {url}"
+        );
+    }
+
+    #[test]
+    fn parity_default_rpc_matches_metadata_for_live_chains() {
+        // The post-Step-5 default RPC for each LIVE chain must equal the
+        // metadata entry — no scattered hardcoded strings drifting from
+        // CHAIN_METADATA.
+        let cases = [
+            (Chain::Solana, NetworkEnv::Mainnet),
+            (Chain::Solana, NetworkEnv::Devnet),
+            (Chain::Solana, NetworkEnv::Testnet),
+            (Chain::Sui, NetworkEnv::Mainnet),
+            (Chain::Sui, NetworkEnv::Testnet),
+            (Chain::Aptos, NetworkEnv::Mainnet),
+            (Chain::Aptos, NetworkEnv::Testnet),
+            (Chain::BitcoinTestnet, NetworkEnv::Testnet),
+            (Chain::Tron, NetworkEnv::Mainnet),
+            (Chain::Tron, NetworkEnv::Testnet),
+        ];
+        for (c, env) in cases {
+            let url = resolve_default_rpc_url(c, &env, None, None).unwrap();
+            let meta_url = mpc_wallet_chains::metadata::metadata_for(c)
+                .and_then(|m| m.network(&env))
+                .map(|n| n.default_rpc.to_string())
+                .unwrap_or_else(|| panic!("metadata missing for {c:?} {env:?}"));
+            assert_eq!(url, meta_url, "drift for {c:?} {env:?}");
+        }
+    }
+
+    #[test]
+    fn parity_explorer_url_matches_metadata_for_live_chains() {
+        // Sample one tx hash per chain; the constructed URL must contain
+        // the metadata's explorer base URL.
+        let cases = [
+            (Chain::Ethereum, NetworkEnv::Mainnet, "0xabc"),
+            (Chain::Ethereum, NetworkEnv::Testnet, "0xabc"),
+            (Chain::Solana, NetworkEnv::Mainnet, "Abc"),
+            (Chain::Sui, NetworkEnv::Testnet, "Abc"),
+            (Chain::Aptos, NetworkEnv::Mainnet, "0xabc"),
+            (Chain::Tron, NetworkEnv::Mainnet, "abc"),
+            (Chain::BitcoinTestnet, NetworkEnv::Testnet, "abc"),
+        ];
+        for (c, env, h) in cases {
+            let url =
+                explorer_url(c, &env, h).unwrap_or_else(|| panic!("no url for {c:?} {env:?}"));
+            let base = mpc_wallet_chains::metadata::metadata_for(c)
+                .and_then(|m| m.network(&env))
+                .map(|n| n.explorer_base_url)
+                .unwrap_or_else(|| panic!("metadata missing for {c:?} {env:?}"));
+            assert!(url.starts_with(base), "{c:?} {env:?}: {url} !~ {base}");
+            assert!(url.contains(h), "{c:?} {env:?}: tx hash missing: {url}");
+        }
     }
 
     #[test]
