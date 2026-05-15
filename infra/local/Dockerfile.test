@@ -1,7 +1,8 @@
 # E2E test runner — builds workspace + runs ignored tests against live infra.
-# Requires Rust ≥ 1.85 (edition2024) for alloy-eip2930 transitive dep —
-# 1.82 pin caused E0658 builds on 2026-05-14.
-FROM rust:1.85-bookworm
+# Requires Rust ≥ 1.91 for alloy 1.7.3 transitive (alloy-eip2930 wants
+# edition2024 ≥ 1.85, alloy-* crates pin rust-version = 1.91). Host
+# toolchain is 1.93; pinning to 1.93 keeps container ≈ host.
+FROM rust:1.93-bookworm
 
 WORKDIR /app
 
